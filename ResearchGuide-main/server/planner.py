@@ -171,7 +171,7 @@ def direction_cards(uid: str, limit: int = 3, with_courses: bool = True, voice: 
         for c in cards:
             c["voice"] = "rules"
         return cards
-    return _voice_cards(cards, facts, quotes)
+    return _voice_cards(cards, facts, quotes, uid=uid)
 
 
 def _round_keys(d: dict[str, Any], round_id: str) -> list[str]:
@@ -232,7 +232,7 @@ def next_best_action(uid: str) -> dict[str, Any]:
             rationale="你刚完成初始对话，AI 对你的兴趣已有初步信号，但还没有确认任何方向。按产品原则，下一步是「探索」而不是「上课」。",
             rationale_facts=[f.id for f in facts if f.category == "interest"][:3],
             payload={"cards": direction_cards(uid, with_courses=False)},
-        ).to_dict(), facts)
+        ).to_dict(), facts, uid=uid)
 
     done = [t for t in tasks if t.status == "done"]
     if direction_state and not done:
@@ -243,7 +243,7 @@ def next_best_action(uid: str) -> dict[str, Any]:
             title=f"开始你在「{d['name']}」的第一个 20 分钟微任务",
             rationale=f"你已选择「{d['name']}」且尚未完成任何任务。行动大于信息——先用一个小任务验证这个方向对你的吸引程度。",
             payload={"direction": direction_state, "task_level": 1},
-        ).to_dict(), facts)
+        ).to_dict(), facts, uid=uid)
 
     # S2：有已完成任务 → 进阶 NBA
     d = DIRECTIONS.get(direction_state) or DIRECTIONS["ai"]
@@ -260,12 +260,13 @@ def next_best_action(uid: str) -> dict[str, Any]:
             {"action": "review_progress", "title": "回顾「AI 认识的我」，看看积累的证据"},
         ],
         payload={"direction": direction_state, "task_level": 2},
-    ).to_dict(), facts)
+    ).to_dict(), facts, uid=uid)
 
 
-def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dict[str, str | None]) -> list[dict[str, Any]]:
+def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dict[str, str | None],
+                 uid: str | None = None) -> list[dict[str, Any]]:
     """规则层已选出方向；模型只改写「为什么是你」，失败保留原文。"""
-    if not llm.enabled() or not cards:
+    if not llm.ready(uid) or not cards:
         for c in cards:
             c["voice"] = "rules"
         return cards
@@ -283,7 +284,7 @@ def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dic
         "学生原话：\n" + "\n".join(said) + "\n已记录：\n" + "\n".join(facts_txt)
         + "\n候选：\n" + "\n".join(lines)
         + '\n输出 JSON：{"items":[{"index":0,"why":"..."}]}',
-        timeout=28,
+        timeout=28, uid=uid,
     )
     items = (data or {}).get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -310,9 +311,9 @@ def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dic
     return cards
 
 
-def _speak(nba: dict[str, Any], facts: list[UserFact]) -> dict[str, Any]:
+def _speak(nba: dict[str, Any], facts: list[UserFact], uid: str | None = None) -> dict[str, Any]:
     """规则层决定行动；模型只改写标题和理由，失败保持原文。"""
-    if not llm.enabled():
+    if not llm.ready(uid):
         nba["voice"] = "rules"
         return nba
     quotes = [f"{f.category}:{f.value}" for f in facts[:6]]
@@ -322,7 +323,7 @@ def _speak(nba: dict[str, Any], facts: list[UserFact]) -> dict[str, Any]:
         "行动=" + nba.get("action", "") + "\n原标题=" + nba.get("title", "")
         + "\n原理由=" + nba.get("rationale", "") + "\n已知事实=\n- " + "\n- ".join(quotes)
         + '\n输出 JSON：{"title":"...","rationale":"..."}',
-        timeout=20,
+        timeout=20, uid=uid,
     )
     if not data:
         nba["voice"] = "rules"

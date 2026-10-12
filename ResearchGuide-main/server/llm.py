@@ -45,9 +45,50 @@ def config() -> dict:
     return {"enabled": bool(key), "base_url": base, "model": model, "has_key": bool(key)}
 
 
-def enabled() -> bool:
-    """配了密钥，并且这个请求的人今天还有额度（budget.py）。各功能在这里拿到 False 就走规则版。"""
-    return config()["enabled"] and budget.allowed()
+def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
+    """取出这一次该用的地址/模型/密钥。有 override 或用户自己的 key 时，不改 os.environ。
+    own=True 表示这把 key 是一次性传进来的或这个人自己上传的：花的是他自己的钱，不扣团队预算（budget.py）。"""
+    if override:
+        key = (override.get("api_key") or override.get("key") or "").strip()
+        base = (override.get("base_url") or "https://api.deepseek.com/v1").strip().rstrip("/")
+        model = (override.get("model") or "deepseek-flash").strip()
+        return {"enabled": bool(key), "base_url": base, "model": model, "has_key": bool(key), "key": key, "own": True}
+    if uid:
+        import store
+        secret = store.llm_secret(uid)
+        if secret and secret.get("key"):
+            return {
+                "enabled": True,
+                "base_url": (secret.get("base_url") or "https://api.deepseek.com/v1").rstrip("/"),
+                "model": (secret.get("model") or "deepseek-flash").strip(),
+                "has_key": True,
+                "key": secret["key"],
+                "own": True,
+            }
+    cfg = config()
+    key = (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or ""
+    ).strip()
+    return {**cfg, "key": key, "own": False}
+
+
+def enabled(uid: str | None = None) -> bool:
+    """配了密钥（服务器的，或这个人自己上传的），并且——用服务器密钥时——这个请求的人今天还有额度（budget.py）。
+    各功能在这里拿到 False 就走规则版。"""
+    cfg = resolve_cfg(uid)
+    return cfg["enabled"] and (cfg["own"] or budget.allowed())
+
+
+def ready(uid: str | None = None) -> bool:
+    """有没有能用的模型。兼容测试里把 enabled 桩成零参 lambda。"""
+    fn = enabled
+    try:
+        return fn(uid) if uid is not None else fn()
+    except TypeError:
+        return bool(fn())
 
 
 def apply_config(base_url: str, api_key: str, model: str, *, persist: bool = True) -> dict:
@@ -83,13 +124,13 @@ def _save_dotenv(base: str, key: str, model: str) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
-def probe() -> dict:
+def probe(*, uid: str | None = None, override: dict | None = None) -> dict:
     """发一次极短请求，确认密钥和地址可用。"""
-    cfg = config()
+    cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return {"ok": False, "error": "未配置 API key"}
-    with budget.unmetered():  # 管理员测连通，不算在任何人头上
-        text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20)
+    with budget.unmetered():  # 管理员测连通、学生试自己的密钥：都不算在任何人头上
+        text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20, uid=uid, override=override)
     if not text:
         return {"ok": False, "error": "请求失败，请检查地址、密钥和网络", "model": cfg["model"]}
     return {"ok": True, "model": cfg["model"], "base_url": cfg["base_url"], "sample": text[:40]}
@@ -131,16 +172,19 @@ def _deepseek_extras(cfg: dict, effort: str) -> dict:
 
 
 def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
-         json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000) -> str | None:
+         json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000,
+         uid: str | None = None, override: dict | None = None) -> str | None:
     """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次。
-    每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。"""
-    cfg = config()
+    用服务器密钥时每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。
+    用户自己的 key 只当参数用，绝不写进 os.environ，也不扣团队预算。"""
+    cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return None
-    if not budget.charge():
+    metered = not cfg["own"]
+    if metered and not budget.charge():
         print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
         return None
-    key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    key = cfg.get("key") or ""
     payload: dict = {
         "model": cfg["model"],
         "temperature": temperature,
@@ -160,7 +204,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     t0 = time.time()
     data, err = None, ""
     for attempt in range(2):
-        if attempt and not budget.charge():
+        if attempt and metered and not budget.charge():
             err += "; no budget to retry"
             break
         data, err = _post(url, key, payload, timeout)
@@ -207,9 +251,10 @@ def _clean(obj: Any) -> Any:
     return obj
 
 
-def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -> dict | None:
+def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json",
+              uid: str | None = None, override: dict | None = None) -> dict | None:
     text = chat(system + "\n只输出一个 JSON 对象，不要 Markdown 代码块。", user, temperature=0.2,
-                timeout=timeout, json_mode=True, tag=tag)
+                timeout=timeout, json_mode=True, tag=tag, uid=uid, override=override)
     if not text:
         return None
     cleaned = text.strip()
@@ -229,7 +274,8 @@ def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -
 
 
 def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: int = 60,
-                tag: str = "stream", max_tokens: int = 2000, status: dict | None = None):
+                tag: str = "stream", max_tokens: int = 2000, status: dict | None = None,
+                uid: str | None = None, override: dict | None = None):
     """逐块产出助手文本（OpenAI 兼容的 SSE）。
 
     只在调用方能接受纯文本时使用——结构化决策（TurnProposal）必须走 chat_json，
@@ -238,13 +284,13 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     和 chat 一样的约束：DeepSeek 关思考、max_tokens 封顶、总时限 LLM_TOTAL_SECONDS、回复字节有上限——
     原来这里都没有：每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。
     """
-    cfg = config()
+    cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return
-    if not budget.charge():
+    if not cfg["own"] and not budget.charge():  # 自己的 key 不扣团队预算
         print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
         return
-    key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    key = cfg.get("key") or ""
     payload: dict = {
         "model": cfg["model"],
         "temperature": temperature,

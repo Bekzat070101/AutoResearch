@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import threading
 import time
 import zipfile
@@ -231,15 +232,28 @@ def _source_job(src: dict[str, Any], direction: str, stage: int, keywords: str, 
     return job
 
 
-def _score(item: dict[str, Any], direction: str, stage: int, keywords: str) -> float:
+def _score(item: dict[str, Any], direction: str, stage: int, keywords: str,
+           chain: list[str] | None = None) -> float:
     hay = f"{item['name']} {item['excerpt']} {item['practices']} {item['todo']}"
+    hay_l = hay.lower()
     s = 0.0
-    if direction in item["directions"]:
+    if direction and direction in item["directions"]:
         s += 3
-    s += sum(1 for t in DIR_TERMS.get(direction, []) if t.lower() in hay.lower()) * 0.6
+    if direction:
+        s += sum(1 for t in DIR_TERMS.get(direction, []) if t.lower() in hay_l) * 0.6
     if keywords:
         parts = [k for k in keywords.replace("，", " ").replace(",", " ").split() if k]
-        s += sum(4 for k in parts if k.lower() in hay.lower())
+        s += sum(4 for k in parts if k.lower() in hay_l)
+    if chain:
+        for phrase in chain:
+            p = (phrase or "").strip()
+            if not p:
+                continue
+            if p.lower() in hay_l:
+                s += 6
+            else:
+                toks = [t for t in re.split(r"[\s/，,]+", p) if len(t) >= 2]
+                s += sum(2.5 for t in toks if t.lower() in hay_l)
     fit = item["stage_fit"] or []
     if fit:
         s += 2 if stage in fit else (-1.5 if min(abs(stage - f) for f in fit) > 1 else 0)
@@ -251,19 +265,24 @@ def _score(item: dict[str, Any], direction: str, stage: int, keywords: str) -> f
 
 
 def _pick_llm(cands: list[dict[str, Any]], direction: str, stage: int, keywords: str, node: str,
-              step: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
-    if not llm.enabled() or not cands:
+              step: dict[str, Any] | None = None, chain: list[str] | None = None,
+              uid: str | None = None) -> list[dict[str, Any]] | None:
+    if not llm.ready(uid) or not cands:
         return None
     lines = [
         f"{c['id']} | {c['source_name']} | {c['name']} | {c['difficulty'] or '-'} | {(c['deadline'] + ('（已截止，只能当练习）' if c['closed'] else '')) if c['deadline'] else '-'} | {(c['excerpt'] or c['todo'] or c['practices'])[:260]}"
         for c in cands
     ]
+    dir_label = direction_name(direction) if direction else "还不能对应到一个学院方向"
+    chain_line = f"用户从宽到窄说过：{' / '.join(chain)}\n" if chain else ""
     data = llm.chat_json(
         skills.load("project-scout"),
-        f"学生：方向={direction_name(direction)}；阶段={stage}（{STAGE_LABELS[stage]}）；关键词={keywords or '无'}；当前节点={node or '无'}\n"
+        f"学生：方向={dir_label}；阶段={stage}（{STAGE_LABELS[stage]}）；关键词={keywords or '无'}；当前节点={node or '无'}\n"
+        + chain_line
         + (f"路径步骤：第 {step['step']} 步「{step['name']}」；这一步做完要交：{step['done_when']}" + (f"；任务 4 建议的项目形态（参考）：{step['project_form']}" if step.get('project_form') else "") + "\n" if step else "路径步骤：无\n")
+        + "只能从下面的候选 id 里挑，不许造一条项目。\n"
         + "候选（id | 来源 | 标题 | 难度 | 截止 | 原文摘录）：\n" + "\n".join(lines),
-        timeout=40, tag="project-scout",
+        timeout=40, tag="project-scout", uid=uid,
     )
     items = (data or {}).get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -317,17 +336,20 @@ def _routes(reg: dict[str, Any], direction: str, used: set[str]) -> list[dict[st
     return out
 
 
-def search(uid: str, direction: str, stage: int, keywords: str = "", node: str = "", step_no: int = 0) -> dict[str, Any]:
+def search(uid: str, direction: str, stage: int, keywords: str = "", node: str = "", step_no: int = 0,
+           chain: list[str] | None = None) -> dict[str, Any]:
     reg = registry()
-    step = path_step(direction, int(step_no or 0))
+    step = path_step(direction, int(step_no or 0)) if direction else None
     if step:
         # 有任务 4 的路径时，以路径步骤为准：步骤决定项目阶段，步骤名当作「正在学的节点」
         stage = step["project_stage"]
         node = node or step["name"]
     stage = max(0, min(3, int(stage)))
     keywords = (keywords or "").strip()[:40]
+    chain = [c.strip() for c in (chain or []) if isinstance(c, str) and c.strip()][:8]
     sources = [s for s in reg["sources"]
-               if direction in (s.get("directions") or []) and s.get("access") != "unreachable"
+               if s.get("access") != "unreachable"
+               and (not direction or direction in (s.get("directions") or []))
                and (not s.get("stage_fit") or stage in s["stage_fit"] or any(abs(stage - f) <= 1 for f in s["stage_fit"]))]
     cands: list[dict[str, Any]] = []
     status: list[dict[str, Any]] = []
@@ -359,11 +381,15 @@ def search(uid: str, direction: str, stage: int, keywords: str = "", node: str =
     for c in cands:
         if c["name"] and c["url"]:
             uniq.setdefault(c["id"], c)
-    ranked = sorted(uniq.values(), key=lambda c: -_score(c, direction, stage, keywords))
-    ranked = [c for c in ranked if _score(c, direction, stage, keywords) > 0][:24]
-    chosen = _pick_llm(ranked, direction, stage, keywords, node, step)
+
+    def sc(c: dict[str, Any]) -> float:
+        return _score(c, direction, stage, keywords, chain or None)
+
+    ranked = sorted(uniq.values(), key=lambda c: -sc(c))
+    ranked = [c for c in ranked if sc(c) > 0][:24]
+    chosen = _pick_llm(ranked, direction, stage, keywords, node, step, chain=chain or None, uid=uid)
     voice = "llm"
-    if chosen is None:
+    if not chosen:
         voice = "rules"
         chosen = [_fallback_text(c) for c in ranked[:5]]
     for c in chosen:
@@ -380,12 +406,202 @@ def search(uid: str, direction: str, stage: int, keywords: str = "", node: str =
     if not chosen:
         empty_reason = ("这些来源里没有和这个方向、这个阶段对得上的公开项目。" if ranked or cands
                         else "这次所有来源都没有返回结果。") + "不补假项目：可以换个关键词，或照下面的路线自己去看。"
+    dir_name = direction_name(direction) if direction else "还不能对应到一个学院方向，先按你的描述找"
     return {
-        "query": {"direction": direction, "direction_name": direction_name(direction), "stage": stage,
+        "query": {"direction": direction, "direction_name": dir_name, "stage": stage,
                   "stage_label": STAGE_LABELS[stage], "keywords": keywords,
-                  "path_step": step["step"] if step else None, "path_step_name": step["name"] if step else ""},
+                  "path_step": step["step"] if step else None, "path_step_name": step["name"] if step else "",
+                  "chain": chain},
         "items": chosen, "sources": status, "routes": _routes(reg, direction, used),
         "empty_reason": empty_reason, "voice": voice, "retrieved_at": now_iso(),
+    }
+
+
+# ---------- 由宽到窄的问答 ----------
+
+IV_TTL = 24 * 3600
+_IV = TTLCache(IV_TTL, 2048)
+_FAKE_OPT = re.compile(r"某校课程|我猜|假项目")
+
+Q0 = {
+    "question": "你现在想先碰哪一类？",
+    "options": [
+        {"id": "proof", "label": "把式子或证明弄清楚"},
+        {"id": "code", "label": "写一点能跑的程序"},
+        {"id": "observe", "label": "做观察或小实验"},
+        {"id": "write", "label": "读材料并写清楚"},
+        {"id": "unknown", "label": "还不知道"},
+    ],
+}
+Q1 = {
+    "question": "更想要哪一种？",
+    "options": [
+        {"id": "closed", "label": "有标准答案的练习"},
+        {"id": "open", "label": "自己定义对错的问题"},
+        {"id": "unknown", "label": "还不知道"},
+    ],
+}
+Q2 = {
+    "question": "有没有必须用上的课或工具？",
+    "options": [
+        {"id": "has", "label": "有，我下面写"},
+        {"id": "none", "label": "没有"},
+        {"id": "unknown", "label": "还不知道"},
+    ],
+}
+
+
+def _iv_key(uid: str, sid: str) -> str:
+    return f"{uid}:{sid}"
+
+
+def _new_sid(uid: str) -> str:
+    raw = f"{uid}|{time.time()}|{threading.get_ident()}"
+    return "iv_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _valid_interview_q(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("done") is True:
+        return True
+    q = str(data.get("question") or "").strip()
+    opts = data.get("options")
+    if not q or not isinstance(opts, list) or not (2 <= len(opts) <= 5):
+        return False
+    for o in opts:
+        if not isinstance(o, dict):
+            return False
+        lab = str(o.get("label") or "").strip()
+        if not lab or len(lab) > 24 or _FAKE_OPT.search(lab):
+            return False
+        if not str(o.get("id") or "").strip():
+            return False
+    return True
+
+
+def _label_of(option_id: str, answer: str, options: list[dict[str, Any]]) -> str:
+    if option_id == "unknown":
+        return "还不知道"
+    if option_id == "done":
+        return ""
+    if option_id:
+        hit = next((o for o in options if o.get("id") == option_id), None)
+        if hit:
+            return str(hit.get("label") or option_id)
+    return (answer or "").strip()[:40]
+
+
+def _chain_to_query(chain: list[str], answers: list[dict[str, str]]) -> dict[str, Any]:
+    facets: list[str] = []
+    direction = ""
+    first = (answers[0] or {}).get("option_id") if answers else ""
+    if first == "proof":
+        direction, facets = "math", ["proof"]
+    elif first == "code":
+        direction, facets = "se", ["code"]
+    elif first == "observe":
+        facets = ["observe"]
+    elif first == "write":
+        facets = ["write"]
+    for a in answers[1:]:
+        oid = a.get("option_id") or ""
+        if oid == "closed":
+            facets.append("undergraduate")
+        elif oid == "open":
+            facets.append("open")
+    keywords = ""
+    for a in reversed(answers):
+        txt = (a.get("answer") or "").strip()
+        if txt:
+            keywords = txt[:40]
+            break
+    return {"direction": direction, "stage": 0, "keywords": keywords, "facets": facets}
+
+
+def _interview_done(sess: dict[str, Any]) -> dict[str, Any]:
+    sess["done"] = True
+    _IV.set(_iv_key(sess["uid"], sess["id"]), sess)
+    return {
+        "done": True,
+        "session_id": sess["id"],
+        "chain": list(sess["chain"]),
+        "query": _chain_to_query(sess["chain"], sess["answers"]),
+    }
+
+
+def _next_interview_q(sess: dict[str, Any]) -> dict[str, Any]:
+    if not llm.ready(sess.get("uid")):
+        if sess["turns"] == 1:
+            return dict(Q1)
+        if sess["turns"] == 2:
+            return dict(Q2)
+        return {"done": True}
+    data = llm.chat_json(
+        "你在帮本科生收窄「想练哪一类项目」。只返回 JSON："
+        '{"question":"一句问题","options":[{"id":"a","label":"≤24字"}],"done":false}。'
+        "必须 2–5 个选项。允许不知道。不许发明课程名、项目名、老师。材料不够就 done=true。",
+        "已经说过：" + " / ".join(sess["chain"]),
+        timeout=20, tag="project-interview", uid=sess.get("uid"),
+    )
+    if not _valid_interview_q(data):
+        if sess["turns"] == 1:
+            return dict(Q1)
+        if sess["turns"] == 2:
+            return dict(Q2)
+        return {"done": True}
+    if data.get("done") is True:
+        return {"done": True}
+    return {
+        "question": str(data["question"]).strip(),
+        "options": [{"id": str(o["id"]).strip(), "label": str(o["label"]).strip()} for o in data["options"]],
+    }
+
+
+def interview(uid: str, session_id: str = "", answer: str = "", option_id: str = "") -> dict[str, Any]:
+    sid = (session_id or "").strip()
+    option_id = (option_id or "").strip()
+    answer = (answer or "").strip()[:80]
+    if not sid:
+        sid = _new_sid(uid)
+        sess = {"uid": uid, "id": sid, "turns": 0, "chain": [], "answers": [],
+                "last_options": list(Q0["options"]), "done": False}
+        _IV.set(_iv_key(uid, sid), sess)
+        return {
+            "session_id": sid, "done": False, "question": Q0["question"],
+            "options": list(Q0["options"]), "allow_free": True, "unknown_ok": True, "chain": [],
+        }
+    hit, sess = _IV.lookup(_iv_key(uid, sid))
+    if not hit:
+        raise KeyError("问答已过期，请重新开始")
+    if sess.get("uid") != uid:
+        raise PermissionError("不是你的问答")
+    if sess.get("done"):
+        return _interview_done(sess)
+    label = _label_of(option_id, answer, sess.get("last_options") or Q0["options"])
+    if option_id == "done" or (not label and not option_id and not answer):
+        if option_id == "done":
+            return _interview_done(sess)
+        return {
+            "session_id": sid, "done": False, "question": Q0["question"] if not sess["turns"] else "还可以再说具体一点。",
+            "options": list(sess.get("last_options") or Q0["options"]),
+            "allow_free": True, "unknown_ok": True, "chain": list(sess["chain"]),
+        }
+    if label:
+        sess["chain"].append(label)
+        sess["answers"].append({"option_id": option_id, "answer": answer})
+        sess["turns"] += 1
+    if sess["turns"] >= 5 or (not llm.ready(sess.get("uid")) and sess["turns"] >= 3):
+        return _interview_done(sess)
+    nxt = _next_interview_q(sess)
+    if nxt.get("done"):
+        return _interview_done(sess)
+    sess["last_options"] = nxt["options"]
+    _IV.set(_iv_key(uid, sid), sess)
+    return {
+        "session_id": sid, "done": False, "question": nxt["question"],
+        "options": nxt["options"], "allow_free": True, "unknown_ok": True,
+        "chain": list(sess["chain"]),
     }
 
 

@@ -66,6 +66,13 @@
 | 反馈 | `.feedback` + `.rubric-item.pass/.fail` + `.why-box` | 分数写成「3 / 3 条做到」；下一步只指一处 |
 | 建议卡 | `.nba-card` | 今日唯一重点 |
 | 首页 | `.land` + `.snap-inner` + `.land-steps` + `.land-skip` | 每屏一色的发光粒子（`TONES` / `FIG_ANIMS`），左右对调，钉住文字淡入 |
+| 房间引导 | `.room-guide` | 页头下 3 步，可关掉；不是弹窗 |
+| 作业题干 | `.task-stem` + `.task-ask` + `.task-fold` | 先看见已知 / 求 / 交；细则点开 |
+| 论文表 | `.paper-table` | 阅读区里的真表格，窄屏可横滑 |
+| 定位说明 | `.pos-lead` | 每个子页一句人话 + 例子 + 做完去哪 |
+| 竞争地图卡 | `.map-card` | 一条开放问题一张卡，不要五列表格 |
+| 登录页签 | `.login-tabs` + `.login-tab` + `.login-body` | 首页进入：登录 / 注册。打开页面不沿用上次登录 |
+| 我的密钥 | `.connect-box`（复用） | 学生填自己的 DeepSeek；管理员「服务器共用模型」另走 `/api/llm/connect` |
 
 **事实类别色**：background 蓝 · interest 主色 · capability 金 · preference 紫 · experience 珊瑚（只用作圆点）。
 

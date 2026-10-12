@@ -118,6 +118,7 @@ class _Watch:
         self.killed = False
         self.done = False
         self._dups: list[socket.socket] = []
+        self._socks: list[socket.socket] = []
         self._lock = threading.Lock()
 
     def left(self) -> float:
@@ -131,28 +132,40 @@ class _Watch:
         return _resolve(host, port, min(left, self.idle) if self.idle else left)
 
     def adopt(self, sock: socket.socket) -> None:
-        """登记 socket 的副本：TLS 包装会摘走原对象，副本指向同一条连接，到点 shutdown 照样有效。"""
-        dup = sock.dup()
+        """登记原 socket 和副本。TLS 包装会摘走原对象，副本指向同一条连接；
+        Windows 上只 shutdown 副本拦不住正在读响应头的线程，所以原件也要关。"""
+        try:
+            dup = sock.dup()
+        except OSError:
+            dup = None
         with self._lock:
-            self._dups.append(dup)
+            self._socks.append(sock)
+            if dup is not None:
+                self._dups.append(dup)
             killed = self.killed
         if killed:
-            _shut(dup)
+            _abort(sock)
+            if dup is not None:
+                _abort(dup)
         left = max(0.01, self.left())
         sock.settimeout(min(left, self.idle) if self.idle else left)  # 每次收发最多等这么久；总时限由看门狗管
 
     def kill(self) -> None:
         with self._lock:
             self.killed = True
-            dups = list(self._dups)
-        for dup in dups:
-            _shut(dup)
+            socks = list(self._socks) + list(self._dups)
+        for s in socks:
+            _abort(s)
 
     def close(self) -> None:
         with self._lock:
             dups, self._dups = self._dups, []
+            self._socks = []
         for dup in dups:
-            dup.close()
+            try:
+                dup.close()
+            except OSError:
+                pass
 
 
 def _shut(sock: socket.socket) -> None:
@@ -160,6 +173,15 @@ def _shut(sock: socket.socket) -> None:
         sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass  # 连接已经断了
+
+
+def _abort(sock: socket.socket) -> None:
+    """shutdown 之后再 close：Windows 上只关副本、不关原件时，慢响应头会把线程挂满整个滴完。"""
+    _shut(sock)
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _connect(watch: _Watch, address: tuple, timeout: Any = None, source_address: Any = None, **_: Any) -> socket.socket:

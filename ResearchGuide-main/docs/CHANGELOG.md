@@ -6,6 +6,110 @@
 
 ---
 
+## [2026-10-12] [FIX] 并入 main（w67–w70：四栏引导、作业正式题与提示、项目问答、研读真表、定位人话；注册登录、每人一把 DeepSeek、进度入库）
+
+- 变更内容：把上游 5898874、743b5e2、0d188ae 并进本分支。拿过来的：四栏「这一页先做什么」、作业正式题（已知 / 求 / 交）和「卡住了要提示」、项目先问答再按整条链检索、研读真表和一张卡出矩阵、定位序号人话和卡片地图、Windows 慢响应头按总时限断开、云端依赖按 wheel 清单重装；用户名 + 密码注册 / 登录 / 升级（`/api/auth/register`、`signin`、`upgrade`）、每人一把 DeepSeek（`user_secrets`，调用按 uid 带 key）、作业草稿 / 项目路径 / 研读工具包进库按人隔离。和本分支对接：模型预算（budget.py）只管服务器的密钥——用自己密钥的人（`llm.resolve_cfg` 给 `own=True`）不问额度也不扣；注册了用户名的人按「能找回的账号」算 `LLM_DAILY_USER`，不按访客；`/api/auth/me` 同时给 `llm_left` 和 `has_llm_key`；流式回复同时带 `status` 和 `uid`；`llm.ready(uid)` 兼容测试里零参的 `enabled` 桩；导出仍在一个读事务里，多出 `username` 一列；删号和墓碑触发器按列自动覆盖新表。登录页：微信 / 账号登录 / 注册三个标签，访客入口照旧要先勾隐私说明，密码登录后隐私说明过期会再问一次；「记录」页多「设用户名密码」（访客和微信号都能补）和「我的 DeepSeek」；用户菜单和侧栏模型钮也能开「我的 DeepSeek」；已完成的作业用上游的折叠面板，刷新后没有评阅的照样去服务器取。没拿的两条上游界面决定（w69「只留登录 / 注册、不再给访客入口」、w70「登录只记在内存里、打开页面重新登录」）：本分支的访客号、停着的另一个号、跨标签页同步、草稿都靠这台浏览器里存着的会话，改成每次重新登录等于访客的记录一刷新就没了；要跟上游走的话改 `boot()` 开头和 `setSession` / `clearSession` 即可。服务器上的草稿写进带 uid 的本地键。隐私说明补上用户名、上传的密钥、草稿和路径进度（版本 2026-10-12）。界面版本 w71。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：server/llm.py、server/budget.py、server/auth.py、server/store.py、server/dialogue.py、server/workbench.py、web/js/app.js、web/index.html
+- 决策来源：陈浩文（并入上游，保留本分支的会话和访客模型）
+- 登记人：陈浩文
+
+## [2026-10-12] [UX] 打开页面必须重新登录
+
+- 变更内容：登录只记在这一页的内存里，不再写入 `localStorage`。刷新或重新打开都要重新登录。界面 w70。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-12] [UX] 进入只留注册和登录，不再劝访客升级
+
+- 变更内容：首页进入只留「登录 / 注册」。访客接口还在，页面不再出现「先看看」和「升级成可找回的账号」。界面 w69。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-12] [FEAT] 注册登录、每人一把 DeepSeek、进度按人入库
+
+- 变更内容：用户名+密码注册/登录/访客升级。每人可上传自己的 DeepSeek，探测后写入同一份库的 `user_secrets`，调用按 uid 带 key，不写 `os.environ`。作业草稿、项目路径、研读工具包进库，按 `user_id` 隔离。访客入口形状不变。界面 w68。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、docs/DESIGN_SPEC.md
+- 影响模块：server/store.py、server/auth.py、server/llm.py、server/main.py、web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（产品部署要求 + 账号入库）
+- 登记人：助手
+
+## [2026-10-12] [DOCS] 三套环境各用各的库
+
+- 变更内容：DEPLOY 写清开发/测试/生产三份库；生产 `QIYAN_DB` 要指到会留的盘；一人一份 sqlite 不做。
+- 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md
+- 影响模块：文档
+- 决策来源：邬程灿（产品部署要求）
+- 登记人：助手
+
+## [2026-10-12] [FIX] 云端依赖按 wheel 清单重装，避免 pydantic 打架
+
+- 变更内容：bootstrap 用 vendor_wheels 文件名当缓存标记，清单变了就清空 `/tmp/pydeps` 再解。避免新旧 pydantic-core 叠在一起导致函数起不来。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/bootstrap
+- 决策来源：邬程灿（发布 w67 到 Pages / 函数计算）
+- 登记人：助手
+
+## [2026-10-12] [FIX] Windows 上慢响应头也要按总时限断开
+
+- 变更内容：看门狗到点后同时 shutdown/close 原 socket，不只关副本。响应头慢滴时，Windows 不再把线程挂到整段头写完。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/limits.py
+- 决策来源：邬程灿（problem-10-12 总验收，run_existing_tests.py）
+- 登记人：助手
+
+## [2026-10-12] [UX] 定位改成序号人话 + 卡片地图
+
+- 变更内容：五个 tab 改成「1 我有什么」等人话；每页一句 `.pos-lead`；竞争地图改成卡片；没有边时下注回「我有什么」。界面 w67。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 项目先问答再按整条链检索
+
+- 变更内容：找项目第一屏改成由宽到窄的选项问答；旧方向芯片收到「改条件」。检索可带 `chain`，整句权重大于单关键词；空方向不再把候选打成 0。新路径 `POST /api/projects/interview`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/projects.py、server/main.py、web/js/app.js
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 研读跳转加大、正文见表、一张卡出矩阵
+
+- 变更内容：章节跳转改成 36px 描边按钮。HTML 表抽成 `tables` + `[[table:tN]]`，阅读区渲染真表；抽失败给原文链接。矩阵改为 1 张过线卡即可。界面 w67。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：server/arxiv.py、server/reading.py、server/main.py、web/js/app.js、web/css/styles.css
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [FEAT] 作业正式题 + 卡住了要提示
+
+- 变更内容：新生成作业带 `formal`（已知 / 求 / 交）；校验失败走骨架，不编课名。未完成作业可 `POST /api/tasks/{tid}/hint`，拒绝替写提交全文。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/workbench.py、server/main.py、server/schemas.py、web/js/app.js
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 作业先看题，细则点开
+
+- 变更内容：作业主面板改成题干（已知 / 求 / 交）+ 提交；题目说明、怎样算做到、评阅、下一步、路径说明收到按钮后面。已完成默认打开评阅。界面 w66。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 四栏加「这一页先做什么」
+
+- 变更内容：作业 / 项目 / 研读 / 定位页头下加三步引导，可关掉；走过主流程的人默认只留「为什么是这几步」。页头副题收短。界面 w65。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
 ## [2026-10-10] [FIX] Codex 七轮复查、两百人压测、学生全流程走查，并入 main（五栏 + w64）：权限、预算、注入、并发写、可用性、数据正确性
 
 - 变更内容：Codex（gpt-6-astra）对 #16/#17 和全站做了四轮审查，逐条复现后修掉。权限：uid 核对不再看 Content-Type 大小写；微信只认安全模式、同一条消息不能配两次登录、猜数字先查限额。预算：模型调用按人/按全站每天封顶，访客、没同意隐私说明的、匿名接口不调（budget.py）。注入：前端所有 innerHTML 先消毒，几处模型/用户文本逐处转义。并发：同一个人的改动一件一件来（userlock.py，异步等锁、每人排队上限），流式对话在自己的线程里跑完再放锁；删号后在路上的请求写不回来（墓碑 + 触发器）；评阅记录按当时的画像。可用性：MCP 不卡事件循环，论文抓取有上限、没人等的就取消，/api/papers 要登录。数据：成绩单按学期替换、「不及格」保留、半学分照算、无穷大学分拒收并修老库；改方向换键而不是换标签；替换写入新来源和可信度；重复结论和重复卡都对账；任务反馈存库；导出在一个读事务里。前端：换人整页重载、草稿按人存、只在明确退出时清；对话页晚到的渲染不覆盖别的页。压测（模拟两百人同时用）：等模型的接口挪进自己的线程池（workpool.py），公用池留给普通读写，原来两百人等模型时连健康检查都要排五秒；浏览器走了，还在排队的那轮对话撤掉、马上放锁，排队有上限（满了回 503）；同一出口地址一小时 600 次登录（原来 30，一个机房开不了号），全体访客另有每天合计的模型额度；上游重试也扣额度；服务关闭时等在跑的那一轮写完。全流程走查：访客绑微信、这个微信却已有账号时先问，访客号的会话留在这台浏览器上可以切回去（原来直接切走，访客的记录再也进不去）；交成果的评阅按一次读出的项目和画像记，项目页带上它属于的画像；模型给的任务格式不对（「20分钟」）照样建出任务，建不出来行动也不记成已接受；对话生成中切走再回来，新页面接上那一轮；切画像后方向重新取。

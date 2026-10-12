@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -290,6 +292,41 @@ CREATE INDEX IF NOT EXISTS idx_actions_user ON actions(user_id);
 CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
 CREATE INDEX IF NOT EXISTS idx_revisions_user ON fact_revisions(user_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_user ON decisions(user_id);
+
+-- 注册名 / 每人一把模型密钥 / 工具包与草稿进度：都在这一份库里按 user_id 隔离。
+CREATE TABLE IF NOT EXISTS user_secrets (
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'llm',
+  wrapped TEXT NOT NULL,
+  tail TEXT NOT NULL DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, kind)
+);
+CREATE TABLE IF NOT EXISTS user_prefs (
+  user_id TEXT PRIMARY KEY,
+  kit_id TEXT NOT NULL DEFAULT '',
+  data TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS drafts (
+  user_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, task_id)
+);
+CREATE TABLE IF NOT EXISTS trails (
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  data TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_user ON user_secrets(user_id);
+CREATE INDEX IF NOT EXISTS idx_drafts_user ON drafts(user_id);
+CREATE INDEX IF NOT EXISTS idx_trails_user ON trails(user_id);
 """
 
 # 老库补列：SQLite 的 ADD COLUMN 是安全操作，已存在就跳过。
@@ -311,6 +348,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "consent_at", "ALTER TABLE users ADD COLUMN consent_at TEXT"),
     ("users", "consent_version", "ALTER TABLE users ADD COLUMN consent_version TEXT NOT NULL DEFAULT ''"),
     ("users", "claimed_at", "ALTER TABLE users ADD COLUMN claimed_at TEXT"),
+    ("users", "username", "ALTER TABLE users ADD COLUMN username TEXT"),
+    ("users", "password_salt", "ALTER TABLE users ADD COLUMN password_salt TEXT"),
+    ("users", "password_hash", "ALTER TABLE users ADD COLUMN password_hash TEXT"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
@@ -318,6 +358,7 @@ _AFTER_MIGRATIONS = [
     # 修老库：无穷大、负数、离谱的学分清零（读出来序列化会 500）
     "UPDATE enrollments SET credits=0 WHERE NOT (credits BETWEEN 0 AND 50)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wechat ON users(wechat_openid) WHERE wechat_openid IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL AND username != ''",
 ]
 
 
@@ -369,6 +410,243 @@ def get_user(uid: str) -> dict[str, Any] | None:
     with _conn() as c:
         row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     return dict(row) if row else None
+
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{2,24}$")
+PBKDF2_ROUNDS = 210000
+
+
+def normalize_username(raw: str) -> str:
+    return (raw or "").strip().lower()
+
+
+def valid_username(raw: str) -> bool:
+    return bool(USERNAME_RE.fullmatch((raw or "").strip()))
+
+
+def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    salt = salt or secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), PBKDF2_ROUNDS
+    ).hex()
+    return salt, hashed
+
+
+def password_ok(password: str, salt: str | None, hashed: str | None) -> bool:
+    if not salt or not hashed:
+        return False
+    _, got = hash_password(password, salt)
+    return hmac.compare_digest(got, hashed)
+
+
+def user_by_username(username: str) -> dict[str, Any] | None:
+    name = normalize_username(username)
+    if not name:
+        return None
+    with _conn() as c:
+        row = c.execute("SELECT * FROM users WHERE username=?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def register_user(username: str, password: str, nickname: str) -> dict[str, Any]:
+    name = normalize_username(username)
+    nick = (nickname or username).strip()[:24] or name
+    salt, hashed = hash_password(password)
+    uid, token, now = new_id(), new_id(), now_iso()
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at, username, password_salt, password_hash)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (uid, nick, token, "{}", now, now, name, salt, hashed),
+        )
+    return {"uid": uid, "token": token, "nickname": nick, "username": name}
+
+
+def upgrade_user(uid: str, username: str, password: str) -> dict[str, Any]:
+    name = normalize_username(username)
+    u = get_user(uid)
+    if not u:
+        raise KeyError("user")
+    if u.get("username"):
+        raise ValueError("already")
+    salt, hashed = hash_password(password)
+    try:
+        with _LOCK, _conn() as c:
+            cur = c.execute(
+                "UPDATE users SET username=?, password_salt=?, password_hash=? "
+                "WHERE id=? AND (username IS NULL OR username='')",
+                (name, salt, hashed, uid),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("already")
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("taken") from exc
+    out = get_user(uid)
+    if not out:
+        raise KeyError("user")
+    return out
+
+
+def _wrap_key() -> bytes:
+    secret = (os.environ.get("QIYAN_SECRET") or os.environ.get("LLM_API_KEY") or "qiyan-dev-wrap").encode()
+    return hashlib.sha256(secret).digest()
+
+
+def wrap_secret(plaintext: str) -> str:
+    raw = (plaintext or "").encode("utf-8")
+    key = _wrap_key()
+    out = bytearray(len(raw))
+    i = ctr = 0
+    while i < len(raw):
+        block = hashlib.sha256(key + ctr.to_bytes(4, "big")).digest()
+        for b in block:
+            if i >= len(raw):
+                break
+            out[i] = raw[i] ^ b
+            i += 1
+        ctr += 1
+    return out.hex()
+
+
+def unwrap_secret(hexed: str) -> str:
+    raw = bytes.fromhex(hexed)
+    key = _wrap_key()
+    out = bytearray(len(raw))
+    i = ctr = 0
+    while i < len(raw):
+        block = hashlib.sha256(key + ctr.to_bytes(4, "big")).digest()
+        for b in block:
+            if i >= len(raw):
+                break
+            out[i] = raw[i] ^ b
+            i += 1
+        ctr += 1
+    return bytes(out).decode("utf-8")
+
+
+def save_llm_secret(uid: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
+    tail = api_key[-4:] if len(api_key) >= 4 else api_key
+    now = now_iso()
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO user_secrets(user_id, kind, wrapped, tail, base_url, model, updated_at)"
+            " VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(user_id, kind) DO UPDATE SET "
+            "wrapped=excluded.wrapped, tail=excluded.tail, base_url=excluded.base_url, "
+            "model=excluded.model, updated_at=excluded.updated_at",
+            (uid, "llm", wrap_secret(api_key), tail, base_url, model, now),
+        )
+    return {"has_key": True, "tail": tail, "base_url": base_url, "model": model}
+
+
+def llm_secret_meta(uid: str) -> dict[str, Any]:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT tail, base_url, model FROM user_secrets WHERE user_id=? AND kind='llm'",
+            (uid,),
+        ).fetchone()
+    if not row:
+        return {"has_key": False, "tail": "", "base_url": "", "model": ""}
+    return {"has_key": True, "tail": row["tail"], "base_url": row["base_url"], "model": row["model"]}
+
+
+def llm_secret(uid: str) -> dict[str, str] | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT wrapped, base_url, model FROM user_secrets WHERE user_id=? AND kind='llm'",
+            (uid,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        key = unwrap_secret(row["wrapped"])
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not key:
+        return None
+    return {"key": key, "base_url": row["base_url"], "model": row["model"]}
+
+
+def delete_llm_secret(uid: str) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("DELETE FROM user_secrets WHERE user_id=? AND kind='llm'", (uid,))
+
+
+def get_prefs(uid: str) -> dict[str, Any]:
+    with _conn() as c:
+        row = c.execute("SELECT kit_id, data FROM user_prefs WHERE user_id=?", (uid,)).fetchone()
+    extra: dict[str, Any] = {}
+    if row:
+        try:
+            extra = json.loads(row["data"] or "{}")
+        except json.JSONDecodeError:
+            extra = {}
+        if not isinstance(extra, dict):
+            extra = {}
+        return {"kit_id": row["kit_id"] or "", **extra}
+    return {"kit_id": ""}
+
+
+def set_prefs(uid: str, kit_id: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    cur = get_prefs(uid)
+    if kit_id is not None:
+        cur["kit_id"] = kit_id
+    if extra:
+        for k, v in extra.items():
+            if k != "kit_id":
+                cur[k] = v
+    kit = str(cur.get("kit_id") or "")
+    blob = {k: v for k, v in cur.items() if k != "kit_id"}
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO user_prefs(user_id, kit_id, data, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET kit_id=excluded.kit_id, data=excluded.data, updated_at=excluded.updated_at",
+            (uid, kit, json.dumps(blob, ensure_ascii=False), now_iso()),
+        )
+    return get_prefs(uid)
+
+
+def get_draft(uid: str, task_id: str) -> str:
+    with _conn() as c:
+        row = c.execute("SELECT text FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id)).fetchone()
+    return row["text"] if row else ""
+
+
+def set_draft(uid: str, task_id: str, text: str) -> str:
+    text = text or ""
+    if not text.strip():
+        with _LOCK, _conn() as c:
+            c.execute("DELETE FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id))
+        return ""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO drafts(user_id, task_id, text, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
+            (uid, task_id, text, now_iso()),
+        )
+    return text
+
+
+def get_trail(uid: str, project_id: str) -> dict[str, Any]:
+    with _conn() as c:
+        row = c.execute("SELECT data FROM trails WHERE user_id=? AND project_id=?", (uid, project_id)).fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row["data"] or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_trail(uid: str, project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO trails(user_id, project_id, data, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id, project_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (uid, project_id, json.dumps(data, ensure_ascii=False), now_iso()),
+        )
+    return get_trail(uid, project_id)
 
 
 # ---------- 账号：微信、会话、删号与导出 ----------
@@ -544,12 +822,20 @@ def _user_tables(c: sqlite3.Connection) -> list[str]:
 def export_user(uid: str) -> dict[str, Any]:
     with _conn() as c:
         c.execute("BEGIN")  # 整个导出看同一个快照：原来逐表查，中途切画像会拼出两份画像的状态（Codex 复现）
-        user = c.execute("SELECT id, nickname, wechat_openid, created_at, consent_at, consent_version, onboard_state"
+        user = c.execute("SELECT id, nickname, username, wechat_openid, created_at, consent_at, consent_version, onboard_state"
                          " FROM users WHERE id=?", (uid,)).fetchone()
         out: dict[str, Any] = {"user": dict(user) if user else None}
         for t in _user_tables(c):
             if t == "sessions":
                 continue  # 令牌哈希不是用户的数据，导出了也没用
+            if t == "user_secrets":
+                out[t] = [
+                    dict(r) for r in c.execute(
+                        "SELECT user_id, kind, tail, base_url, model, updated_at FROM user_secrets WHERE user_id=?",
+                        (uid,),
+                    )
+                ]
+                continue
             out[t] = [dict(r) for r in c.execute(f"SELECT * FROM {t} WHERE user_id=?", (uid,))]
     return out
 

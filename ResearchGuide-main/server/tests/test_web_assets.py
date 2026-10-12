@@ -130,6 +130,24 @@ def test_a_task_answers_the_three_questions():
     for label in ("① 做什么", "② 交什么", "③ 怎样算做到"):
         assert label in js, f"任务里少了「{label}」这一段"
     assert "task.deliverable" in js, "没有渲染交付物（deliverable）"
+    assert "怎样算做到" in js
+
+
+def test_task_panel_hides_rubric_behind_toggle():
+    """评分标准 / 反馈默认收起，点开才展开。"""
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "function taskFolds" in js
+    assert "task-fold" in js
+    assert "怎样算做到" in js
+    # 未完成路径不应默认把评阅摊开
+    assert "renderFeedbackInto" in js
+
+
+def test_matrix_copy_no_longer_asks_for_three_cards():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "再交 3" not in js
+    assert "先交一张过线的阅读卡" in js
+    assert "格子只来自你自己的过线卡" in js
 
 
 def test_the_mark_done_button_is_gone():
@@ -292,7 +310,10 @@ def test_new_class_names_all_have_rules():
                 "ws-bar-main", "ws-bar-side", "ws-bar-label", "ws-lead",
                 "app-top", "dir-chip", "user-menu-btn", "user-menu",
                 "snap-inner", "land-skip", "land-steps", "land-hint",
-                "land-closing", "snap-no"):
+                "land-closing", "snap-no", "room-guide",
+                "task-stem", "task-fold", "task-ask",
+                "paper-table", "sec-jump", "pos-lead", "map-card", "pos-tab",
+                "login-tabs", "login-tab", "login-body"):
         # 用 (?![\w-]) 而不是 \b：类名里允许 `-`，所以 `\b` 会把
         # `.chat-next-nonexistent` 也当成 `.chat-next` 存在——那样把规则改名
         # 测试照样绿。（这个弱点是我回滚验证时发现的。）

@@ -6,6 +6,7 @@ export QIYAN_DB="${QIYAN_DB:-/tmp/qiyan.db}"
 python3 -V
 python3 - <<'PY'
 import pathlib
+import shutil
 import sys
 import zipfile
 
@@ -14,11 +15,19 @@ root = pathlib.Path("/tmp/pydeps")
 root.mkdir(parents=True, exist_ok=True)
 marker = root / ".ok"
 tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-if not marker.exists():
+wheels = sorted(pathlib.Path("vendor_wheels").glob("*.whl"))
+want = "\n".join(w.name for w in wheels)
+if not marker.exists() or marker.read_text() != want:
     n = 0
-    wheels = list(pathlib.Path("vendor_wheels").glob("*.whl"))
     if not wheels:
         raise SystemExit("no vendor_wheels")
+    for child in root.iterdir():
+        if child.name == ".ok":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
     for w in wheels:
         name = w.name
         if (
@@ -32,7 +41,7 @@ if not marker.exists():
     print("wheels", n, "tag", tag, flush=True)
     if n == 0:
         raise SystemExit(f"no wheels for {tag}")
-    marker.write_text(str(n))
+    marker.write_text(want)
 sys.path.insert(0, str(root))
 import fastapi
 import pydantic

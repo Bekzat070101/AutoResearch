@@ -177,7 +177,7 @@ def test_path_step_sets_stage_and_is_passed_to_the_model(monkeypatch):
     monkeypatch.setattr(projects, "_collect", lambda src, d, st, kw: ([dict(cand)], {"id": src["id"], "name": src["name"], "ok": True, "count": 1}))
     seen = {}
 
-    def fake_pick(cands, direction, stage, keywords, node, step=None):
+    def fake_pick(cands, direction, stage, keywords, node, step=None, chain=None, uid=None):
         seen.update(stage=stage, node=node, step=step)
         return None
 

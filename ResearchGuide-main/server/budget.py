@@ -4,12 +4,13 @@
 模型钱是团队的（DeepSeek 密钥在服务器上）。原来任何人开个访客号就能无限次触发模型调用：
 六十次交任务、几次对话就是七十次真实调用，没人同意过隐私说明也照样调。现在：
 - 谁在调：auth.guard 在每个请求开头 bind(uid)；公开接口 bind 成匿名，匿名一律不许调。
-- 上限（每天，北京时间）：全站 LLM_DAILY_TOTAL、绑了微信的人 LLM_DAILY_USER、访客 LLM_DAILY_GUEST，
+- 上限（每天，北京时间）：全站 LLM_DAILY_TOTAL、绑了微信或注册了用户名的人 LLM_DAILY_USER、访客 LLM_DAILY_GUEST，
   另外全体访客加起来 LLM_DAILY_GUESTS：访客号谁都能开（同一个出口地址一小时几百个，见 auth.PER_IP_HOUR），
   刷一堆访客号最多花掉这一份，花不到绑了微信的人头上。
 - 没同意当前版本隐私说明的人不调：对话和成绩单会发给模型服务，这一条必须先同意。
 - 不在 HTTP 请求里（脚本、测试直接调函数）不计不限：上下文变量是 None。
 llm.enabled() 先问这里有没有额度（各功能本来就会在模型不可用时回退规则），llm.chat 每次真正请求上游前扣一笔（重试也扣）。
+上传了自己 DeepSeek 密钥的人（store.user_secrets）用自己的钱，这里不管：llm.resolve_cfg 给的 own=True 就不问也不扣。
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ def _caps(uid: str) -> dict[str, int]:
     u = store.get_user(uid)
     if not u or u.get("consent_version") != auth.PRIVACY_VERSION:
         return {uid: 0, "*": total_cap()}
-    if u.get("wechat_openid"):
+    if u.get("wechat_openid") or u.get("username"):  # 绑了微信、或注册了用户名密码：都是能找回的账号，不按访客算
         return {uid: user_cap(), "*": total_cap()}
     return {uid: guest_cap(), "*": total_cap(), GUESTS: guests_cap()}
 

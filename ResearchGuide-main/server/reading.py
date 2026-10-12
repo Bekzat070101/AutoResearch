@@ -223,7 +223,7 @@ def matrix(uid: str, kit_id: str) -> dict[str, Any]:
                 in_conflict.update(g["up"] + g["down"])
         for r in table:  # 行高亮用完整成员，不用截断后的预览
             r["conflict"] = r["arxiv_id"] in in_conflict
-    need = max(0, 3 - len(table))
+    need = max(0, 1 - len(table))
     return {"kit": {"id": k["id"], "name": k["name"]}, "dimensions": dims, "rows": table,
             "flags": {"empty_cells": empty_cells, "empty_columns": empty_cols, "conflicts": conflicts},
             "ready": need == 0, "need_more": need}
