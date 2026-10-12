@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-12] [FIX] 云端依赖按 wheel 清单重装，避免 pydantic 打架
+
+- 变更内容：bootstrap 用 vendor_wheels 文件名当缓存标记，清单变了就清空 `/tmp/pydeps` 再解。避免新旧 pydantic-core 叠在一起导致函数起不来。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/bootstrap
+- 决策来源：邬程灿（发布 w67 到 Pages / 函数计算）
+- 登记人：助手
+
 ## [2026-10-12] [FIX] Windows 上慢响应头也要按总时限断开
 
 - 变更内容：看门狗到点后同时 shutdown/close 原 socket，不只关副本。响应头慢滴时，Windows 不再把线程挂到整段头写完。
