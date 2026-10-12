@@ -172,6 +172,7 @@ class MicroTask:
         origin: str = "tree",
         action_id: str = "",
         node_path: str = "",
+        formal: dict[str, Any] | None = None,
     ) -> None:
         self.id = id or new_id()
         self.user_id = user_id
@@ -188,6 +189,7 @@ class MicroTask:
         self.origin = origin
         self.action_id = action_id
         self.node_path = node_path
+        self.formal = formal or {}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -206,6 +208,7 @@ class MicroTask:
             "origin": self.origin,
             "action_id": self.action_id,
             "node_path": self.node_path,
+            "formal": self.formal or {},
         }
 
     @classmethod
@@ -227,6 +230,7 @@ class MicroTask:
             origin=d.get("origin") or "tree",
             action_id=d.get("action_id") or "",
             node_path=d.get("node_path") or "",
+            formal=d.get("formal") if isinstance(d.get("formal"), dict) else {},
         )
 
 

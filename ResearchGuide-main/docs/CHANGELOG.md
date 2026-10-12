@@ -6,6 +6,62 @@
 
 ---
 
+## [2026-10-12] [FIX] Windows 上慢响应头也要按总时限断开
+
+- 变更内容：看门狗到点后同时 shutdown/close 原 socket，不只关副本。响应头慢滴时，Windows 不再把线程挂到整段头写完。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/limits.py
+- 决策来源：邬程灿（problem-10-12 总验收，run_existing_tests.py）
+- 登记人：助手
+
+## [2026-10-12] [UX] 定位改成序号人话 + 卡片地图
+
+- 变更内容：五个 tab 改成「1 我有什么」等人话；每页一句 `.pos-lead`；竞争地图改成卡片；没有边时下注回「我有什么」。界面 w67。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 项目先问答再按整条链检索
+
+- 变更内容：找项目第一屏改成由宽到窄的选项问答；旧方向芯片收到「改条件」。检索可带 `chain`，整句权重大于单关键词；空方向不再把候选打成 0。新路径 `POST /api/projects/interview`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/projects.py、server/main.py、web/js/app.js
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 研读跳转加大、正文见表、一张卡出矩阵
+
+- 变更内容：章节跳转改成 36px 描边按钮。HTML 表抽成 `tables` + `[[table:tN]]`，阅读区渲染真表；抽失败给原文链接。矩阵改为 1 张过线卡即可。界面 w67。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：server/arxiv.py、server/reading.py、server/main.py、web/js/app.js、web/css/styles.css
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [FEAT] 作业正式题 + 卡住了要提示
+
+- 变更内容：新生成作业带 `formal`（已知 / 求 / 交）；校验失败走骨架，不编课名。未完成作业可 `POST /api/tasks/{tid}/hint`，拒绝替写提交全文。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/workbench.py、server/main.py、server/schemas.py、web/js/app.js
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 作业先看题，细则点开
+
+- 变更内容：作业主面板改成题干（已知 / 求 / 交）+ 提交；题目说明、怎样算做到、评阅、下一步、路径说明收到按钮后面。已完成默认打开评阅。界面 w66。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
+## [2026-10-12] [UX] 四栏加「这一页先做什么」
+
+- 变更内容：作业 / 项目 / 研读 / 定位页头下加三步引导，可关掉；走过主流程的人默认只留「为什么是这几步」。页头副题收短。界面 w65。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（problem-10-12）
+- 登记人：助手
+
 ## [2026-10-10] [UX] 粒子首页收进 PR15 视觉引擎
 
 - 变更内容：粒子首页改成 PR15 的发光粒子、每屏一色、散开再聚形、左右对调、钉住文字淡入、跳过与步进提示；文案仍用当前五栏那一版（先聊聊 / 给一个方向 / 交一份小作业），登录后仍是今日/作业/项目/研读/定位。界面 w64。

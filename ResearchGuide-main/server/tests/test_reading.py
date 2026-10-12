@@ -119,10 +119,11 @@ def test_matrix_flags_conflicts_and_empty_columns():
     assert (group["up_total"], group["down_total"]) == (2, 1)
 
 
-def test_matrix_needs_three_passed_cards():
+def test_matrix_ready_with_one_passed_card():
     u = uid()
     reading.submit_card(u, "llm-eval", "2310.17623", GOOD, DIMS)
-    assert reading.matrix(u, "llm-eval")["need_more"] == 2
+    m = reading.matrix(u, "llm-eval")
+    assert m["need_more"] == 0 and m["ready"] and len(m["rows"]) == 1
 
 
 def test_triage_requires_a_reason(monkeypatch):

@@ -150,22 +150,82 @@ def recent(categories: list[str], keywords: list[str], max_results: int = 30, ca
 # ---------- 全文 ----------
 
 _DROP = re.compile(r"<(script|style|math|svg|nav|header|footer)[^>]*>.*?</\1>", re.S | re.I)
-_BLOCK = re.compile(r"</?(p|div|section|h[1-6]|li|tr|br|figcaption|caption|table)[^>]*>", re.I)
 _TAG = re.compile(r"<[^>]+>")
+_BLOCK_NO_TABLE = re.compile(
+    r"</?(p|div|section|h[1-6]|li|br|figcaption|caption)[^>]*>", re.I
+)
+_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S | re.I)
 
 
-def _html_to_text(page: str) -> str:
-    # 正文在 <article> 里；前面是 arXiv 的横幅、反馈弹窗等页面杂项
+def _cell_text(cell: str) -> str:
+    cell = re.sub(r"<math[^>]*alttext=\"([^\"]*)\"[^>]*>.*?</math>",
+                  lambda m: f" {html.unescape(m.group(1))} ", cell, flags=re.S)
+    cell = _DROP.sub(" ", cell)
+    text = html.unescape(_TAG.sub(" ", cell))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _table_to_rows(raw: str) -> list[list[str]]:
+    rows = []
+    for tr in re.findall(r"<tr\b[^>]*>.*?</tr>", raw, flags=re.S | re.I):
+        cells = re.findall(r"<(?:th|td)\b[^>]*>.*?</(?:th|td)>", tr, flags=re.S | re.I)
+        row = [_cell_text(c) for c in cells]
+        if any(row):
+            rows.append(row)
+    return rows
+
+
+def parse_html(page: str) -> dict:
+    """正文 + 表格。表格从原文抽出后换成 [[table:tN]]，避免再被摊成一行字。"""
     start = page.find("<article")
     if start >= 0:
         page = page[start:]
-    # LaTeXML 把公式的 TeX 原文放在 alttext 里；先换成 TeX，免得句子断开
-    page = re.sub(r"<math[^>]*alttext=\"([^\"]*)\"[^>]*>.*?</math>", lambda m: f" {html.unescape(m.group(1))} ", page, flags=re.S)
+    tables: list[dict] = []
+    n = 0
+
+    def _repl(m: re.Match) -> str:
+        nonlocal n
+        n += 1
+        tid = f"t{n}"
+        raw = m.group(0)
+        rows = _table_to_rows(raw)
+        caption = ""
+        cap = re.search(r"<caption\b[^>]*>(.*?)</caption>", raw, flags=re.S | re.I)
+        if cap:
+            caption = _cell_text(cap.group(1))
+        first = re.search(r"<tr\b[^>]*>.*?</tr>", raw, flags=re.S | re.I)
+        headers: list[str] = []
+        body = rows
+        if first and re.search(r"<th\b", first.group(0), re.I) and rows:
+            headers = rows[0]
+            body = rows[1:]
+        if not rows:
+            return f"\n[[table:fail:{tid}]]\n"
+        tables.append({"id": tid, "caption": caption, "headers": headers, "rows": body, "at": 0})
+        return f"\n[[table:{tid}]]\n"
+
+    page = _TABLE_RE.sub(_repl, page)
+    page = re.sub(
+        r"<math[^>]*alttext=\"([^\"]*)\"[^>]*>.*?</math>",
+        lambda m: f" {html.unescape(m.group(1))} ",
+        page,
+        flags=re.S,
+    )
     page = _DROP.sub(" ", page)
-    page = _BLOCK.sub("\n", page)
+    page = _BLOCK_NO_TABLE.sub("\n", page)
+    page = re.sub(r"</?(?:table|tr|th|td)[^>]*>", "\n", page, flags=re.I)
     text = html.unescape(_TAG.sub(" ", page))
-    lines = [re.sub(r"[ \t ]+", " ", ln).strip() for ln in text.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+    lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in text.splitlines()]
+    text = "\n".join(ln for ln in lines if ln)
+    for t in tables:
+        needle = f"[[table:{t['id']}]]"
+        pos = text.find(needle)
+        t["at"] = pos if pos >= 0 else 0
+    return {"text": text, "tables": tables}
+
+
+def _html_to_text(page: str) -> str:
+    return parse_html(page)["text"]
 
 
 # 只拿到摘要时，什么时候再试一次 HTML 正文：确实没有 HTML 版（404 或正文太短）隔一周；网络错误、超时、5xx 十分钟
@@ -229,21 +289,24 @@ def _fetch_fulltext(aid: str) -> dict[str, Any]:
         return got
     stale = _on_disk(aid)  # 到期的摘要版：标题、摘要已经有了，只重试正文，不再去取元数据
     if stale:
-        result = {k: stale[k] for k in ("id", "title", "source", "text", "url")}
+        result = {k: stale[k] for k in ("id", "title", "source", "text", "url") if k in stale}
+        if stale.get("tables"):
+            result["tables"] = stale["tables"]
     else:
         meta = papers([aid])
         if not meta:
             raise ArxivError(f"arXiv 上没有 {aid}")
         m = meta[0]
-        result = {"id": aid, "title": m["title"], "source": "abstract", "text": m["summary"], "url": m["url"]}
+        result = {"id": aid, "title": m["title"], "source": "abstract", "text": m["summary"], "url": m["url"], "tables": []}
     retry = RETRY_NO_HTML
     try:
         page = _get(f"https://arxiv.org/html/{aid}", timeout=30, max_bytes=MAX_HTML_BYTES).decode("utf-8", errors="replace")
         if "</html>" not in page[-4096:].lower():
             raise ArxivError("arXiv 正文页不完整")  # 没有声明长度的响应提前断开时，只能从页尾看出来；当临时失败处理
-        text = _html_to_text(page)
+        parsed = parse_html(page)
+        text = parsed["text"]
         if len(text) > 2000:
-            result.update(source="html", text=text)
+            result.update(source="html", text=text, tables=parsed.get("tables") or [])
     except ArxivError as exc:
         # 没有 HTML 版（404）就只用摘要；临时失败（超时、断网、5xx）也先给摘要，但很快再试，不把半份论文永久缓存
         if exc.status != 404:

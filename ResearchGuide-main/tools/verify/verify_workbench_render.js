@@ -114,6 +114,7 @@ const ensurePortrait = async () => {};
 const stale = (seq) => seq !== S.renderSeq;
 const workspaceHead = (t) => el("div", "ws-head", t);
 const emptyPanel = (msg) => el("div", "empty", msg);
+const roomGuide = () => el("aside", "room-guide");
 const setView = (v) => { CFG.view = v; S.view = v; };
 /* 合并两条开发线之后，renderWorkbench 还用到这几样（原来那支用的是 FIELD_TREES[code]，
    现在统一走 activeField/stepOf——每个画像各自记住方向与进度、以及「这是主干第几步」）。 */
@@ -146,19 +147,22 @@ const ensureAiTree = () => {
   }
 };
 
-const body = ["dialogueTaskSection", "taskPanelDone", "taskPanel", "renderWorkbench"]
-  .map(extract).join("\n");
+const body = [
+  "taskOriginLine", "taskStemBlock", "taskHowNode", "taskRubricNode",
+  "taskFolds", "taskHintBox",
+  "dialogueTaskSection", "taskPanelDone", "taskPanel", "renderWorkbench",
+].map(extract).join("\n");
 const make = () => new Function(
   "el", "esc", "api", "S", "stale", "$app", "document", "sessionStorage", "setTimeout",
   "toast", "saveTrail", "adoptDirection", "mergeTrail", "currentOnPath", "pathNodes",
   "renderFeedbackInto", "readDraft", "writeDraft", "ensurePortrait", "workspaceHead",
-  "emptyPanel", "setView", "FIELD_TREES", "activeField", "dirTitle", "stepOf",
+  "emptyPanel", "roomGuide", "setView", "FIELD_TREES", "activeField", "dirTitle", "stepOf",
   "findProjectsForStep", "goFindProjects", "PROJECT_AFTER_TASKS",
   body + "\nreturn { renderWorkbench, dialogueTaskSection };")(
   el, esc, api, S, stale, appRef, document, sessionStorage, setTimeout,
   toast, saveTrail, adoptDirection, mergeTrail, currentOnPath, pathNodes,
   renderFeedbackInto, readDraft, writeDraft, ensurePortrait, workspaceHead,
-  emptyPanel, setView, FIELD_TREES, activeField, dirTitle, stepOf,
+  emptyPanel, roomGuide, setView, FIELD_TREES, activeField, dirTitle, stepOf,
   findProjectsForStep, goFindProjects, PROJECT_AFTER_TASKS);
 
 const DIALOGUE_TASK = {
@@ -188,14 +192,18 @@ const DIALOGUE_TASK = {
   check(byClass(box, "task-panel").length === 1, "渲染成了一个任务面板");
 
   console.log("\n=== ② 三问齐全 ===");
-  check(txt.includes("① 做什么"), "有「① 做什么」");
-  check(txt.includes("② 交什么"), "有「② 交什么」");
-  check(txt.includes("③ 怎样算做到"), "有「③ 怎样算做到」");
+  const clickNamed = (root, name) => {
+    const b = walk(root).find((c) => c.tagName === "BUTTON" && c._text === name);
+    if (b) b.click();
+    return b;
+  };
+  check(txt.includes("已知") && txt.includes("求") && txt.includes("交"), "题干有已知 / 求 / 交");
+  check(txt.includes("题目说明") && txt.includes("怎样算做到"), "细则入口在（点开才展开）");
   const dv = byClass(box, "deliverable")[0];
   check(!!dv && dv.textContent.includes("重写后的代码"),
     "交付物内容渲染出来了", dv ? JSON.stringify(dv.textContent) : "(没有 .deliverable)");
-  check(txt.includes("关掉 AI 生成"), "步骤渲染出来了");
-  check(txt.includes("说清卡在哪一步"), "评分标准渲染出来了");
+  check(!!clickNamed(box, "题目说明") && allText(box).includes("关掉 AI 生成"), "点开题目说明能看到步骤");
+  check(!!clickNamed(box, "怎样算做到") && allText(box).includes("说清卡在哪一步"), "点开怎样算做到能看到标准");
   check(txt.includes("来自对话"), "标明了任务来自对话");
 
   console.log("\n=== ③ 有提交框，能在这里完成 ===");
@@ -225,15 +233,18 @@ const DIALOGUE_TASK = {
     `两块各有一个提交框（${byClass(box2, "submit-box").length}）`);
 
   console.log("\n=== ⑤b 树上任务保留了方向进度那一支的能力（合并时不能丢） ===");
+  const pathBtn = walk(box2).find((c) => c.tagName === "BUTTON" && c._text === "路径说明");
+  check(!!pathBtn, "树任务面板里有「路径说明」入口");
+  if (pathBtn) pathBtn.click();
   const note = byClass(box2, "step-note")[0];
-  check(byClass(box2, "step-note").length === 1, "树任务面板里有「这是路径第几步」的说明");
+  check(!!note, "点开后出现「这是路径第几步」的说明");
   check(!!note && note.innerHTML.includes("路径第 1 步"), "说明里写明了第几步",
     note ? JSON.stringify(note.innerHTML.slice(0, 60)) : "(没有 .step-note)");
   check(!!note && note.innerHTML.includes("特征与标签"), "说明里带上了这一步的名字");
   check(!!note && note.innerHTML.includes("一份能跑的小例子"), "说明里写清了这一步要交什么");
-  check(txt2.includes("找能交出它的项目"), "说明里有「找能交出它的项目」入口");
+  check(allText(box2).includes("找能交出它的项目"), "说明里有「找能交出它的项目」入口");
   check(txt2.includes("填入演示示例"), "树任务有「填入演示示例」按钮（对话任务没有）");
-  check(txt2.includes("来自方向路径"), "树任务标明它来自方向路径（不是「来自对话」）");
+  check(txt2.includes("来自方向"), "树任务标明它来自方向（不是「来自对话」）");
 
   console.log("\n=== ⑥ 只有树任务时，不该冒出「对话给你的任务」那块 ===");
   CFG.app = mkEl("div");

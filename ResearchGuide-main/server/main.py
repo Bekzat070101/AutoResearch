@@ -125,6 +125,12 @@ class SubmitReq(BaseModel):
     payload: str
 
 
+class TaskHintReq(BaseModel):
+    uid: str
+    question: str
+    draft: str = ""
+
+
 class FactPatchReq(BaseModel):
     uid: str
     value: str | None = None
@@ -139,11 +145,19 @@ class LlmConnectReq(BaseModel):
 
 class ProjectSearchReq(BaseModel):
     uid: str
-    direction: str
+    direction: str = ""
     stage: int = 0
     keywords: str = ""
     node: str = ""
     path_step: int = 0
+    chain: list[str] | None = None
+
+
+class ProjectInterviewReq(BaseModel):
+    uid: str
+    session_id: str = ""
+    answer: str = ""
+    option_id: str = ""
 
 
 class ProjectPickReq(BaseModel):
@@ -596,6 +610,22 @@ def task_submit(tid: str, req: SubmitReq):
     return fb
 
 
+@app.post("/api/tasks/{tid}/hint")
+def task_hint(tid: str, req: TaskHintReq):
+    _user_or_404(req.uid)
+    t = store.get_task(tid)
+    if not t or t.user_id != req.uid:
+        raise HTTPException(404, "task not found")
+    if t.status == "done":
+        raise HTTPException(400, "已完成的作业不用再要提示")
+    try:
+        return workbench.hint_task(req.uid, t, req.question, req.draft)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except OverflowError as e:
+        raise HTTPException(429, str(e))
+
+
 # ---------- me（AI 认识的我） ----------
 
 @app.get("/api/me/facts")
@@ -761,12 +791,23 @@ def project_context(uid: str):
     return projects.context(uid)
 
 
+@app.post("/api/projects/interview")
+def project_interview(req: ProjectInterviewReq):
+    _user_or_404(req.uid)
+    try:
+        return projects.interview(req.uid, req.session_id, req.answer, req.option_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc.args[0] if exc.args else "问答已过期，请重新开始")) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc.args[0] if exc.args else "不是你的问答")) from exc
+
+
 @app.post("/api/projects/search")
 def project_search(req: ProjectSearchReq):
     _user_or_404(req.uid)
-    if req.direction not in planner.DIRECTIONS:
+    if req.direction and req.direction not in planner.DIRECTIONS:
         raise HTTPException(400, f"unknown direction: {req.direction}")
-    return projects.search(req.uid, req.direction, req.stage, req.keywords, req.node, req.path_step)
+    return projects.search(req.uid, req.direction, req.stage, req.keywords, req.node, req.path_step, req.chain)
 
 
 @app.post("/api/projects/pick")
@@ -909,7 +950,8 @@ async def _shared(key: tuple, fn, *args):
 
 
 def _payload_of(p: dict) -> dict:
-    return {**p, "sections": [{"name": n, "label": reading.arxiv.section_cn(n), "at": at} for n, at in reading.arxiv.sections(p["text"])]}
+    return {**p, "tables": p.get("tables") or [],
+            "sections": [{"name": n, "label": reading.arxiv.section_cn(n), "at": at} for n, at in reading.arxiv.sections(p["text"])]}
 
 
 def _paper_payload(aid: str) -> dict:

@@ -9,11 +9,83 @@ W1 真实化（刘弘雅）：任务模板库扩充 + rubric 判定换 LLM，sch
 """
 from __future__ import annotations
 
+import re
+import time
 from typing import Any
 
 import llm
 import store
 from schemas import Feedback, MicroTask
+
+_FAKE_FORMAL = re.compile(r"我猜|编一个|假设你上过|某校课程|不存在的课")
+_WRITE_FOR_ME = re.compile(r"替我写|直接给我一份|可以交的全文|完整答案|代写")
+_HINT_HITS: dict[str, list[float]] = {}
+
+
+def formal_skeleton(name: str, brief: str = "") -> dict[str, Any]:
+    name = (name or "本题").strip()[:40]
+    intro = (brief or "").strip()[:240]
+    return {
+        "stem": f"本题要求你在约 20 分钟内完成对「{name}」的一次可核对练习。",
+        "given": [intro] if intro else [],
+        "ask": f"给出一个能核对的例子，并说明它和「{name}」哪一条对得上。",
+        "notes": "" if intro else "本题不另给数据，用你能核对的一个例子。",
+        "steps": [
+            f"读本题关于「{name}」的已知材料",
+            "做出求解要求的那一件事",
+            "按「交」写下可核对的结果",
+        ],
+        "deliverable": f"一段文字：对「{name}」的求解结果 + 一个能核对的例子 + 你的判断",
+        "rubric": [
+            {"criterion": "说明了本题在要求什么"},
+            {"criterion": "有一个具体、能核对的例子或结果"},
+            {"criterion": "写了自己的判断，而不是只复述介绍"},
+        ],
+    }
+
+
+def _valid_formal(data: Any, source: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    stem = str(data.get("stem") or "").strip()
+    ask = str(data.get("ask") or "").strip()
+    if not stem or not ask:
+        return False
+    rub = data.get("rubric") or []
+    if not isinstance(rub, list) or len(rub) < 3:
+        return False
+    blob = " ".join([stem, ask, str(data.get("notes") or ""), str(data.get("given") or "")])
+    if _FAKE_FORMAL.search(blob):
+        return False
+    return True
+
+
+def formalize_task(name: str, brief: str = "", direction: str = "", extra: str = "") -> dict[str, Any]:
+    sk = formal_skeleton(name, brief)
+    if not llm.enabled():
+        return sk
+    data = llm.chat_json(
+        "你把本科科研入门练习写成一道正式题。只输出 JSON："
+        "{stem, given: string[], ask, notes, steps: string[3], deliverable, rubric: [{criterion}]}。"
+        "不许发明课程、论文、数字。没有材料就把 given 留空并写 notes。",
+        f"方向={direction or '未定'}；题目={name}；材料={brief or '无'}；补充={extra or '无'}",
+        timeout=20, tag="task-formal",
+    )
+    if not _valid_formal(data, f"{name} {brief}"):
+        return sk
+    given = data.get("given") if isinstance(data.get("given"), list) else sk["given"]
+    steps = data.get("steps") if isinstance(data.get("steps"), list) and data["steps"] else sk["steps"]
+    rubric = data.get("rubric") if isinstance(data.get("rubric"), list) else sk["rubric"]
+    return {
+        "stem": str(data.get("stem") or sk["stem"])[:400],
+        "given": [str(g)[:200] for g in given if str(g).strip()][:6],
+        "ask": str(data.get("ask") or sk["ask"])[:240],
+        "notes": str(data.get("notes") or "")[:200],
+        "steps": [str(s)[:200] for s in steps][:6],
+        "deliverable": str(data.get("deliverable") or sk["deliverable"])[:240],
+        "rubric": [{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
+                   else {"criterion": str(r)[:160]} for r in rubric][:6],
+    }
 
 # 每方向两级任务模板（level 1 演示档 20 分钟；level 2 进阶）
 TEMPLATES: dict[str, list[dict[str, Any]]] = {
@@ -217,34 +289,31 @@ def generate_task(uid: str, direction: str, level: int = 1, title: str = "", bri
     """从模板参数化生成微任务。若带了节点标题，就按该节点出题。"""
     name = (title or "").strip()
     if name:
+        form = formalize_task(name[:40], brief or name, direction)
         task = MicroTask(
             user_id=uid, direction=direction, title=name[:40],
-            brief=((brief or name).strip())[:240],
-            steps=[
-                f"用自己的话写下「{name[:40]}」在问什么",
-                "举一个你能核对的小例子",
-                "写两句：你现在明白了什么，还卡在哪里",
-            ],
-            deliverable=f"一段文字：「{name[:40]}」在问什么 + 一个能核对的例子 + 你还卡在哪",
-            rubric=[
-                {"criterion": "说明了这个节点在问什么"},
-                {"criterion": "有一个具体、能核对的例子"},
-                {"criterion": "写了自己的判断，而不是只复述介绍"},
-            ],
+            brief=form["stem"][:240],
+            steps=form["steps"], deliverable=form["deliverable"],
+            rubric=form["rubric"],
             time_budget_min=20, difficulty=max(1, level), status="open",
             origin="tree",
             node_path=direction,
+            formal={k: form[k] for k in ("stem", "given", "ask", "notes")},
         )
         store.save_task(task)
         return task
     tpl_list = TEMPLATES.get(direction) or TEMPLATES["ai"]
     tpl = tpl_list[min(level, len(tpl_list)) - 1]
+    form = formalize_task(tpl["title"], tpl.get("brief", ""), direction)
     task = MicroTask(
-        user_id=uid, direction=direction, title=tpl["title"], brief=tpl["brief"],
-        steps=tpl["steps"], deliverable=tpl.get("deliverable", ""),
-        rubric=tpl["rubric"],
+        user_id=uid, direction=direction, title=tpl["title"],
+        brief=form["stem"][:240],
+        steps=form["steps"] or tpl["steps"],
+        deliverable=form["deliverable"] or tpl.get("deliverable", ""),
+        rubric=form["rubric"] or tpl["rubric"],
         time_budget_min=tpl["time_budget_min"], difficulty=level, status="open",
         origin="tree",
+        formal={k: form[k] for k in ("stem", "given", "ask", "notes")},
     )
     store.save_task(task)
     return task
@@ -348,14 +417,15 @@ def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     deliverable = payload.get("deliverable") or sk["deliverable"]
     rubric = payload.get("rubric") or sk["rubric"]
 
+    form = formalize_task(title[:40], payload.get("brief") or title, action.get("direction") or "")
     task = MicroTask(
         user_id=uid,
         direction=action.get("direction") or "",
         title=title[:60],
-        brief=payload.get("brief") or title[:240],
-        steps=[str(s)[:200] for s in steps][:6],
-        deliverable=str(deliverable)[:240],
-        rubric=[{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
+        brief=form["stem"][:240],
+        steps=form["steps"] or [str(s)[:200] for s in steps][:6],
+        deliverable=form["deliverable"] or str(deliverable)[:240],
+        rubric=form["rubric"] or [{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
                 else {"criterion": str(r)[:160]} for r in rubric][:6],
         time_budget_min=int(payload.get("time_budget_min") or 20),
         difficulty=int(payload.get("difficulty") or 1),
@@ -363,6 +433,7 @@ def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
         origin="dialogue",
         action_id=aid,
         node_path=(action.get("node_id") or ""),
+        formal={k: form[k] for k in ("stem", "given", "ask", "notes")},
     )
     store.save_task(task)
     return task
@@ -523,3 +594,42 @@ def _mock_feedback(task: MicroTask, payload: str) -> dict[str, Any]:
         hint = f"先补「{missed[0]['criterion']}」：{missed[0]['comment']}"
         encouragement = f"做到了 {passed} / {len(judged)} 条。不用重写，按下面这一步补上就行。"
     return {"score": score, "rubric": judged, "next_hint": hint, "encouragement": encouragement, "voice": "rules"}
+
+
+def _hint_limited(uid: str) -> bool:
+    now = time.time()
+    hits = [t for t in _HINT_HITS.get(uid, []) if now - t < 60]
+    if len(hits) >= 8:
+        _HINT_HITS[uid] = hits
+        return True
+    hits.append(now)
+    _HINT_HITS[uid] = hits
+    return False
+
+
+def hint_task(uid: str, task: MicroTask, question: str, draft: str = "") -> dict[str, Any]:
+    q = (question or "").strip()
+    if len(q) < 2 or len(q) > 200:
+        raise ValueError("问题太短或太长")
+    if _hint_limited(uid):
+        raise OverflowError("稍后再问")
+    refuse = bool(_WRITE_FOR_ME.search(q))
+    if refuse:
+        return {"reply": "提示可以给，提交要你自己写。", "refused": True}
+    form = task.formal or {}
+    local = (
+        f"这题在问：{form.get('ask') or task.title}。"
+        f"第一步：先看已知，再按「交」写你做的那一件事。"
+        f"对照交付：{task.deliverable or '一段能核对的文字'}。"
+    )
+    if not llm.enabled():
+        return {"reply": local, "refused": False}
+    data = llm.chat_json(
+        "你给本科生提示作业。只解释题意、指出下一步、指出草稿缺哪条标准。"
+        "禁止输出可当提交物的整段答案。只输出 JSON {reply}。",
+        f"题：{task.title}\n题干：{form.get('stem') or task.brief}\n求：{form.get('ask') or ''}\n"
+        f"交：{task.deliverable}\n标准：{task.rubric}\n草稿：{(draft or '')[:400]}\n学生问：{q}",
+        timeout=20, tag="task-hint",
+    )
+    reply = str((data or {}).get("reply") or local)[:600]
+    return {"reply": reply, "refused": False}
