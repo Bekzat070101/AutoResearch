@@ -38,12 +38,12 @@ PER_IP_HOUR = 30           # 同一来源一小时最多开三十次登录、三
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
-PRIVACY_VERSION = "2026-10-09"
+PRIVACY_VERSION = "2026-10-12"
 
 # 不登录也能用的接口（按路由模板写）。新加的接口默认要登录：要么带 uid，要么加到这里并说明为什么可以公开。
 PUBLIC = frozenset({
     "/", "/api/health",
-    "/api/auth/login", "/api/auth/legacy",
+    "/api/auth/login", "/api/auth/register", "/api/auth/signin", "/api/auth/legacy",
     "/api/auth/wechat/start", "/api/auth/wechat/poll", "/api/auth/wechat/dev-send",
     "/api/wechat",  # 微信服务器回调，自己验签
     # 公开知识：课程、老师、专业、培养方案、方向路径、阅读工具包、论文原文、给学生自己 agent 的简报
@@ -160,13 +160,18 @@ def _dev() -> bool:
 
 def account(uid: str) -> dict[str, Any]:
     u = store.get_user(uid) or {}
+    username = u.get("username") or ""
+    meta = store.llm_secret_meta(uid)
     return {
         "uid": uid,
         "nickname": u.get("nickname", ""),
+        "username": username,
         "wechat": bool(u.get("wechat_openid")),
-        "guest": not u.get("wechat_openid"),
+        "guest": not bool(u.get("wechat_openid") or username),
         "consent_ok": u.get("consent_version") == PRIVACY_VERSION,
         "privacy_version": PRIVACY_VERSION,
+        "has_llm_key": meta["has_key"],
+        "llm_key_tail": meta["tail"],
     }
 
 
@@ -181,6 +186,23 @@ def status() -> dict[str, Any]:
 class GuestReq(BaseModel):
     nickname: str
     consent: bool = False
+
+
+class RegisterReq(BaseModel):
+    username: str
+    password: str
+    nickname: str = ""
+    consent: bool = False
+
+
+class SigninReq(BaseModel):
+    username: str
+    password: str
+
+
+class UpgradeReq(BaseModel):
+    username: str
+    password: str
 
 
 class WechatStartReq(BaseModel):
@@ -217,6 +239,62 @@ def guest_login(req: GuestReq, request: Request):
     if req.consent:
         store.record_consent(uid, PRIVACY_VERSION)
     return {**account(uid), "token": store.create_session(uid, SESSION_TTL)}
+
+
+def _password_ok(password: str) -> str:
+    if len(password or "") < 8:
+        raise HTTPException(400, "密码至少 8 个字符")
+    return password
+
+
+def _username_ok(username: str) -> str:
+    if not store.valid_username(username):
+        raise HTTPException(400, "用户名 2–24 个字符，只能用字母、数字、下划线")
+    return store.normalize_username(username)
+
+
+@router.post("/api/auth/register")
+def register(req: RegisterReq, request: Request):
+    if not req.consent:
+        raise HTTPException(400, "请先看过并同意隐私说明")
+    username = _username_ok(req.username)
+    password = _password_ok(req.password)
+    if store.user_by_username(username):
+        raise HTTPException(409, "这个用户名已经有人用了")
+    if not _ip_allows(request, "guest"):
+        raise HTTPException(429, "开的号太多了，过一会儿再试")
+    row = store.register_user(username, password, req.nickname)
+    store.record_consent(row["uid"], PRIVACY_VERSION)
+    return {**account(row["uid"]), "token": store.create_session(row["uid"], SESSION_TTL)}
+
+
+@router.post("/api/auth/signin")
+def signin(req: SigninReq, request: Request):
+    username = store.normalize_username(req.username)
+    user = store.user_by_username(username)
+    if not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash")):
+        raise HTTPException(401, "用户名或密码不对")
+    if not _ip_allows(request, "signin"):
+        raise HTTPException(429, "试得太频繁了，过一会儿再试")
+    return {**account(user["id"]), "token": store.create_session(user["id"], SESSION_TTL)}
+
+
+@router.post("/api/auth/upgrade")
+def upgrade(req: UpgradeReq, request: Request):
+    uid = me(request)
+    username = _username_ok(req.username)
+    password = _password_ok(req.password)
+    if store.user_by_username(username):
+        raise HTTPException(409, "这个用户名已经有人用了")
+    try:
+        store.upgrade_user(uid, username, password)
+    except KeyError:
+        raise HTTPException(404, "user not found") from None
+    except ValueError as exc:
+        if str(exc) == "taken":
+            raise HTTPException(409, "这个用户名已经有人用了") from exc
+        raise HTTPException(409, "这个账号已经有用户名了") from exc
+    return account(uid)
 
 
 @router.post("/api/auth/wechat/start")

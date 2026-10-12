@@ -6,6 +6,38 @@
 
 ---
 
+## [2026-10-12] [UX] 打开页面必须重新登录
+
+- 变更内容：登录只记在这一页的内存里，不再写入 `localStorage`。刷新或重新打开都要重新登录。界面 w70。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-12] [UX] 进入只留注册和登录，不再劝访客升级
+
+- 变更内容：首页进入只留「登录 / 注册」。访客接口还在，页面不再出现「先看看」和「升级成可找回的账号」。界面 w69。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-12] [FEAT] 注册登录、每人一把 DeepSeek、进度按人入库
+
+- 变更内容：用户名+密码注册/登录/访客升级。每人可上传自己的 DeepSeek，探测后写入同一份库的 `user_secrets`，调用按 uid 带 key，不写 `os.environ`。作业草稿、项目路径、研读工具包进库，按 `user_id` 隔离。访客入口形状不变。界面 w68。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、docs/DESIGN_SPEC.md
+- 影响模块：server/store.py、server/auth.py、server/llm.py、server/main.py、web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（产品部署要求 + 账号入库）
+- 登记人：助手
+
+## [2026-10-12] [DOCS] 三套环境各用各的库
+
+- 变更内容：DEPLOY 写清开发/测试/生产三份库；生产 `QIYAN_DB` 要指到会留的盘；一人一份 sqlite 不做。
+- 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md
+- 影响模块：文档
+- 决策来源：邬程灿（产品部署要求）
+- 登记人：助手
+
 ## [2026-10-12] [FIX] 云端依赖按 wheel 清单重装，避免 pydantic 打架
 
 - 变更内容：bootstrap 用 vendor_wheels 文件名当缓存标记，清单变了就清空 `/tmp/pydeps` 再解。避免新旧 pydantic-core 叠在一起导致函数起不来。

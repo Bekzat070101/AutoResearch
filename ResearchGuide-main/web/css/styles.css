@@ -421,6 +421,19 @@ body[data-view="cards"] .site-footer, body[data-view="card"] .site-footer, body[
 .hero-kicker { font-size: 12px; letter-spacing: 0.2em; color: var(--ink-3); }
 .hero h2 { margin: var(--gap-3) 0 var(--gap-3); font-family: var(--serif); font-size: 36px; letter-spacing: 0.04em; }
 .hero-lead { color: var(--ink-2); margin-bottom: var(--gap-5); }
+.login-tabs { display: flex; gap: 8px; margin: 12px 0; }
+.login-tab {
+  border: 1px solid var(--line); background: transparent; color: var(--ink-2);
+  min-height: 36px; padding: 0 14px; border-radius: 999px; cursor: pointer;
+}
+.login-tab.on { border-color: var(--teal); color: var(--teal); background: var(--teal-soft); }
+.login-body { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+.login-body input {
+  min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; font: inherit;
+}
+.login-body input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); outline: none; }
+.login-note { color: var(--ink-2); font-size: 14px; margin: 0; }
 .login-row { display: flex; gap: var(--gap-2); }
 .login-row input {
   flex: 1; min-width: 0; height: 44px; padding: 0 16px;

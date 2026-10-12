@@ -110,6 +110,7 @@ const pathNodes = (f) => (f && f.nodes ? f.nodes : []);
 const renderFeedbackInto = () => {};
 const readDraft = () => "";
 const writeDraft = () => {};
+const hydrateDraft = async () => {};
 const ensurePortrait = async () => {};
 const stale = (seq) => seq !== S.renderSeq;
 const workspaceHead = (t) => el("div", "ws-head", t);
@@ -155,13 +156,13 @@ const body = [
 const make = () => new Function(
   "el", "esc", "api", "S", "stale", "$app", "document", "sessionStorage", "setTimeout",
   "toast", "saveTrail", "adoptDirection", "mergeTrail", "currentOnPath", "pathNodes",
-  "renderFeedbackInto", "readDraft", "writeDraft", "ensurePortrait", "workspaceHead",
+  "renderFeedbackInto", "readDraft", "writeDraft", "hydrateDraft", "ensurePortrait", "workspaceHead",
   "emptyPanel", "roomGuide", "setView", "FIELD_TREES", "activeField", "dirTitle", "stepOf",
   "findProjectsForStep", "goFindProjects", "PROJECT_AFTER_TASKS",
   body + "\nreturn { renderWorkbench, dialogueTaskSection };")(
   el, esc, api, S, stale, appRef, document, sessionStorage, setTimeout,
   toast, saveTrail, adoptDirection, mergeTrail, currentOnPath, pathNodes,
-  renderFeedbackInto, readDraft, writeDraft, ensurePortrait, workspaceHead,
+  renderFeedbackInto, readDraft, writeDraft, hydrateDraft, ensurePortrait, workspaceHead,
   emptyPanel, roomGuide, setView, FIELD_TREES, activeField, dirTitle, stepOf,
   findProjectsForStep, goFindProjects, PROJECT_AFTER_TASKS);
 

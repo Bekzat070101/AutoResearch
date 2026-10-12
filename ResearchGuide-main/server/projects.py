@@ -265,8 +265,9 @@ def _score(item: dict[str, Any], direction: str, stage: int, keywords: str,
 
 
 def _pick_llm(cands: list[dict[str, Any]], direction: str, stage: int, keywords: str, node: str,
-              step: dict[str, Any] | None = None, chain: list[str] | None = None) -> list[dict[str, Any]] | None:
-    if not llm.enabled() or not cands:
+              step: dict[str, Any] | None = None, chain: list[str] | None = None,
+              uid: str | None = None) -> list[dict[str, Any]] | None:
+    if not llm.ready(uid) or not cands:
         return None
     lines = [
         f"{c['id']} | {c['source_name']} | {c['name']} | {c['difficulty'] or '-'} | {(c['deadline'] + ('（已截止，只能当练习）' if c['closed'] else '')) if c['deadline'] else '-'} | {(c['excerpt'] or c['todo'] or c['practices'])[:260]}"
@@ -281,7 +282,7 @@ def _pick_llm(cands: list[dict[str, Any]], direction: str, stage: int, keywords:
         + (f"路径步骤：第 {step['step']} 步「{step['name']}」；这一步做完要交：{step['done_when']}" + (f"；任务 4 建议的项目形态（参考）：{step['project_form']}" if step.get('project_form') else "") + "\n" if step else "路径步骤：无\n")
         + "只能从下面的候选 id 里挑，不许造一条项目。\n"
         + "候选（id | 来源 | 标题 | 难度 | 截止 | 原文摘录）：\n" + "\n".join(lines),
-        timeout=40, tag="project-scout",
+        timeout=40, tag="project-scout", uid=uid,
     )
     items = (data or {}).get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -383,7 +384,7 @@ def search(uid: str, direction: str, stage: int, keywords: str = "", node: str =
 
     ranked = sorted(uniq.values(), key=lambda c: -sc(c))
     ranked = [c for c in ranked if sc(c) > 0][:24]
-    chosen = _pick_llm(ranked, direction, stage, keywords, node, step, chain=chain or None)
+    chosen = _pick_llm(ranked, direction, stage, keywords, node, step, chain=chain or None, uid=uid)
     voice = "llm"
     if not chosen:
         voice = "rules"
@@ -527,7 +528,7 @@ def _interview_done(sess: dict[str, Any]) -> dict[str, Any]:
 
 
 def _next_interview_q(sess: dict[str, Any]) -> dict[str, Any]:
-    if not llm.enabled():
+    if not llm.ready(sess.get("uid")):
         if sess["turns"] == 1:
             return dict(Q1)
         if sess["turns"] == 2:
@@ -538,7 +539,7 @@ def _next_interview_q(sess: dict[str, Any]) -> dict[str, Any]:
         '{"question":"一句问题","options":[{"id":"a","label":"≤24字"}],"done":false}。'
         "必须 2–5 个选项。允许不知道。不许发明课程名、项目名、老师。材料不够就 done=true。",
         "已经说过：" + " / ".join(sess["chain"]),
-        timeout=20, tag="project-interview",
+        timeout=20, tag="project-interview", uid=sess.get("uid"),
     )
     if not _valid_interview_q(data):
         if sess["turns"] == 1:
@@ -587,7 +588,7 @@ def interview(uid: str, session_id: str = "", answer: str = "", option_id: str =
         sess["chain"].append(label)
         sess["answers"].append({"option_id": option_id, "answer": answer})
         sess["turns"] += 1
-    if sess["turns"] >= 5 or (not llm.enabled() and sess["turns"] >= 3):
+    if sess["turns"] >= 5 or (not llm.ready(sess.get("uid")) and sess["turns"] >= 3):
         return _interview_done(sess)
     nxt = _next_interview_q(sess)
     if nxt.get("done"):

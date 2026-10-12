@@ -60,16 +60,17 @@ def _valid_formal(data: Any, source: str) -> bool:
     return True
 
 
-def formalize_task(name: str, brief: str = "", direction: str = "", extra: str = "") -> dict[str, Any]:
+def formalize_task(name: str, brief: str = "", direction: str = "", extra: str = "",
+                   uid: str | None = None) -> dict[str, Any]:
     sk = formal_skeleton(name, brief)
-    if not llm.enabled():
+    if not llm.ready(uid):
         return sk
     data = llm.chat_json(
         "你把本科科研入门练习写成一道正式题。只输出 JSON："
         "{stem, given: string[], ask, notes, steps: string[3], deliverable, rubric: [{criterion}]}。"
         "不许发明课程、论文、数字。没有材料就把 given 留空并写 notes。",
         f"方向={direction or '未定'}；题目={name}；材料={brief or '无'}；补充={extra or '无'}",
-        timeout=20, tag="task-formal",
+        timeout=20, tag="task-formal", uid=uid,
     )
     if not _valid_formal(data, f"{name} {brief}"):
         return sk
@@ -289,7 +290,7 @@ def generate_task(uid: str, direction: str, level: int = 1, title: str = "", bri
     """从模板参数化生成微任务。若带了节点标题，就按该节点出题。"""
     name = (title or "").strip()
     if name:
-        form = formalize_task(name[:40], brief or name, direction)
+        form = formalize_task(name[:40], brief or name, direction, uid=uid)
         task = MicroTask(
             user_id=uid, direction=direction, title=name[:40],
             brief=form["stem"][:240],
@@ -304,7 +305,7 @@ def generate_task(uid: str, direction: str, level: int = 1, title: str = "", bri
         return task
     tpl_list = TEMPLATES.get(direction) or TEMPLATES["ai"]
     tpl = tpl_list[min(level, len(tpl_list)) - 1]
-    form = formalize_task(tpl["title"], tpl.get("brief", ""), direction)
+    form = formalize_task(tpl["title"], tpl.get("brief", ""), direction, uid=uid)
     task = MicroTask(
         user_id=uid, direction=direction, title=tpl["title"],
         brief=form["stem"][:240],
@@ -417,7 +418,7 @@ def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     deliverable = payload.get("deliverable") or sk["deliverable"]
     rubric = payload.get("rubric") or sk["rubric"]
 
-    form = formalize_task(title[:40], payload.get("brief") or title, action.get("direction") or "")
+    form = formalize_task(title[:40], payload.get("brief") or title, action.get("direction") or "", uid=uid)
     task = MicroTask(
         user_id=uid,
         direction=action.get("direction") or "",
@@ -488,7 +489,7 @@ def _has_analysis(text: str) -> bool:
 
 def _llm_feedback(task: MicroTask, payload: str) -> dict[str, Any] | None:
     """用模型按 rubric 写评语。结构不合法则放弃，交给启发式。"""
-    if not llm.enabled() or not payload.strip():
+    if not llm.ready(task.user_id) or not payload.strip():
         return None
     criteria = [r["criterion"] for r in task.rubric]
     data = llm.chat_json(
@@ -499,7 +500,7 @@ def _llm_feedback(task: MicroTask, payload: str) -> dict[str, Any] | None:
         + "\n学生提交=\n" + payload[:1800]
         + '\n输出 JSON：{"score":80,"rubric":[{"criterion":"...","pass":true,"comment":"..."}],'
           '"next_hint":"...","encouragement":"..."}',
-        timeout=35,
+        timeout=35, uid=task.user_id,
     )
     if not data or not isinstance(data.get("rubric"), list):
         return None
@@ -622,14 +623,14 @@ def hint_task(uid: str, task: MicroTask, question: str, draft: str = "") -> dict
         f"第一步：先看已知，再按「交」写你做的那一件事。"
         f"对照交付：{task.deliverable or '一段能核对的文字'}。"
     )
-    if not llm.enabled():
+    if not llm.ready(uid):
         return {"reply": local, "refused": False}
     data = llm.chat_json(
         "你给本科生提示作业。只解释题意、指出下一步、指出草稿缺哪条标准。"
         "禁止输出可当提交物的整段答案。只输出 JSON {reply}。",
         f"题：{task.title}\n题干：{form.get('stem') or task.brief}\n求：{form.get('ask') or ''}\n"
         f"交：{task.deliverable}\n标准：{task.rubric}\n草稿：{(draft or '')[:400]}\n学生问：{q}",
-        timeout=20, tag="task-hint",
+        timeout=20, tag="task-hint", uid=uid,
     )
     reply = str((data or {}).get("reply") or local)[:600]
     return {"reply": reply, "refused": False}

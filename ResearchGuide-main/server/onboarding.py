@@ -126,7 +126,7 @@ def start(uid: str) -> dict[str, Any]:
         f"帮我对「你是谁、你好奇什么」建立一个初始认知。"
         f"所有判断你之后都能看到、能改、能删。{first['ask']}"
     )
-    reply = _voice("刚进入对话", first["ask"], fallback) if llm.enabled() else fallback
+    reply = _voice("刚进入对话", first["ask"], fallback, uid=uid) if llm.ready(uid) else fallback
     store.add_message(uid, "assistant", reply, first["id"])
     return _turn(reply, first, state)
 
@@ -154,7 +154,7 @@ def message(uid: str, msg: str) -> dict[str, Any]:
             "聊完了！基于刚才 5 轮对话，我整理了对你的初始认知（确认页）。"
             "每一条都标了来源和置信度——说得不对的你可以直接改，不想要的可以删。"
         )
-        reply = _voice(msg, "请去确认页核对初始认知。", fallback, closing=True)
+        reply = _voice(msg, "请去确认页核对初始认知。", fallback, closing=True, uid=uid)
         store.add_message(uid, "assistant", reply, "done")
         return {"reply": reply, "options": [], "facts": [f.to_dict() for f in facts],
                 "state": state, "done": True}
@@ -164,7 +164,7 @@ def message(uid: str, msg: str) -> dict[str, Any]:
     nxt_def = ROUNDS[_ROUND_INDEX[nxt]]
     ack = _ACK.get(phase, "")
     fallback = f"{ack}{nxt_def['ask']}" if ack else nxt_def["ask"]
-    reply = _voice(msg, nxt_def["ask"], fallback)
+    reply = _voice(msg, nxt_def["ask"], fallback, uid=uid)
     store.add_message(uid, "assistant", reply, nxt_def["id"])
     return _turn(reply, nxt_def, state, facts)
 
@@ -198,9 +198,10 @@ def _extract(uid: str, round_def: dict[str, Any], msg: str) -> list[UserFact]:
     return out
 
 
-def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False) -> str:
+def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False,
+           uid: str | None = None) -> str:
     """有密钥时用模型写一句回应；必须带上下一问或收束句，失败用模板。"""
-    if not llm.enabled():
+    if not llm.ready(uid):
         return fallback
     system = (
         "你是「启研」，面向北大本科低年级的科研导师。语气克制、具体，像熟悉的学长。"
@@ -214,7 +215,7 @@ def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False) -
             f"学生刚说：{user_msg[:200]}\n"
             f"先用一句接住这句话，然后必须原样提出下一个问题：{next_ask}"
         )
-    text = llm.chat(system, user, temperature=0.5, timeout=20)
+    text = llm.chat(system, user, temperature=0.5, timeout=20, uid=uid)
     if not text:
         return fallback
     if not closing and next_ask not in text:
@@ -233,8 +234,8 @@ def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: 
         "把学生的自述归纳成一条可核对的事实。category 只能是 background/interest/capability/preference。"
         "value 必须能在原话里找到依据，不要脑补。",
         json_user(round_def["id"], round_def["ask"], msg),
-        timeout=20,
-    ) if llm.enabled() else None
+        timeout=20, uid=uid,
+    ) if llm.ready(uid) else None
     if not data:
         return fallback
     value = str(data.get("value") or "").strip()

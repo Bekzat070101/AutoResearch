@@ -312,7 +312,8 @@ def test_new_class_names_all_have_rules():
                 "snap-inner", "land-skip", "land-steps", "land-hint",
                 "land-closing", "snap-no", "room-guide",
                 "task-stem", "task-fold", "task-ask",
-                "paper-table", "sec-jump", "pos-lead", "map-card", "pos-tab"):
+                "paper-table", "sec-jump", "pos-lead", "map-card", "pos-tab",
+                "login-tabs", "login-tab", "login-body"):
         # 用 (?![\w-]) 而不是 \b：类名里允许 `-`，所以 `\b` 会把
         # `.chat-next-nonexistent` 也当成 `.chat-next` 存在——那样把规则改名
         # 测试照样绿。（这个弱点是我回滚验证时发现的。）

@@ -60,6 +60,7 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
     lib_facts = tools.kb_env_facts(uid, message)
 
     return {
+        "uid": uid,
         "portrait_id": uid,
         "memory_version": store.get_memory_version(uid),
         "time": now_iso(),
@@ -467,7 +468,8 @@ def _propose(env: dict[str, Any]) -> dict[str, Any] | None:
     """调用①。解析失败重试一次，仍失败返回 None（上层降级）。"""
     user = f"【本轮环境】\n{_env_for_prompt(env)}\n\n请输出这一轮的 JSON。"
     for _ in range(2):
-        data = llm.chat_json(_proposal_system(), user, timeout=45, tag="dialogue.proposal")
+        data = llm.chat_json(_proposal_system(), user, timeout=45, tag="dialogue.proposal",
+                             uid=env.get("uid"))
         cleaned = _clean_proposal(data)
         if cleaned is not None:
             return cleaned
@@ -502,7 +504,8 @@ def _repair_names(env: dict[str, Any], reply: str, tool_results: list[dict[str, 
         f"【待重写的回复】\n{reply}"
     )
     try:
-        fixed = llm.chat(_REPAIR_SYSTEM, user, temperature=0.3, timeout=45, tag="dialogue.repair")
+        fixed = llm.chat(_REPAIR_SYSTEM, user, temperature=0.3, timeout=45, tag="dialogue.repair",
+                         uid=env.get("uid"))
     except Exception:
         return None
     fixed = (fixed or "").strip()
@@ -540,7 +543,7 @@ def _reply_with_tools(env: dict[str, Any], tool_results: list[dict[str, Any]],
         "next_action 默认应该是 null：只有能说清「为什么是给他的」时才填，"
         "并在 based_on 里给出「我记住的」里的事实 id；填不出 based_on 就不要填 next_action。"
     )
-    data = llm.chat_json(_reply_system(), user, timeout=45, tag="dialogue.reply")
+    data = llm.chat_json(_reply_system(), user, timeout=45, tag="dialogue.reply", uid=env.get("uid"))
     if not isinstance(data, dict):
         return None
     reply = str(data.get("reply") or "").strip()
@@ -860,7 +863,7 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
     degraded = False
 
     yield ("stage", {"name": "decide"})
-    proposal = _propose(env) if llm.enabled() else None
+    proposal = _propose(env) if llm.ready(uid) else None
     if proposal is None:
         proposal = _degraded_proposal(uid, message, env)
         degraded = True
@@ -893,7 +896,7 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         env["trace"]["tool"] = result.get("tool")
         env["trace"]["tool_ok"] = bool(result.get("ok"))
         yield ("stage", {"name": "compose"})
-        second = _reply_with_tools(env, tool_results, proposal) if llm.enabled() else None
+        second = _reply_with_tools(env, tool_results, proposal) if llm.ready(uid) else None
         if second:
             reply, next_action = second["reply"], second["next_action"]
         else:
@@ -905,7 +908,7 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         # 没有工具：结构化决策已经做完了，回复正文可以真正逐字流式产出。
         tool_results = []
         yield ("stage", {"name": "compose"})
-        if stream_reply and llm.enabled():
+        if stream_reply and llm.ready(uid):
             acc: list[str] = []
             for piece in _stream_reply(env, proposal):
                 acc.append(piece)
@@ -980,7 +983,8 @@ def _stream_reply(env: dict[str, Any], proposal: dict[str, Any]):
         f"【你的判断】{json.dumps(proposal.get('dialogue', {}), ensure_ascii=False)}\n\n"
         "把要对用户说的那段话写出来。"
     )
-    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream")
+    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream",
+                               uid=env.get("uid"))
 
 
 def _tool_fallback_reply(result: dict[str, Any]) -> str:

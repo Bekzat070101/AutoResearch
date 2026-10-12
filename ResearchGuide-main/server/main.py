@@ -274,7 +274,7 @@ def onboard_message(req: OnboardMsgReq):
     # 任务2：配了模型就由新对话内核接管，**冷启动第一句也算**。
     # 这个判断必须排在 `not state` 之前：否则新用户的第一句会落到老向导的第 1 轮问题，
     # 要等到第二句才进内核，行为前后不一致。
-    if llm.enabled():
+    if llm.ready(req.uid):
         return _onboard_from_dialogue(req.uid, req.msg)
     # 没配模型时保持老向导，保证离线 demo 与既有测试不受影响。
     if not state:
@@ -624,6 +624,59 @@ def task_hint(tid: str, req: TaskHintReq):
         raise HTTPException(400, str(e))
     except OverflowError as e:
         raise HTTPException(429, str(e))
+
+
+class DraftReq(BaseModel):
+    text: str = ""
+
+
+class PrefsReq(BaseModel):
+    kit_id: str = ""
+
+
+class TrailReq(BaseModel):
+    data: dict = {}
+
+
+@app.get("/api/tasks/{tid}/draft")
+def task_draft_get(tid: str, request: Request):
+    uid = auth.me(request)
+    t = store.get_task(tid)
+    if not t or t.user_id != uid:
+        raise HTTPException(404, "task not found")
+    return {"text": store.get_draft(uid, tid)}
+
+
+@app.put("/api/tasks/{tid}/draft")
+def task_draft_put(tid: str, req: DraftReq, request: Request):
+    uid = auth.me(request)
+    t = store.get_task(tid)
+    if not t or t.user_id != uid:
+        raise HTTPException(404, "task not found")
+    if t.status == "done":
+        raise HTTPException(400, "已完成的作业不用再改草稿")
+    return {"text": store.set_draft(uid, tid, req.text)}
+
+
+@app.get("/api/me/prefs")
+def prefs_get(request: Request):
+    return store.get_prefs(auth.me(request))
+
+
+@app.put("/api/me/prefs")
+def prefs_put(req: PrefsReq, request: Request):
+    return store.set_prefs(auth.me(request), kit_id=req.kit_id)
+
+
+@app.get("/api/projects/{pid}/trail")
+def trail_get(pid: str, request: Request):
+    return store.get_trail(auth.me(request), pid)
+
+
+@app.put("/api/projects/{pid}/trail")
+def trail_put(pid: str, req: TrailReq, request: Request):
+    data = req.data if isinstance(req.data, dict) else {}
+    return store.set_trail(auth.me(request), pid, data)
 
 
 # ---------- me（AI 认识的我） ----------
@@ -1168,6 +1221,41 @@ def llm_connect(req: LlmConnectReq, request: Request):
     if not probe.get("ok"):
         raise HTTPException(502, probe.get("error") or "模型连通失败")
     return {"ok": True, "model": cfg["model"], "base_url": cfg["base_url"]}
+
+
+def _mine_override(req: LlmConnectReq) -> dict:
+    base = (req.base_url or "https://api.deepseek.com/v1").strip().rstrip("/")
+    key = (req.api_key or "").strip()
+    model = (req.model or "deepseek-flash").strip()
+    if not key:
+        raise HTTPException(400, "API key is required")
+    if not base.startswith("https://"):
+        raise HTTPException(400, "base_url must start with https://")
+    return {"api_key": key, "base_url": base, "model": model}
+
+
+@app.get("/api/llm/mine")
+def llm_mine_get(request: Request):
+    return store.llm_secret_meta(auth.me(request))
+
+
+@app.post("/api/llm/mine")
+def llm_mine_set(req: LlmConnectReq, request: Request):
+    uid = auth.me(request)
+    if auth.account(uid)["guest"]:
+        raise HTTPException(403, "先注册一个账号，再保存自己的密钥")
+    cfg = _mine_override(req)
+    probe = llm.probe(override=cfg)
+    if not probe.get("ok"):
+        raise HTTPException(400, probe.get("error") or "模型连通失败")
+    meta = store.save_llm_secret(uid, cfg["api_key"], cfg["base_url"], cfg["model"])
+    return {"ok": True, **meta}
+
+
+@app.delete("/api/llm/mine")
+def llm_mine_del(request: Request):
+    store.delete_llm_secret(auth.me(request))
+    return {"ok": True, "has_key": False}
 
 
 @app.get("/api/health")

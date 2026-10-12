@@ -6,11 +6,14 @@
 /* ---------- 状态 ---------- */
 
 const S = {
-  uid: localStorage.getItem("rg_uid") || "",
-  token: localStorage.getItem("rg_token") || "",
-  nickname: localStorage.getItem("rg_nick") || "",
+  uid: "",
+  token: "",
+  nickname: "",
   wechat: false,
   guest: true,
+  username: "",
+  hasLlmKey: false,
+  llmKeyTail: "",
   auth: null,
   view: "home",
   resume: "login",
@@ -61,8 +64,9 @@ function authHeaders(extra) {
 const PRIVACY_HTML = `
   <h4>存了什么</h4>
   <ul>
-    <li><b>账号</b>：昵称；用微信登录的话还有公众号给的 openid——一串只对「启研」公众号有效的编号，不是你的微信号。我们拿不到你的手机号和微信资料，也不用密码。</li>
-    <li><b>你写下和做过的</b>：对话；从对话里记下的画像（每条都标来源，在「记录」里能改能删）；你粘贴的成绩单；任务和项目提交；阅读卡；定位里的边、陈述和下注。</li>
+    <li><b>账号</b>：用户名和称呼；密码只存哈希。用微信登录的话还有公众号给的 openid——一串只对「启研」公众号有效的编号，不是你的微信号。我们拿不到你的手机号和微信资料。</li>
+    <li><b>你写下和做过的</b>：对话；从对话里记下的画像（每条都标来源，在「记录」里能改能删）；你粘贴的成绩单；任务和项目提交；阅读卡；定位里的边、陈述和下注；作业草稿和项目路径进度。</li>
+    <li><b>你上传的模型密钥</b>：封装后存在你自己的账号下，不出现在页面回显和导出全文里。对话和作业提示会用这把密钥请求大模型。</li>
     <li><b>登录会话</b>：只存令牌的哈希，三十天不用就失效。</li>
   </ul>
   <h4>谁能看到</h4>
@@ -88,22 +92,28 @@ function setSession(r) {
   if (r.token) S.token = r.token;
   S.nickname = r.nickname || S.nickname;
   S.wechat = !!r.wechat;
-  S.guest = r.guest !== false && !r.wechat;
-  try {
-    localStorage.setItem("rg_uid", S.uid);
-    localStorage.setItem("rg_token", S.token);
-    localStorage.setItem("rg_nick", S.nickname);
-  } catch (_) { /* 无痕模式只在这一页有效 */ }
+  S.username = r.username || "";
+  S.guest = r.guest !== false && !r.wechat && !S.username;
+  S.hasLlmKey = !!r.has_llm_key;
+  S.llmKeyTail = r.llm_key_tail || "";
+  dropPersistedSession();
   const chip = document.getElementById("userNickname");
   if (chip) chip.textContent = S.nickname;
 }
 
-function clearSession() {
-  S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
-  S.myDir = undefined;
+function dropPersistedSession() {
+  /* 旧版把登录写进 localStorage，打开页面还会是同一个人。现在只记在这一页的内存里。 */
   ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
     try { localStorage.removeItem(k); } catch (_) { /* ignore */ }
   });
+}
+
+function clearSession() {
+  S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
+  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = "";
+  S.nickname = "";
+  S.myDir = undefined;
+  dropPersistedSession();
 }
 
 function signedOut(msg) {
@@ -1306,9 +1316,12 @@ async function logout() {
 function accountPanel() {
   const box = el("section", "panel account-panel");
   box.appendChild(el("h3", "section-label", "账号"));
-  box.appendChild(el("p", "panel-sub", S.wechat
-    ? `已用微信登录：${esc(S.nickname)}`
-    : `访客「${esc(S.nickname)}」。云上临时库回收后，这个浏览器里的旧账号会失效，重新进入即可。`));
+  const who = S.username
+    ? `已登录：${esc(S.username)}（${esc(S.nickname)}）`
+    : S.wechat
+      ? `已用微信登录：${esc(S.nickname)}`
+      : `访客「${esc(S.nickname)}」。换设备找不回，请退出后注册一个账号。`;
+  box.appendChild(el("p", "panel-sub", who));
   const acts = el("div", "account-actions");
   const add = (label, cls, fn) => {
     const b = el("button", cls, label);
@@ -1316,6 +1329,7 @@ function accountPanel() {
     b.onclick = fn;
     acts.appendChild(b);
   };
+  if (!S.guest) add("我的 DeepSeek", "btn small", () => openMineKey());
   add("退出", "btn small secondary", async () => { await logout(); });
   add("删除账号", "btn small ghost", async () => {
     const typed = window.prompt("删除后记录立刻清掉。确定的话输入「删除」：");
@@ -1337,38 +1351,86 @@ function renderLogin() {
   $app.innerHTML = "";
   const hero = el("section", "hero stagger");
   hero.appendChild(el("p", "hero-kicker", "启研"));
-  hero.appendChild(el("h2", "", "怎么称呼你？"));
-  hero.appendChild(el("p", "hero-lead", "起个称呼就行，不用真名。进去先聊几句，再看今天做什么。"));
-  const row = el("div", "login-row");
-  const input = el("input"); input.placeholder = "你的昵称，例如：小北"; input.maxLength = 24;
-  input.setAttribute("aria-label", "昵称");
-  const btn = el("button", "btn", "进入启研");
-  btn.type = "button";
-  btn.onclick = async () => {
-    const nick = input.value.trim();
-    if (!nick) { toast("先起个昵称吧"); input.focus(); return; }
-    btn.disabled = true; btn.textContent = "进入中…";
-    try {
-      setSession(await api("POST", "/api/auth/login", { nickname: nick, consent: true }));
-      S.myDir = undefined;
-      await api("POST", "/api/onboard/start", { uid: S.uid });
-      toast(`你好，${S.nickname}`);
-      setView("dialogue");
-    } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "进入启研"; }
+  hero.appendChild(el("h2", "", "进来做事"));
+  hero.appendChild(el("p", "hero-lead", "注册之后换浏览器也能找回作业。用户名 2–24 个字符，字母数字下划线；密码至少 8 位。"));
+  const tabs = el("div", "login-tabs");
+  let mode = "signin";
+  const body = el("div", "login-body");
+  const paint = () => {
+    body.innerHTML = "";
+    tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+    if (mode === "signin") {
+      const user = el("input"); user.placeholder = "用户名"; user.autocomplete = "username";
+      const pass = el("input"); pass.type = "password"; pass.placeholder = "密码"; pass.autocomplete = "current-password";
+      const btn = el("button", "btn", "登录");
+      btn.type = "button";
+      btn.onclick = async () => {
+        if (!user.value.trim() || !pass.value) { toast("先填用户名和密码"); return; }
+        btn.disabled = true; btn.textContent = "登录中…";
+        try {
+          setSession(await api("POST", "/api/auth/signin", { username: user.value.trim(), password: pass.value }));
+          S.myDir = undefined;
+          await afterEnter();
+        } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "登录"; }
+      };
+      pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
+      body.append(user, pass, btn);
+    } else if (mode === "register") {
+      const user = el("input"); user.placeholder = "用户名，例如 xiaobei"; user.autocomplete = "username";
+      const nick = el("input"); nick.placeholder = "怎么称呼你（可与用户名相同）"; nick.maxLength = 24;
+      const pass = el("input"); pass.type = "password"; pass.placeholder = "密码，至少 8 位"; pass.autocomplete = "new-password";
+      const btn = el("button", "btn", "注册并进入");
+      btn.type = "button";
+      btn.onclick = async () => {
+        if (!user.value.trim() || pass.value.length < 8) { toast("用户名和至少 8 位密码"); return; }
+        btn.disabled = true; btn.textContent = "注册中…";
+        try {
+          setSession(await api("POST", "/api/auth/register", {
+            username: user.value.trim(), password: pass.value,
+            nickname: nick.value.trim() || user.value.trim(), consent: true,
+          }));
+          S.myDir = undefined;
+          await api("POST", "/api/onboard/start", { uid: S.uid });
+          toast(`你好，${S.nickname}`);
+          setView("dialogue");
+        } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "注册并进入"; }
+      };
+      pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
+      body.append(user, nick, pass, btn);
+    }
   };
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
-  row.append(input, btn);
+  [["signin", "登录"], ["register", "注册"]].forEach(([id, label]) => {
+    const b = el("button", "login-tab" + (id === mode ? " on" : ""), label);
+    b.type = "button";
+    b.dataset.mode = id;
+    b.onclick = () => { mode = id; paint(); };
+    tabs.appendChild(b);
+  });
   const links = el("div", "hero-links");
-  const link = el("button", "linkish", "连接模型 API");
-  link.type = "button";
-  link.onclick = () => openConnect();
+  const admin = el("button", "linkish", "服务器共用模型（管理员）");
+  admin.type = "button";
+  admin.onclick = () => openConnect();
   const back = el("button", "linkish", "返回首页");
   back.type = "button";
   back.onclick = () => setView("home");
-  links.append(link, back);
-  hero.append(row, links);
+  links.append(admin, back);
+  hero.append(tabs, body, links);
   $app.appendChild(hero);
-  input.focus();
+  paint();
+}
+
+async function afterEnter() {
+  try {
+    const st = await api("GET", `/api/onboard/result?uid=${S.uid}`);
+    if (st.state && st.state.phase === "done") {
+      toast(`欢迎回来，${S.nickname}`);
+      setView("today");
+      return;
+    }
+  } catch (_) { /* 新号或没有向导记录 */ }
+  await api("POST", "/api/onboard/start", { uid: S.uid }).catch(() => {});
+  toast(`你好，${S.nickname}`);
+  setView("dialogue");
 }
 
 function openConnect() {
@@ -1418,9 +1480,66 @@ function openConnect() {
 function applyLlmPill(llm) {
   const pill = document.getElementById("llmPill");
   if (!pill || !llm) return;
+  if (S.uid && !S.guest) {
+    pill.textContent = S.hasLlmKey ? `我的模型 · ${S.llmKeyTail || "已保存"}` : "我的 DeepSeek";
+    pill.classList.toggle("on", !!S.hasLlmKey);
+    pill.onclick = () => openMineKey();
+    return;
+  }
   pill.textContent = llm.enabled ? `模型 · ${llm.model}` : "连接模型";
   pill.classList.toggle("on", !!llm.enabled);
   pill.onclick = () => openConnect();
+}
+
+function openMineKey() {
+  if (S.guest) { toast("先注册一个账号，再保存自己的密钥"); return; }
+  document.querySelectorAll(".connect-mask").forEach((n) => n.remove());
+  const mask = el("div", "connect-mask");
+  const box = el("form", "connect-box");
+  const saved = S.hasLlmKey ? `已保存 · 末四位 ${esc(S.llmKeyTail)}` : "还没有保存自己的密钥";
+  box.innerHTML = `
+    <p class="hero-kicker">MINE</p>
+    <h3>我的 DeepSeek</h3>
+    <p class="panel-sub">${saved}。密钥只存在你的账号下，探测通过才保存，页面上看不到全文。</p>
+    <label>接口地址<input name="base" value="https://api.deepseek.com/v1" /></label>
+    <label>API Key<input name="key" type="password" placeholder="sk-…" autocomplete="off" /></label>
+    <label>模型名<input name="model" value="deepseek-flash" /></label>
+    <div class="connect-actions">
+      <button type="button" class="btn secondary" id="mineCancel">取消</button>
+      ${S.hasLlmKey ? '<button type="button" class="btn ghost" id="mineDel">删除</button>' : ""}
+      <button type="submit" class="btn" id="mineGo">测试并保存</button>
+    </div>`;
+  mask.appendChild(box);
+  document.body.appendChild(mask);
+  box.querySelector("#mineCancel").onclick = () => mask.remove();
+  const del = box.querySelector("#mineDel");
+  if (del) del.onclick = async () => {
+    try {
+      await api("DELETE", "/api/llm/mine");
+      S.hasLlmKey = false; S.llmKeyTail = "";
+      applyLlmPill({ enabled: false });
+      toast("已删除自己的密钥");
+      mask.remove();
+    } catch (e) { toast(e.message); }
+  };
+  mask.addEventListener("click", (e) => { if (e.target === mask) mask.remove(); });
+  box.onsubmit = async (e) => {
+    e.preventDefault();
+    const go = box.querySelector("#mineGo");
+    go.disabled = true; go.textContent = "正在连通…";
+    try {
+      const r = await api("POST", "/api/llm/mine", {
+        base_url: box.base.value.trim(), api_key: box.key.value.trim(), model: box.model.value.trim(),
+      });
+      S.hasLlmKey = true; S.llmKeyTail = r.tail || "";
+      applyLlmPill({ enabled: true, model: r.model });
+      toast("已保存你的 DeepSeek");
+      mask.remove();
+    } catch (err) {
+      toast(err.message);
+      go.disabled = false; go.textContent = "测试并保存";
+    }
+  };
 }
 
 function currentDirLabel() {
@@ -1473,6 +1592,12 @@ async function openUserMenu() {
   menu.appendChild(go("继续聊", S.portraitTab || "dialogue"));
   menu.appendChild(go("核对这些记录", "confirm"));
   menu.appendChild(go("它记下的", "me"));
+  if (!S.guest) {
+    const mine = el("button", "user-menu-item", "我的 DeepSeek");
+    mine.type = "button";
+    mine.onclick = () => { closeUserMenu(); openMineKey(); };
+    menu.appendChild(mine);
+  }
   wrap.appendChild(menu);
 }
 
@@ -2081,6 +2206,7 @@ async function ensurePortrait() {
     S.portraitId = "";
   }
   if (S.portraitId) adoptLegacyTrail(S.portraitId);
+  await pullTrail();
   return S.portraitId;
 }
 
@@ -2122,12 +2248,31 @@ function saveTrail(t, force) {
     const nextI = nextAt ? path.findIndex((n) => n.id === nextAt.id) : path.length;
     if (nextI < prevI) done = prev.done;
   }
-  localStorage.setItem(trailStorageKey(), JSON.stringify({
+  const packed = {
     code,
     dir: t.dir || (force ? "" : prev.dir) || (window.RG_DIR && RG_DIR.legacyDir[code]) || "",
     done,
     tasks: force ? (t.tasks || {}) : Object.assign({}, prev.code === code && prev.dir === (t.dir || prev.dir) ? prev.tasks : {}, t.tasks || {}),
-  }));
+  };
+  localStorage.setItem(trailStorageKey(), JSON.stringify(packed));
+  if (S.token) {
+    const pid = S.portraitId || "default";
+    api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
+  }
+}
+
+async function pullTrail() {
+  if (!S.token) return;
+  const pid = S.portraitId || "default";
+  try {
+    const remote = await api("GET", `/api/projects/${pid}/trail`);
+    if (remote && remote.code) {
+      localStorage.setItem(trailStorageKey(), JSON.stringify(remote));
+    } else {
+      const local = trail();
+      if (local.code) await api("PUT", `/api/projects/${pid}/trail`, { data: local });
+    }
+  } catch (_) { /* 先用本地 */ }
 }
 
 function inferredDone(code, tasks) {
@@ -2856,6 +3001,19 @@ function writeDraft(tid, text) {
     if (text) localStorage.setItem("rg_draft_" + tid, text);
     else localStorage.removeItem("rg_draft_" + tid);
   } catch (_) { /* 存不了就算了，不影响提交 */ }
+  if (S.token) api("PUT", `/api/tasks/${tid}/draft`, { text: text || "" }).catch(() => {});
+}
+async function hydrateDraft(tid, ta) {
+  if (!S.token) return;
+  try {
+    const r = await api("GET", `/api/tasks/${tid}/draft`);
+    if (r.text) {
+      try { localStorage.setItem("rg_draft_" + tid, r.text); } catch (_) { /* ignore */ }
+      if (ta && !ta.value) ta.value = r.text;
+    } else if (readDraft(tid)) {
+      await api("PUT", `/api/tasks/${tid}/draft`, { text: readDraft(tid) });
+    }
+  } catch (_) { /* 断网先用本地 */ }
 }
 
 function emptyPanel(text, label, view) {
@@ -3001,6 +3159,7 @@ function taskPanel(task, opts) {
   ta.placeholder = "按「交」里要求的写。没做完也可以交。";
   ta.setAttribute("aria-label", "提交内容");
   ta.value = readDraft(task.id);
+  hydrateDraft(task.id, ta).then(() => { if (ta.value) recount(); }).catch(() => {});
   const count = el("span", "hint");
   const recount = () => {
     count.textContent = ta.value.trim()
@@ -3556,6 +3715,7 @@ function openCard(arxivId) {
 function useKit(kitId) {
   S.kitId = kitId;
   try { localStorage.setItem("rg_kit", kitId); } catch (_) { /* 存不了就每次用默认 */ }
+  if (S.token) api("PUT", "/api/me/prefs", { kit_id: kitId }).catch(() => {});
 }
 
 async function renderRead() {
@@ -5184,6 +5344,7 @@ document.addEventListener("click", (e) => {
 
 (async function boot() {
   const t0 = performance.now();
+  dropPersistedSession();
   try {
     const [h, paths] = await Promise.all([api("GET", "/api/health"), api("GET", "/api/paths").catch(() => null)]);
     applyLlmPill(h.llm);
@@ -5198,6 +5359,10 @@ document.addEventListener("click", (e) => {
     try {
       const me = await api("GET", "/api/auth/me");
       setSession(me);
+      try {
+        const prefs = await api("GET", "/api/me/prefs");
+        if (prefs.kit_id) useKit(prefs.kit_id);
+      } catch (_) { /* 没有偏好就用本地 */ }
       const st = await api("GET", `/api/onboard/result?uid=${S.uid}`);
       S.portraitTab = st.state && st.state.phase === "done" ? "confirm" : "dialogue";
       S.resume = "today";

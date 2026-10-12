@@ -439,7 +439,8 @@ def _corpus(bundle: dict[str, Any], readme_path: str) -> str:
 
 
 def _llm_review(bundle: dict[str, Any], checks: dict[str, Any], project: dict[str, Any]) -> list[dict[str, Any]] | None:
-    if not llm.enabled():
+    uid = project.get("user_id")
+    if not llm.ready(uid):
         return None
     corpus = _corpus(bundle, checks["readme_path"])
     inv = "\n".join(f"- {i['path']}（{i['kind']}，{i['size']} 字节）" for i in bundle["inventory"][:60])
@@ -453,7 +454,7 @@ def _llm_review(bundle: dict[str, Any], checks: dict[str, Any], project: dict[st
         '输出 JSON：{"criteria":[{"key":"problem|results|match|check|limits","status":"pass|partial|fail",'
         '"evidence":[{"file":"路径","quote":"原文，不超过 40 字"}],"comment":"一句话","fix":"没做到时写改哪个文件、补什么；做到了留空"}],'
         '"summary":"一两句，只说这份成果"}',
-        timeout=45, tag="project-review",
+        timeout=45, tag="project-review", uid=project.get("user_id"),
     )
     items = (data or {}).get("criteria") if isinstance(data, dict) else None
     if not isinstance(items, list):
