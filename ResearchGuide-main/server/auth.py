@@ -22,6 +22,7 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -42,7 +43,7 @@ PER_IP_HOUR = int(os.environ.get("AUTH_PER_IP_HOUR") or 600)
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
-PRIVACY_VERSION = "2026-10-12"
+PRIVACY_VERSION = "2026-10-14"
 
 # 不登录也能用的接口（按路由模板写）。新加的接口默认要登录：要么带 uid，要么加到这里并说明为什么可以公开。
 PUBLIC = frozenset({
@@ -56,6 +57,8 @@ PUBLIC = frozenset({
     "/mcp", "/api/projects/sources", "/api/paths", "/api/kits", "/api/kits/{kit_id}",
     "/api/brief",
     "/api/llm/connect",  # 自己核对管理员口令
+    "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
+    "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
 })
 
 router = APIRouter()
@@ -88,7 +91,7 @@ async def guard(request: Request) -> None:
     budget.bind(None)  # 先当匿名：公开接口不许调模型
     path = request.url.path or ""
     route_path = getattr(route, "path", None)
-    if path.startswith("/static") or route_path in PUBLIC or path in PUBLIC:
+    if path.startswith("/static") or path.startswith("/api/admin") or route_path in PUBLIC or path in PUBLIC:
         return
     # 路由还没绑上时，公开知识仍按路径放行，避免工具包被过期会话拖成 401。
     # 论文原文 /api/papers/ 不在这里：没登录也能让服务器去 arXiv 取任意论文，会占满限速的抓取队列和磁盘缓存
@@ -195,6 +198,35 @@ def _dev() -> bool:
     return os.environ.get("AUTH_DEV_CODES") == "1" and not wechat.configured()
 
 
+ENTER_GATE_SINCE = "2026-10-13"  # 这天起新号默认未进入；更早的号视为已进入
+_CHINA = timezone(timedelta(hours=8))
+
+
+def _china_day(raw: str) -> str:
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_CHINA).date().isoformat()
+    except ValueError:
+        return raw[:10]
+
+
+def user_entered(uid: str, u: dict[str, Any] | None = None) -> bool:
+    """进入按人记，不按画像。prefs.entered_at、上线日前的老号、或已有用户消息。"""
+    u = u if u is not None else (store.get_user(uid) or {})
+    prefs = store.get_prefs(uid)
+    if prefs.get("entered_at"):
+        return True
+    created = str(u.get("created_at") or "")
+    if created and _china_day(created) < ENTER_GATE_SINCE:
+        return True
+    for m in store.list_messages(uid):
+        if m.get("role") == "user":
+            return True
+    return False
+
+
 def account(uid: str) -> dict[str, Any]:
     u = store.get_user(uid) or {}
     username = u.get("username") or ""
@@ -210,6 +242,7 @@ def account(uid: str) -> dict[str, Any]:
         "llm_left": budget.left(uid) if u else 0,  # 今天还能让服务器的模型回答几次；用自己密钥的人不受这个数限制
         "has_llm_key": meta["has_key"],
         "llm_key_tail": meta["tail"],
+        "entered": user_entered(uid, u),
     }
 
 

@@ -6,6 +6,70 @@
 
 ---
 
+## [2026-10-14] [FIX] 并入 main（w71–w74：壳与栏目、开场全屏对话与「我的」、按兴趣每日论文、服务端带读、运维止血）
+
+- 变更内容：把上游 d874523 并进本分支（它按 docs/tasks 的五份任务书实现了 w71–w74）。和本分支对接：模型池与限流照旧——带读的 start/turn 进 `_MODEL` 池（`_in_model_pool`，从 `_model_work` 抽出）并挂用户锁，`/api/cards` 仍挂 SERIAL，每日取数用 `workpool.BoundedPool(1, 16)` 的独立小池而不是 `ThreadPoolExecutor`；`/api/health` 同时给 `model_pool` 的真实计数和上游的 `checks`；`quotes.locate` 同时支持 `prefer`（多处出现时挑局限段那一处）和带读的 `within`/`at`，`check_limitation` 仍传 `prefer=LIMIT_SECTIONS`；`store.init_db` 先建墓碑触发器再迁移旧的 XOR 封装；deploy_fc 用上游的 merge_env/refuse_unsafe、删掉本分支那份吞异常的 `existing_env`，更新与创建都保持单实例 200 并发。前端：保留本分支的会话持久化（localStorage、停着的号、换人整页重载）、微信 / 账号 / 注册三栏登录页和「设用户名密码」，接上上游的 `entered`（`setSession` 读 `r.entered`、`firstView`/`enterApp`、登录后统一走 `afterEnter`）、`confirm` 转「我的」页、项目占位页、今日论文区、对话右栏只读；`/api/nba` 随上游删去。隐私说明合成一份（带读作答一条照上游），指纹重算。界面 w75。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/deploy/README.md
+- 影响模块：server/main.py、server/quotes.py、server/reading.py、server/store.py、tools/deploy/deploy_fc.py、web/js/app.js、web/js/chat.js、web/index.html、server/tests/test_auth.py
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
+## [2026-10-13] [FIX] deploy_fc 适配当前 FC SDK 的 GetFunction
+
+- 变更内容：`get_function` 必须带 `GetFunctionRequest`，否则读现有环境变量在发版时直接 TypeError。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/deploy_fc.py
+- 决策来源：邬程灿（现场发版）
+- 登记人：助手
+
+## [2026-10-13] [FIX] 带读 404 与抽表前的论文缓存
+
+- 变更内容：抽表之前写下的 HTML 正文缓存（没有 `tables` 字段）下次打开会重取。latexml 用 `<td>` 写的表头升成表头。本机旧进程没有 `/api/tutor`，需重启后带读才通。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/arxiv.py
+- 决策来源：邬程灿（现场）
+- 登记人：助手
+
+## [2026-10-13] [OPS] 运维止血、备份接口与手册
+
+- 变更内容：`deploy_fc` 读现有环境变量失败不再当空字典；生产缺盘或缺 `QIYAN_SECRET`/`WECHAT_APP_ID` 拒绝发布；单实例 `reserved_concurrency=1`。新增 `/api/admin/backup|restore|stats|maintenance|user/delete|rewrap`。删号打 `user_deleted` 日志。个人密钥改 AES-GCM。health 增加 `checks`（状态码仍 200）。探活工作流、发版清单和事故手册写入 DEPLOY.md。NAS / 钉钉 / RAM 标待确认，没有持久盘不准把生产发版写成已完成。人工找回口径改为用户名密码、每次打开要重新登录。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/deploy/README.md、.env.example
+- 影响模块：tools/deploy/deploy_fc.py、tools/deploy/fc_safety.py、tools/deploy/pack_fc.py、tools/deploy/publish_gh_pages.py、server/admin.py、server/store.py、server/auth.py、server/main.py、server/llm.py、.github/workflows/
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [FEAT] 服务端带读论文
+
+- 变更内容：研读论文页加「让它带我读」。启研 DeepSeek 按 `skills/paper-tutor/SKILL.md` 出题，代码按节判对错；学生作答不发给模型。读完预填阅读卡七栏，不自动交卡。只允许工具包论文。隐私说明列出「带读里的作答」并升到 2026-10-13。界面 w74。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/ARCHITECTURE.md、docs/DESIGN_PROPOSAL.md、skills/README.md
+- 影响模块：server/tutor.py、server/quotes.py、server/reading.py、server/store.py、server/main.py、skills/paper-tutor/SKILL.md、web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [FEAT] 今日按兴趣推荐每日新论文
+
+- 变更内容：每日候选按策展词表匹配兴趣与方向节点，不调模型翻译。今日主体改为分拣最近新论文；无话题时仍走先聊聊/核对/选方向。页面不加搜索框。删 `/api/nba`。界面 w73。
+- 影响文档：docs/CHANGELOG.md、docs/ARCHITECTURE.md、docs/DESIGN_SPEC.md
+- 影响模块：server/interests.py、server/reading.py、server/arxiv.py、server/store.py、server/main.py、server/planner.py、knowledge/arxiv_topics.json、web/js/app.js
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [UX] 开场全屏对话，「我的」承接核对与记忆
+
+- 变更内容：登录后未进入的人先全屏开场对话，可随时「进入启研」。进入按人记在 prefs。记忆编辑收到「我的」页，对话右栏只读。刷新仍要重新登录，登录后按后端 entered 恢复，不关回开场。界面 w72。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md、docs/TASK2_DIALOGUE.md、docs/DIALOGUE_CONTRACT.md、docs/ARCHITECTURE.md
+- 影响模块：server/auth.py、server/main.py、server/dialogue.py、server/onboarding.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [UX] 壳与栏目：首页加快、作业出侧栏、项目待开发、对话进侧栏
+
+- 变更内容：首页换屏约 1.4s、能排队连翻。侧栏改为今日 / 对话 / 研读 / 定位 / 项目（待开发）。作业不占栏目，任务页改称「这一步」。项目进占位页。研读修正文溢出、字重、伪章节、前置信息、矩阵宽度。界面 w71。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
 ## [2026-10-12] [FIX] 并入 main（w67–w70：四栏引导、作业正式题与提示、项目问答、研读真表、定位人话；注册登录、每人一把 DeepSeek、进度入库）
 
 - 变更内容：把上游 5898874、743b5e2、0d188ae 并进本分支。拿过来的：四栏「这一页先做什么」、作业正式题（已知 / 求 / 交）和「卡住了要提示」、项目先问答再按整条链检索、研读真表和一张卡出矩阵、定位序号人话和卡片地图、Windows 慢响应头按总时限断开、云端依赖按 wheel 清单重装；用户名 + 密码注册 / 登录 / 升级（`/api/auth/register`、`signin`、`upgrade`）、每人一把 DeepSeek（`user_secrets`，调用按 uid 带 key）、作业草稿 / 项目路径 / 研读工具包进库按人隔离。和本分支对接：模型预算（budget.py）只管服务器的密钥——用自己密钥的人（`llm.resolve_cfg` 给 `own=True`）不问额度也不扣；注册了用户名的人按「能找回的账号」算 `LLM_DAILY_USER`，不按访客；`/api/auth/me` 同时给 `llm_left` 和 `has_llm_key`；流式回复同时带 `status` 和 `uid`；`llm.ready(uid)` 兼容测试里零参的 `enabled` 桩；导出仍在一个读事务里，多出 `username` 一列；删号和墓碑触发器按列自动覆盖新表。登录页：微信 / 账号登录 / 注册三个标签，访客入口照旧要先勾隐私说明，密码登录后隐私说明过期会再问一次；「记录」页多「设用户名密码」（访客和微信号都能补）和「我的 DeepSeek」；用户菜单和侧栏模型钮也能开「我的 DeepSeek」；已完成的作业用上游的折叠面板，刷新后没有评阅的照样去服务器取。没拿的两条上游界面决定（w69「只留登录 / 注册、不再给访客入口」、w70「登录只记在内存里、打开页面重新登录」）：本分支的访客号、停着的另一个号、跨标签页同步、草稿都靠这台浏览器里存着的会话，改成每次重新登录等于访客的记录一刷新就没了；要跟上游走的话改 `boot()` 开头和 `setSession` / `clearSession` 即可。服务器上的草稿写进带 uid 的本地键。隐私说明补上用户名、上传的密钥、草稿和路径进度（版本 2026-10-12）。界面版本 w71。

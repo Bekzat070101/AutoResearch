@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import admin
 import auth
 import catalog
 import curriculum
@@ -46,9 +47,11 @@ import reading
 import store
 import submission
 import transcript
+import tutor
 import userlock
 import workbench
 import workpool
+from schemas import now_iso
 from pku_adapter import search_courses
 from limits import TTLCache
 from singleflight import AsyncFlight, Overloaded
@@ -68,25 +71,29 @@ atexit.register(_MODEL.drain)  # 没走 lifespan 的退出（直接跑脚本、�
 CROWDED_MSG = "现在用的人太多，模型那边在排队。请过一会儿再试"
 
 
-def _model_work(fn):
-    """把一个同步接口挪进 _MODEL 里跑。FastAPI 照样按原函数的签名解析参数；拿锁的依赖（SERIAL）在外面，
-    排队期间照样拿着这个人的锁。
-
+async def _in_model_pool(fn, *args, **kwargs):
+    """把一件要等模型的活送进 _MODEL 池并等它做完。排队满了回 503。
     请求被取消（服务在关、外层的取消域）时：还在排队的活撤掉；已经在跑的要等它做完才往外走——
     锁是外面的依赖在退出时放的，提前出去就提前放锁，切画像就能插进来，这一轮的结果写进新画像（Codex 复现）。"""
+    try:
+        fut = _MODEL.submit(functools.partial(fn, *args, **kwargs))
+    except Overloaded as exc:
+        raise HTTPException(503, CROWDED_MSG) from exc
+    try:
+        return await asyncio.wrap_future(fut)
+    except BaseException:
+        if not fut.cancel() and not fut.done():
+            with anyio.CancelScope(shield=True):  # 取消域每次 await 都会再取消一次：挡住，等它做完
+                await asyncio.wait([asyncio.wrap_future(fut)])
+        raise
+
+
+def _model_work(fn):
+    """把一个同步接口挪进 _MODEL 里跑。FastAPI 照样按原函数的签名解析参数；拿锁的依赖（SERIAL）在外面，
+    排队期间照样拿着这个人的锁。"""
     @functools.wraps(fn)
     async def endpoint(*args, **kwargs):
-        try:
-            fut = _MODEL.submit(functools.partial(fn, *args, **kwargs))
-        except Overloaded as exc:
-            raise HTTPException(503, CROWDED_MSG) from exc
-        try:
-            return await asyncio.wrap_future(fut)
-        except BaseException:
-            if not fut.cancel() and not fut.done():
-                with anyio.CancelScope(shield=True):  # 取消域每次 await 都会再取消一次：挡住，等它做完
-                    await asyncio.wait([asyncio.wrap_future(fut)])
-            raise
+        return await _in_model_pool(fn, *args, **kwargs)
     return endpoint
 
 
@@ -105,6 +112,16 @@ app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", d
               lifespan=_lifespan)
 store.init_db()
 app.include_router(auth.router)
+app.include_router(admin.router)
+
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    if os.environ.get("QIYAN_MAINTENANCE") == "1":
+        path = request.url.path or ""
+        if path.startswith("/api/") and not path.startswith("/api/admin") and path != "/api/health":
+            return JSONResponse({"detail": "维护中"}, status_code=503)
+    return await call_next(request)
 
 
 BUSY_MSG = "上一件事还在处理（比如正在等模型回话），稍后再试"
@@ -238,7 +255,7 @@ class ProjectPickReq(BaseModel):
 
 class TriageReq(BaseModel):
     uid: str
-    kit: str
+    kit: str = ""
     arxiv_id: str
     verdict: str
     why: str
@@ -252,6 +269,26 @@ class CardReq(BaseModel):
     fields: dict[str, str] = {}
     dims: dict[str, str] = {}
     decision_log: list[dict[str, str]] = []
+
+
+class TutorStartReq(BaseModel):
+    uid: str
+    kit: str
+    restart: bool = False
+
+
+class TutorTurnReq(BaseModel):
+    uid: str
+    kit: str
+    qid: str
+    answer: str = ""
+    skip: bool = False
+    rev: int = 0
+
+
+class TutorFinishReq(BaseModel):
+    uid: str
+    kit: str
 
 
 class EdgeReq(BaseModel):
@@ -399,6 +436,22 @@ def onboard_confirm(req: OnboardConfirmReq):
     _user_or_404(req.uid)
     confirmed = onboarding.confirm(req.uid, req.edits)
     return {"facts": [f.to_dict() for f in confirmed]}
+
+
+@app.post("/api/onboard/enter")
+def onboard_enter(req: NBAReq):
+    """按人记下「进入启研」。幂等：entered_at 只写第一次。不碰画像、不挂 SERIAL。"""
+    _user_or_404(req.uid)
+    state = store.get_onboard_state(req.uid)
+    phase = str(state.get("phase") or "")
+    extra = {
+        "entered_phase": phase,
+        "entered_early": not dialogue.onboard_done(req.uid),
+    }
+    if not store.get_prefs(req.uid).get("entered_at"):
+        extra["entered_at"] = now_iso()
+    store.set_prefs(req.uid, extra=extra)
+    return auth.account(req.uid)
 
 
 # ---------- 对话内核（任务2：环境观察 → 决策 → 工具 → 记忆）----------
@@ -688,14 +741,7 @@ def portraits_delete(pid: str, uid: str):
     return {"portraits": store.list_portraits(uid)}
 
 
-# ---------- nba / directions ----------
-
-@app.post("/api/nba")
-@_model_work
-def nba(req: NBAReq):
-    _user_or_404(req.uid)
-    return planner.next_best_action(req.uid)
-
+# ---------- directions ----------
 
 @app.get("/api/directions/recommend")
 def directions_recommend(uid: str):
@@ -769,7 +815,7 @@ def task_hint(tid: str, req: TaskHintReq):
     if not t or t.user_id != req.uid:
         raise HTTPException(404, "task not found")
     if t.status == "done":
-        raise HTTPException(400, "已完成的作业不用再要提示")
+        raise HTTPException(400, "已完成的这一步不用再要提示")
     try:
         return workbench.hint_task(req.uid, t, req.question, req.draft)
     except ValueError as e:
@@ -1212,8 +1258,9 @@ _FLIGHTS = {
     "arxiv": AsyncFlight(workpool.BoundedPool(4, 32, "arxiv"), max_pending=32),
     "index": AsyncFlight(workpool.BoundedPool(2, 16, "index"), max_pending=16),
     "courses": AsyncFlight(workpool.BoundedPool(4, 32, "courses"), max_pending=32),
+    "daily": AsyncFlight(workpool.BoundedPool(1, 16, "daily"), max_pending=16),  # 每日取数单独一个小池，不挤占论文全文的名额
 }
-_FLIGHT_OF = {"paper": "arxiv", "daily": "arxiv", "index": "index", "courses": "courses"}
+_FLIGHT_OF = {"paper": "arxiv", "daily": "daily", "index": "index", "courses": "courses"}
 
 
 async def _shared(key: tuple, fn, *args):
@@ -1284,20 +1331,47 @@ def kit_get(kit_id: str):
 
 def _daily_payload(uid: str, kit: str, source: tuple[list, str]) -> dict:
     d = _reading(reading.daily, uid, kit, source)
+    prefs_kit = store.get_prefs(uid).get("kit_id") or ""
+    if not prefs_kit:
+        return d
     today = [r for r in d["recent_keeps"] if r["created_at"][:10] == reading.now_iso()[:10]]
-    return {**d, "tweak": _reading(positioning.daily_tweak, uid, kit, today)}
+    return {**d, "tweak": _reading(positioning.daily_tweak, uid, prefs_kit, today)}
+
+
+def _interest_daily(uid: str) -> dict:
+    import interests
+    ids, _ = interests.user_topics(uid)
+    sources = {}
+    fetched = False
+    for tid in ids:
+        got = reading.topic_source(tid, cached_only=True)
+        if got is None and not fetched:
+            got = reading.topic_source(tid, cached_only=False)
+            fetched = True
+        if got is not None:
+            sources[tid] = got
+    d = reading.daily_for_user(uid, sources)
+    prefs_kit = store.get_prefs(uid).get("kit_id") or ""
+    if prefs_kit:
+        today = [r for r in d["recent_keeps"] if r["created_at"][:10] == reading.now_iso()[:10]]
+        d = {**d, "tweak": _reading(positioning.daily_tweak, uid, prefs_kit, today)}
+    return d
 
 
 @app.get("/api/daily")
-async def daily_feed(uid: str, kit: str):
+async def daily_feed(uid: str, kit: str = ""):
     await run_in_threadpool(_user_or_404, uid)
-    source = await _daily_source_for(kit)
-    return await run_in_threadpool(_daily_payload, uid, kit, source)
+    if kit:
+        source = await _daily_source_for(kit)
+        return await run_in_threadpool(_daily_payload, uid, kit, source)
+    return await run_in_threadpool(_reading, _interest_daily, uid)
 
 
 @app.post("/api/daily/triage", dependencies=SERIAL)
 async def daily_triage(req: TriageReq):
     await run_in_threadpool(_user_or_404, req.uid)
+    if not req.kit:
+        return await run_in_threadpool(_reading, reading.triage, req.uid, "", req.arxiv_id, req.verdict, req.why, req.title, None)
     source = await _daily_source_for(req.kit)
     return await run_in_threadpool(_reading, reading.triage, req.uid, req.kit, req.arxiv_id, req.verdict, req.why, req.title, source)
 
@@ -1325,6 +1399,48 @@ def card_history(arxiv_id: str, uid: str, kit: str):
 def _card_submit(req: CardReq) -> dict:
     _user_or_404(req.uid)
     return _reading(reading.submit_card, req.uid, req.kit, req.arxiv_id, req.fields, req.dims, req.decision_log)
+
+
+def _tutor_call(fn, *args):
+    try:
+        return fn(*args)
+    except tutor.TutorConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except tutor.TutorError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except reading.arxiv.ArxivError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/tutor/{arxiv_id}")
+def tutor_get(arxiv_id: str, uid: str, kit: str):
+    _user_or_404(uid)
+    return {"session": _tutor_call(tutor.get, uid, kit, reading.arxiv.clean_id(arxiv_id))}
+
+
+@app.post("/api/tutor/{arxiv_id}/start", dependencies=SERIAL)
+async def tutor_start(arxiv_id: str, req: TutorStartReq):
+    aid = _reading(reading.arxiv.clean_id, arxiv_id)
+    await run_in_threadpool(_user_or_404, req.uid)
+    if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+        await _shared(("paper", aid), _paper_payload, aid)
+    await _shared(("index", aid), _paper_index, aid)
+    return await _in_model_pool(_tutor_call, tutor.start, req.uid, req.kit, aid, req.restart)  # 出题要等模型：进模型池，不占公用线程
+
+
+@app.post("/api/tutor/{arxiv_id}/turn", dependencies=SERIAL)
+async def tutor_turn(arxiv_id: str, req: TutorTurnReq):
+    aid = _reading(reading.arxiv.clean_id, arxiv_id)
+    await run_in_threadpool(_user_or_404, req.uid)
+    return await _in_model_pool(
+        _tutor_call, tutor.turn, req.uid, req.kit, aid, req.qid, req.answer, req.skip, req.rev)  # 跨站时要出题
+
+
+@app.post("/api/tutor/{arxiv_id}/finish", dependencies=SERIAL)
+async def tutor_finish(arxiv_id: str, req: TutorFinishReq):
+    aid = _reading(reading.arxiv.clean_id, arxiv_id)
+    await run_in_threadpool(_user_or_404, req.uid)
+    return await run_in_threadpool(_tutor_call, tutor.finish, req.uid, req.kit, aid)
 
 
 @app.post("/api/cards", dependencies=SERIAL)
@@ -1480,6 +1596,22 @@ def llm_mine_del(request: Request):
     return {"ok": True, "has_key": False}
 
 
+def _build_stamp() -> str:
+    for cand in (Path(__file__).resolve().parent.parent / "BUILD", Path(__file__).resolve().parent / "BUILD"):
+        if cand.exists():
+            return cand.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _wechat_secure() -> bool:
+    try:
+        import wechat
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+        return bool(os.environ.get("WECHAT_AES_KEY") and os.environ.get("WECHAT_APP_ID") and wechat.configured())
+    except Exception:
+        return False
+
+
 @app.get("/api/health")
 def health():
     cfg = llm.config()
@@ -1496,6 +1628,11 @@ def health():
         "db": {"ephemeral": store.ephemeral()},  # true 就是库会随实例一起没：上线前必须是 false
         "threads": THREADS,
         "model_pool": _MODEL.stats(),  # queued 长时间接近 max_queued：要么模型慢了，要么该加 QIYAN_MODEL_THREADS
+        "checks": {
+            "secret_set": bool(os.environ.get("QIYAN_SECRET")),
+            "wechat_secure": _wechat_secure(),
+            "build": _build_stamp(),
+        },
     }
 
 

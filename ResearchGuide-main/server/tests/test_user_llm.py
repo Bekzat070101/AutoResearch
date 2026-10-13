@@ -120,3 +120,24 @@ def test_user_without_key_falls_back_to_rules(monkeypatch):
     uid = store.create_user("无钥")["uid"]
     assert llm.ready(uid) is False
     assert llm.chat("s", "u", uid=uid) is None
+
+
+def test_same_length_keys_cannot_unwrap_each_other():
+    a = store.wrap_secret("sk-aaa-aaaa")
+    b = store.wrap_secret("sk-bbb-bbbb")
+    assert a.startswith("v2:") and b.startswith("v2:") and a != b
+    assert store.unwrap_secret(a) == "sk-aaa-aaaa"
+    assert store.unwrap_secret(b) == "sk-bbb-bbbb"
+
+
+def test_model_output_includes_own(capsys, monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "sk-team-key")
+    monkeypatch.setattr(llm, "_post", lambda *a, **k: ({"choices": [{"message": {"content": "ok"}}], "usage": {}}, ""))
+    assert llm.chat("s", "u") == "ok"
+    logged = capsys.readouterr().out
+    assert '"own": false' in logged
+    uid = store.create_user("自钥")["uid"]
+    store.save_llm_secret(uid, "sk-own-key", "https://api.deepseek.com/v1", "deepseek-flash")
+    assert llm.chat("s", "u", uid=uid) == "ok"
+    logged = capsys.readouterr().out
+    assert '"own": true' in logged

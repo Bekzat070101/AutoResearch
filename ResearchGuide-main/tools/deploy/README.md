@@ -16,13 +16,13 @@ https://chengcanwu.github.io/AutoResearch/
 在 `ResearchGuide-main/tools/deploy`（发布脚本要阿里云 SDK，用 uv 临时带上，不装进项目）：
 
 ```
-uv run --no-project --with pip python download_wheels.py
-uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py
+python download_wheels.py
+python deploy_fc.py qiyan-test
+python deploy_fc.py          # 生产：库仍在 /tmp 时会拒绝，除非 --allow-ephemeral
+python publish_gh_pages.py   # 前端，提交信息带界面 wNN
 ```
 
-更新函数时保留函数上已有的环境变量（控制台里配的 `WECHAT_*`、改过的 `QIYAN_DB`）；本机 `.env` 写了 `QIYAN_DB` 就用它。
-
-函数名 `qiyan`，地域 `cn-hangzhou`。公网地址写在已忽略的 `.deploy.env` 的 `PUBLIC_URL`。
+函数名 `qiyan`，地域 `cn-hangzhou`。公网地址写在已忽略的 `.deploy.env` 的 `PUBLIC_URL`。GetFunction 失败（除函数不存在）直接退出，不会把环境变量整组覆盖成 /tmp。
 
 ## 验收
 
@@ -31,4 +31,4 @@ uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_opena
 
 ## 限制
 
-SQLite 在 `/tmp/qiyan.db`，实例回收后用户数据不会保留。要长期库需要 NAS/OSS 或一台常驻 ECS。
+SQLite 若仍在 `/tmp/qiyan.db`，实例回收后用户数据不会保留。NAS 挂盘是待确认项，没有持久盘不准把生产发版写成已完成。见 docs/DEPLOY.md。

@@ -110,32 +110,40 @@ def clear_prepared() -> None:
 MAX_OCCURRENCES = 64  # 同一句在全文里出现的次数，看这么多处就够了
 
 
-def locate(quote: str, paper: dict[str, Any], prefer: Iterable[str] | None = None) -> dict[str, Any]:
-    """返回 {found, section, where, reason}。paper 是 arxiv.fulltext() 的结果。
+def locate(quote: str, paper: dict[str, Any], prefer: Iterable[str] | None = None,
+           within: tuple[int, int] | None = None) -> dict[str, Any]:
+    """返回 {found, section, where, reason, at}。paper 是 arxiv.fulltext() 的结果。
     prefer：想要它出自哪些章节（局限要出自局限段）。同一句在全文出现多次时，有一处在这些章节里就报那一处；
-    原来只看第一次出现：引言里先出现过一次，真在局限段里的引文也被判成「出自引言」（Codex 复现）。"""
+    原来只看第一次出现：引言里先出现过一次，真在局限段里的引文也被判成「出自引言」（Codex 复现）。
+    within=(start, end)：只认落在这段原文偏移里的那一处（带读按站判题用）；at 是命中处的原文偏移。"""
     q = norm(quote).strip(' "\'')
     if len(q) < MIN_LEN:
-        return {"found": False, "reason": f"引文太短（至少 {MIN_LEN} 个字符），没法当证据"}
+        return {"found": False, "reason": f"引文太短（至少 {MIN_LEN} 个字符），没法当证据", "at": None}
     hay, pos, hay2, pos2 = _prepared(paper.get("text") or "")
     wanted = set(prefer or ())
-    first: tuple[str | None] | None = None
+    first: tuple[str | None, int] | None = None
+    anywhere = False
     for h, p in ((hay, pos), (hay2, pos2)) if hay2 != hay else ((hay, pos),):
         i, seen = h.find(q), 0
         while i >= 0 and seen < MAX_OCCURRENCES:
-            sec = arxiv.section_at(paper["text"], p[i] if i < len(p) else 0)
-            if first is None:
-                first = (sec,)
-            if not wanted or sec in wanted:
-                return _located(sec, paper)
+            anywhere = True
+            src_pos = p[i] if i < len(p) else 0
+            if within is None or within[0] <= src_pos < within[1]:
+                sec = arxiv.section_at(paper["text"], src_pos)
+                if first is None:
+                    first = (sec, src_pos)
+                if not wanted or sec in wanted:
+                    return _located(sec, paper, src_pos)
             i, seen = h.find(q, i + 1), seen + 1
         if first is not None and not wanted:
             break
     if first is None:
-        return {"found": False, "reason": "原文里找不到这句" + ("（只拿到了摘要，正文核对不了）" if paper.get("source") == "abstract" else "")}
-    return _located(first[0], paper)
+        if anywhere and within is not None:
+            return {"found": False, "reason": "这句不在这一节", "at": None}
+        return {"found": False, "reason": "原文里找不到这句" + ("（只拿到了摘要，正文核对不了）" if paper.get("source") == "abstract" else ""), "at": None}
+    return _located(first[0], paper, first[1])
 
 
-def _located(sec: str | None, paper: dict[str, Any]) -> dict[str, Any]:
+def _located(sec: str | None, paper: dict[str, Any], src_pos: int | None = None) -> dict[str, Any]:
     where = arxiv.section_cn(sec) if sec else ("摘要" if paper.get("source") == "abstract" else "正文")
-    return {"found": True, "section": sec, "where": where, "reason": ""}
+    return {"found": True, "section": sec, "where": where, "reason": "", "at": src_pos}

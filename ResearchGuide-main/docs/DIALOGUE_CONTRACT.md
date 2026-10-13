@@ -569,7 +569,10 @@ POST /api/dialogue/action
   → { action }
 
 GET  /api/dialogue/history?uid&conversation_id?
-  → { messages[], conversations[], pending_action }
+  → { messages[], conversations[], pending_action, onboard_done }
+
+POST /api/onboard/enter
+  { uid } → account（含 entered）。entered_at 只写第一次。
 ```
 
 **流式的边界，别误解**：调用① 必须拿到完整 JSON 才能做校验，所以它不能流式。

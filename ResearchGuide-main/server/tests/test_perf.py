@@ -1023,7 +1023,7 @@ def test_cached_papers_do_not_queue_behind_slow_fetches(tmp_path, monkeypatch):
     import json as _json
     monkeypatch.setattr(arxiv, "CACHE_DIR", tmp_path)
     (tmp_path / "2310.17623.json").write_text(_json.dumps(
-        {"id": "2310.17623", "title": "T", "source": "html", "text": "Abstract\\nx", "url": "u"}), encoding="utf-8")
+        {"id": "2310.17623", "title": "T", "source": "html", "text": "Abstract\\nx", "url": "u", "tables": []}), encoding="utf-8")  # 带 tables：没有的旧缓存会被重取（上游 w74）
     gate = threading.Event()
     monkeypatch.setattr(arxiv, "papers", lambda ids: gate.wait(10) and [])  # 没缓存的论文：卡在取元数据上
 

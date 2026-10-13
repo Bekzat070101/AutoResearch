@@ -227,6 +227,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": bool(text), "ms": int((time.time() - t0) * 1000),
         "tokens": usage.get("total_tokens"), "error": err or None,
+        "own": bool(cfg.get("own")),
     }, ensure_ascii=False))
     return text
 
@@ -353,4 +354,5 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": pieces > 0,
         "ms": int((time.time() - t0) * 1000), "chunks": pieces, "error": err or None,
+        "own": bool(cfg.get("own")),
     }, ensure_ascii=False))

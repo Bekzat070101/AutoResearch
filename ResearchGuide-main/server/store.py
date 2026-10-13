@@ -302,6 +302,7 @@ CREATE TABLE IF NOT EXISTS user_secrets (
   base_url TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
+  key_id TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (user_id, kind)
 );
 CREATE TABLE IF NOT EXISTS user_prefs (
@@ -327,6 +328,34 @@ CREATE TABLE IF NOT EXISTS trails (
 CREATE INDEX IF NOT EXISTS idx_secrets_user ON user_secrets(user_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_user ON drafts(user_id);
 CREATE INDEX IF NOT EXISTS idx_trails_user ON trails(user_id);
+CREATE TABLE IF NOT EXISTS paper_pool (
+  key TEXT NOT NULL,
+  day TEXT NOT NULL,
+  data TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (key, day)
+);
+CREATE TABLE IF NOT EXISTS tutor_sessions (
+  user_id TEXT NOT NULL,
+  kit_id TEXT NOT NULL,
+  arxiv_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, kit_id, arxiv_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tutor_user ON tutor_sessions(user_id);
+CREATE TABLE IF NOT EXISTS tutor_questions (
+  arxiv_id TEXT NOT NULL,
+  station TEXT NOT NULL,
+  paper_sha TEXT NOT NULL,
+  plan_version INTEGER NOT NULL,
+  skill_sha TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (arxiv_id, station, paper_sha, plan_version, skill_sha)
+);
 """
 
 # 老库补列：SQLite 的 ADD COLUMN 是安全操作，已存在就跳过。
@@ -351,6 +380,7 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "username", "ALTER TABLE users ADD COLUMN username TEXT"),
     ("users", "password_salt", "ALTER TABLE users ADD COLUMN password_salt TEXT"),
     ("users", "password_hash", "ALTER TABLE users ADD COLUMN password_hash TEXT"),
+    ("user_secrets", "key_id", "ALTER TABLE user_secrets ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
@@ -368,6 +398,7 @@ def _conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA secure_delete=ON")
     try:
         with conn:
             yield conn
@@ -390,6 +421,24 @@ def init_db() -> None:
             c.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{t}_not_deleted BEFORE INSERT ON {t} "
                       "WHEN EXISTS (SELECT 1 FROM deleted_users WHERE id = NEW.user_id) "
                       f"BEGIN SELECT RAISE(ABORT, '{USER_DELETED}'); END")
+    migrate_legacy_secrets()
+
+
+def migrate_legacy_secrets() -> None:
+    """把旧 XOR 封装解出来再写成 AES-GCM。失败的行留下，llm_secret 会当没有钥匙。"""
+    with _LOCK, _conn() as c:
+        rows = list(c.execute("SELECT user_id, kind, wrapped FROM user_secrets"))
+        for r in rows:
+            wrapped = r["wrapped"] or ""
+            if wrapped.startswith("v2:"):
+                continue
+            try:
+                plain = _unwrap_xor(wrapped)
+                new = wrap_secret(plain)
+            except Exception:
+                continue
+            c.execute("UPDATE user_secrets SET wrapped=?, key_id='v2' WHERE user_id=? AND kind=?",
+                      (new, r["user_id"], r["kind"]))
 
 
 # ---------- users ----------
@@ -492,7 +541,11 @@ def _wrap_key() -> bytes:
     return hashlib.sha256(secret).digest()
 
 
-def wrap_secret(plaintext: str) -> str:
+def _aes_key() -> bytes:
+    return hashlib.sha256(b"aes:" + _wrap_key()).digest()
+
+
+def _wrap_xor(plaintext: str) -> str:
     raw = (plaintext or "").encode("utf-8")
     key = _wrap_key()
     out = bytearray(len(raw))
@@ -508,7 +561,7 @@ def wrap_secret(plaintext: str) -> str:
     return out.hex()
 
 
-def unwrap_secret(hexed: str) -> str:
+def _unwrap_xor(hexed: str) -> str:
     raw = bytes.fromhex(hexed)
     key = _wrap_key()
     out = bytearray(len(raw))
@@ -524,17 +577,33 @@ def unwrap_secret(hexed: str) -> str:
     return bytes(out).decode("utf-8")
 
 
+def wrap_secret(plaintext: str) -> str:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    ct = AESGCM(_aes_key()).encrypt(nonce, (plaintext or "").encode("utf-8"), None)
+    return "v2:" + nonce.hex() + ":" + ct.hex()
+
+
+def unwrap_secret(hexed: str) -> str:
+    if (hexed or "").startswith("v2:"):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        _, nonce_h, ct_h = hexed.split(":", 2)
+        pt = AESGCM(_aes_key()).decrypt(bytes.fromhex(nonce_h), bytes.fromhex(ct_h), None)
+        return pt.decode("utf-8")
+    return _unwrap_xor(hexed)
+
+
 def save_llm_secret(uid: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
     tail = api_key[-4:] if len(api_key) >= 4 else api_key
     now = now_iso()
     with _LOCK, _conn() as c:
         c.execute(
-            "INSERT INTO user_secrets(user_id, kind, wrapped, tail, base_url, model, updated_at)"
-            " VALUES(?,?,?,?,?,?,?) "
+            "INSERT INTO user_secrets(user_id, kind, wrapped, tail, base_url, model, updated_at, key_id)"
+            " VALUES(?,?,?,?,?,?,?,?) "
             "ON CONFLICT(user_id, kind) DO UPDATE SET "
             "wrapped=excluded.wrapped, tail=excluded.tail, base_url=excluded.base_url, "
-            "model=excluded.model, updated_at=excluded.updated_at",
-            (uid, "llm", wrap_secret(api_key), tail, base_url, model, now),
+            "model=excluded.model, updated_at=excluded.updated_at, key_id=excluded.key_id",
+            (uid, "llm", wrap_secret(api_key), tail, base_url, model, now, "v2"),
         )
     return {"has_key": True, "tail": tail, "base_url": base_url, "model": model}
 
@@ -853,6 +922,7 @@ def delete_user(uid: str) -> dict[str, int]:
             c.execute("DELETE FROM wechat_tickets WHERE openid=?", (row["wechat_openid"],))
         c.execute("DELETE FROM wechat_tickets WHERE guest_uid=?", (uid,))
         counts["users"] = c.execute("DELETE FROM users WHERE id=?", (uid,)).rowcount
+    print(json.dumps({"event": "user_deleted", "uid": uid, "at": now_iso()}, ensure_ascii=False))
     return counts
 
 
@@ -1185,6 +1255,13 @@ def _save_active(c: sqlite3.Connection, uid: str) -> None:
     c.execute("UPDATE portraits SET snapshot=? WHERE id=?", (snap, row["id"]))
 
 
+def active_portrait_id(uid: str) -> str | None:
+    for p in list_portraits(uid):
+        if p.get("active"):
+            return p["id"]
+    return None
+
+
 def list_portraits(uid: str) -> list[dict[str, Any]]:
     with _LOCK, _conn() as c:
         rows = _portrait_rows(c, uid)
@@ -1317,6 +1394,108 @@ def list_triage(uid: str, kit_id: str) -> list[dict[str, Any]]:
     with _conn() as c:
         rows = c.execute("SELECT * FROM triage WHERE user_id=? AND kit_id=? ORDER BY created_at DESC", (uid, kit_id)).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_tutor(uid: str, kit_id: str, arxiv_id: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT status, state FROM tutor_sessions WHERE user_id=? AND kit_id=? AND arxiv_id=?",
+                        (uid, kit_id, arxiv_id)).fetchone()
+    if not row:
+        return None
+    try:
+        state = json.loads(row["state"] or "{}")
+    except json.JSONDecodeError:
+        state = {}
+    return {"status": row["status"], "state": state if isinstance(state, dict) else {}}
+
+
+def save_tutor(uid: str, kit_id: str, arxiv_id: str, status: str, state: dict[str, Any],
+               rev: int | None) -> bool:
+    blob = json.dumps(state, ensure_ascii=False)
+    now = now_iso()
+    with _LOCK, _conn() as c:
+        if rev is None:
+            c.execute(
+                "INSERT INTO tutor_sessions(user_id, kit_id, arxiv_id, status, state, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id, kit_id, arxiv_id) DO UPDATE SET "
+                "status=excluded.status, state=excluded.state, updated_at=excluded.updated_at",
+                (uid, kit_id, arxiv_id, status, blob, now, now),
+            )
+            return True
+        cur = c.execute(
+            "UPDATE tutor_sessions SET status=?, state=?, updated_at=? WHERE user_id=? AND kit_id=? AND arxiv_id=? "
+            "AND json_extract(state,'$.rev')=?",
+            (status, blob, now, uid, kit_id, arxiv_id, rev),
+        )
+        return cur.rowcount == 1
+
+
+def get_tutor_questions(arxiv_id: str, station: str, paper_sha: str, plan_version: int, skill_sha: str) -> list | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT data FROM tutor_questions WHERE arxiv_id=? AND station=? AND paper_sha=? AND plan_version=? AND skill_sha=?",
+            (arxiv_id, station, paper_sha, plan_version, skill_sha),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row["data"] or "[]")
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def put_tutor_questions(arxiv_id: str, station: str, paper_sha: str, plan_version: int, skill_sha: str, data: list) -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO tutor_questions(arxiv_id, station, paper_sha, plan_version, skill_sha, data, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (arxiv_id, station, paper_sha, plan_version, skill_sha, json.dumps(data, ensure_ascii=False), now_iso()),
+        )
+
+
+def list_triage_all(uid: str) -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM triage WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_paper_pool(key: str, day: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT data, fetched_at FROM paper_pool WHERE key=? AND day=?", (key, day)).fetchone()
+    if not row:
+        return None
+    try:
+        papers = json.loads(row["data"] or "[]")
+    except json.JSONDecodeError:
+        return None
+    return {"papers": papers if isinstance(papers, list) else [], "fetched_at": row["fetched_at"]}
+
+
+def latest_paper_pool(key: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT day, data, fetched_at FROM paper_pool WHERE key=? ORDER BY day DESC LIMIT 1", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        papers = json.loads(row["data"] or "[]")
+    except json.JSONDecodeError:
+        return None
+    return {"day": row["day"], "papers": papers if isinstance(papers, list) else [], "fetched_at": row["fetched_at"]}
+
+
+def put_paper_pool(key: str, day: str, papers: list[dict[str, Any]]) -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO paper_pool(key, day, data, fetched_at) VALUES(?,?,?,?)",
+            (key, day, json.dumps(papers, ensure_ascii=False), now_iso()),
+        )
+        c.execute("DELETE FROM paper_pool WHERE day < ?", (_arxiv_day_offset(-3),))
+
+
+def _arxiv_day_offset(delta: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=-5, days=delta)).date().isoformat()
 
 
 def save_card(card: dict[str, Any]) -> None:

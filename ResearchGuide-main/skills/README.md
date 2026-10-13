@@ -28,3 +28,4 @@
 | `project-scout/` | `server/projects.py` | 从检索到的候选里挑适合当前阶段的练手项目，写「在练什么 / 大概要做什么」 |
 | `project-review/` | `server/submission.py` | 按五条标准评阅项目成果压缩包，写能指出下一步的评语 |
 | `tutorial-distill/` | 离线：检索公开大纲/教材，蒸馏成 `knowledge/tutorials/{id}.json` | 主干 + 有据才分叉；每个节点带学什么/做什么/原链接；不够 2 个独立来源就标 insufficient，不编 |
+| `paper-tutor/` | `server/tutor.py` | 按节出考察题：模型选题面和锚点句号，代码判对错；学生作答不发给模型 |

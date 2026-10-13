@@ -151,10 +151,11 @@ def message(uid: str, msg: str) -> dict[str, Any]:
         state.update({"phase": "done", "round_no": idx + 1})
         store.set_onboard_state(uid, state)
         fallback = (
-            "聊完了！基于刚才 5 轮对话，我整理了对你的初始认知（确认页）。"
+            "聊完了！基于刚才 5 轮对话，我整理了对你的初始认知（「我的」页）。"
             "每一条都标了来源和置信度——说得不对的你可以直接改，不想要的可以删。"
+            "去「我的」页核对，再看方向。"
         )
-        reply = _voice(msg, "请去确认页核对初始认知。", fallback, closing=True, uid=uid)
+        reply = _voice(msg, "请去「我的」页核对初始认知。", fallback, closing=True, uid=uid)
         store.add_message(uid, "assistant", reply, "done")
         return {"reply": reply, "options": [], "facts": [f.to_dict() for f in facts],
                 "state": state, "done": True}
@@ -244,7 +245,7 @@ def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False,
         "回复控制在 80 字以内的中文。"
     )
     if closing:
-        user = f"学生刚说：{user_msg[:200]}\n请用一两句话收束对话，并提醒他去确认页核对、修改或删除认知条目。不要新增事实。"
+        user = f"学生刚说：{user_msg[:200]}\n请用一两句话收束对话，并提醒他去「我的」页核对、修改或删除认知条目。不要新增事实。"
     else:
         user = (
             f"学生刚说：{user_msg[:200]}\n"

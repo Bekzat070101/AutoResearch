@@ -87,6 +87,13 @@ def test_good_card_passes_and_writes_ledger():
     assert again["version"] == 2 and again["prev_passed"] == card["review"]["passed"] and "fact" not in again
 
 
+def test_check_limitation_matches_review_card():
+    ok = reading.check_limitation(GOOD["limitation_quote"], PAPER)
+    assert ok["pass"]
+    bad = reading.check_limitation("Large language models are trained on vast amounts of internet data", PAPER)
+    assert not bad["pass"] and "局限" in (bad.get("reason") or "")
+
+
 def test_limitation_must_come_from_limitations_section():
     bad = dict(GOOD, limitation_quote="Large language models are trained on vast amounts of internet data")
     review = reading.submit_card(uid(), "llm-eval", "2310.17623", bad, DIMS)["review"]

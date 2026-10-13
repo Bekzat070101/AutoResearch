@@ -1,6 +1,7 @@
 """Create or update Hangzhou FC 3.0 HTTP function. No secrets printed."""
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import sys
@@ -12,10 +13,10 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
+from fc_safety import DEFAULT_NAME, is_function_missing, merge_env, refuse_unsafe
 from pack_fc import OUT, main as pack
 
 REGION = "cn-hangzhou"
-DEFAULT_NAME = "qiyan"
 STATE = Path(__file__).resolve().parent / ".deploy.env"
 
 
@@ -59,15 +60,6 @@ def llm_settings() -> dict[str, str]:
     return group
 
 
-def existing_env(cli: Client, name: str) -> dict[str, str]:
-    """函数上现有的环境变量（控制台里配的公众号密钥、挂了 NAS 之后的库路径……）。取不到（函数还没建）就是空的。"""
-    try:
-        got = cli.get_function(name, fc.GetFunctionRequest())
-        return dict((got.body.environment_variables or {}) if got.body else {})
-    except Exception:
-        return {}
-
-
 def client(ak: str, sk: str, aid: str) -> Client:
     return Client(Config(
         access_key_id=ak,
@@ -77,8 +69,45 @@ def client(ak: str, sk: str, aid: str) -> Client:
     ))
 
 
-def main() -> None:
-    name = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_NAME
+def existing_env(cli: Client, name: str) -> dict[str, str] | None:
+    """读函数现有环境变量。只有 FunctionNotFound 当「没有」；其它异常原样抛出，禁止当空字典吞掉。"""
+    try:
+        got = cli.get_function(name, fc.GetFunctionRequest())
+    except Exception as exc:
+        if is_function_missing(exc):
+            return None
+        raise
+    body = getattr(got, "body", None)
+    env = getattr(body, "environment_variables", None) if body else None
+    return dict(env or {})
+
+
+def _local_defaults(name: str) -> dict[str, str]:
+    env_vars = {
+        "LLM_BASE_URL": "https://api.deepseek.com/v1",
+        "LLM_MODEL": "deepseek-flash",
+        "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
+    }
+    key = llm_key()
+    if key:
+        env_vars["LLM_API_KEY"] = key
+        env_vars["DEEPSEEK_API_KEY"] = key
+    return env_vars
+
+
+def put_single_instance(cli: Client, name: str) -> None:
+    cli.put_concurrency_config(name, fc.PutConcurrencyConfigRequest(
+        body=fc.PutConcurrencyInput(reserved_concurrency=1)))
+
+
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("name", nargs="?", default=DEFAULT_NAME)
+    p.add_argument("--db", default=None, help="显式改 QIYAN_DB；否则沿用函数上已有的")
+    p.add_argument("--allow-ephemeral", action="store_true",
+                   help="允许生产库仍在 /tmp 或缺少 QIYAN_SECRET/WECHAT_APP_ID。没有持久盘时不要用来发生产。")
+    args = p.parse_args(argv)
+    name = args.name
     env = load_env()
     ak, sk = env["AccessKey_ID"], env["AccessKey_Secret"]
     aid = account_id(ak, sk)
@@ -90,24 +119,11 @@ def main() -> None:
     cli = client(ak, sk, aid)
     runtime = RuntimeOptions(read_timeout=120000, connect_timeout=30000)
     code = fc.InputCodeLocation(zip_file=base64.b64encode(zip_bytes).decode())
-    # 更新是整份换掉环境变量：在函数现有的那份上改，不然每发一次版，控制台里配的 WECHAT_*（微信登录）就没了、
-    # 挂了 NAS 之后改成的 QIYAN_DB 又被写回 /tmp（学生的账号和记录全看不到，Codex 复现）。
-    # 库路径：本机 .env 写了 QIYAN_DB 就用它；否则保留函数上现有的；都没有才用 /tmp（实例回收就丢，见 docs/DEPLOY.md）
-    current = existing_env(cli, name)
-    db_name = (env.get("QIYAN_DB") or current.get("QIYAN_DB")
-               or ("/tmp/qiyan-test.db" if name != DEFAULT_NAME else "/tmp/qiyan.db"))
-    local_llm = llm_settings()
-    if local_llm:  # 整组换成本机的；本机没有就整组留函数上的
-        current = {k: v for k, v in current.items() if k not in MODEL_KEYS}
-    env_vars = {
-        "LLM_BASE_URL": "https://api.deepseek.com/v1",
-        "LLM_MODEL": "deepseek-flash",
-        **current,
-        **local_llm,
-        "QIYAN_DB": db_name,
-        "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
-    }
-    print("QIYAN_DB", db_name, "MODEL", env_vars["LLM_MODEL"], "KEY", "local" if local_llm else ("kept" if env_vars.get("LLM_API_KEY") else "none"))
+    remote = existing_env(cli, name)
+    env_vars = merge_env(remote, _local_defaults(name), db_flag=args.db, name=name)
+    refuse_unsafe(env_vars, name, args.allow_ephemeral)
+    print("QIYAN_DB", env_vars.get("QIYAN_DB"))
+    print("KEY", "set" if env_vars.get("LLM_API_KEY") else "missing")
     body = fc.CreateFunctionInput(
         function_name=name,
         runtime="custom.debian12",
@@ -122,29 +138,24 @@ def main() -> None:
         code=code,
         description="qiyan research mentor" if name == DEFAULT_NAME else "qiyan test (not the public homepage)",
     )
-    try:
+    if remote is None:
         created = cli.create_function(fc.CreateFunctionRequest(body=body))
         print("CREATED", created.body.function_name if created.body else "ok")
-    except Exception as e:
-        msg = str(e)
-        print("CREATE", type(e).__name__, msg[:400])
-        if "FunctionAlreadyExists" in msg or "already exists" in msg.lower() or "AlreadyExists" in msg:
-            upd = fc.UpdateFunctionInput(
-                runtime="custom.debian12",
-                handler="index.handler",
-                timeout=300,
-                memory_size=2048,
-                cpu=1,
-                disk_size=512,
-                instance_concurrency=200,  # 单实例最多 200：多开实例时各有一份库，登录在实例之间来回失效（docs/DEPLOY.md）
-                internet_access=True,
-                environment_variables=env_vars,
-                code=code,
-            )
-            cli.update_function(name, fc.UpdateFunctionRequest(body=upd))
-            print("UPDATED")
-        else:
-            raise
+    else:
+        upd = fc.UpdateFunctionInput(
+            runtime="custom.debian12",
+            handler="index.handler",
+            timeout=300,
+            memory_size=2048,
+            cpu=1,
+            disk_size=512,
+            instance_concurrency=200,  # 单实例最多 200：多开实例时各有一份库，登录在实例之间来回失效（docs/DEPLOY.md）
+            internet_access=True,
+            environment_variables=env_vars,
+            code=code,
+        )
+        cli.update_function(name, fc.UpdateFunctionRequest(body=upd))
+        print("UPDATED")
     trig_cfg = json.dumps({
         "authType": "anonymous",
         "methods": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"],
@@ -169,15 +180,10 @@ def main() -> None:
     except Exception as e:
         print("GET_TRIG", str(e)[:200])
     try:
-        cli.put_scaling_config(name, fc.PutScalingConfigRequest(body=fc.PutScalingConfigInput(
-            horizontal_scaling_policies=[
-                fc.ScalingPolicy(name="single", max_instances=1, min_instances=0,
-                                 metric_type="CPUUtilization", metric_target=0.8),
-            ],
-        )))
-        print("SCALE max_instances=1")
+        put_single_instance(cli, name)
+        print("CONCURRENCY reserved=1")
     except Exception as e:
-        print("SCALE", type(e).__name__, str(e)[:240])
+        raise SystemExit(f"单实例设置失败，未发布完成：{type(e).__name__} {str(e)[:240]}")
     if url:
         if name == DEFAULT_NAME:
             write_state({"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": url, "ACCOUNT_TAIL": aid[-4:]})

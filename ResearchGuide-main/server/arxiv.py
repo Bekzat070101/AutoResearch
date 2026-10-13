@@ -139,8 +139,16 @@ def papers(ids: list[str]) -> list[dict[str, Any]]:
     return query({"id_list": ",".join(ids), "max_results": len(ids)}) if ids else []
 
 
+_CAT_OK = re.compile(r"^[a-z\-]+(\.[A-Za-z\-]+)?$")
+_KW_OK = re.compile(r"^[A-Za-z0-9 .\-]+$")
+
+
 def recent(categories: list[str], keywords: list[str], max_results: int = 30, cached_only: bool = False) -> list[dict[str, Any]] | None:
     """某些分类下最近提交、标题或摘要命中关键词的论文，按提交时间倒序。"""
+    categories = [c for c in categories if _CAT_OK.match(c or "")]
+    keywords = [k for k in keywords if _KW_OK.match(k or "")]
+    if not categories:
+        return [] if not cached_only else None
     cats = " OR ".join(f"cat:{c}" for c in categories)
     kws = " OR ".join(f'abs:"{k}"' if " " in k else f"abs:{k}" for k in keywords)
     q = f"({cats}) AND ({kws})" if kws else cats
@@ -163,6 +171,11 @@ def _cell_text(cell: str) -> str:
     cell = _DROP.sub(" ", cell)
     text = html.unescape(_TAG.sub(" ", cell))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _headerish(row: list[str]) -> bool:
+    """没有数字的首行，多半是表头。latexml 常用 <td> 写表头，不能只认 <th>。"""
+    return bool(row) and not any(re.search(r"\d", c or "") for c in row)
 
 
 def _table_to_rows(raw: str) -> list[list[str]]:
@@ -199,8 +212,11 @@ def parse_html(page: str) -> dict:
         if first and re.search(r"<th\b", first.group(0), re.I) and rows:
             headers = rows[0]
             body = rows[1:]
+        elif len(rows) >= 2 and _headerish(rows[0]) and any(not _headerish(r) for r in rows[1:]):
+            headers = rows[0]
+            body = rows[1:]
         if not rows:
-            return f"\n[[table:fail:{tid}]]\n"
+            return "\n"
         tables.append({"id": tid, "caption": caption, "headers": headers, "rows": body, "at": 0})
         return f"\n[[table:{tid}]]\n"
 
@@ -307,10 +323,20 @@ def _enforce_quota(path: Path, size: int) -> None:
         q.update(sizes=sizes, bytes=total)
 
 
+def _needs_reparse(got: dict[str, Any]) -> bool:
+    """抽表之前写下的 HTML 正文：没有 tables 字段，表格被摊成一行行字。"""
+    return got.get("source") == "html" and "tables" not in got
+
+
 def _cached(aid: str) -> dict[str, Any] | None:
-    """磁盘缓存：正文版一直有效；只有摘要的到了重试时间就当没有（旧缓存没有重试时间，也当到期）。"""
+    """磁盘缓存：正文版一直有效；只有摘要的到了重试时间就当没有（旧缓存没有重试时间，也当到期）。
+    抽表之前的正文缓存也当没有，让 fulltext 重取一遍。"""
     got = _on_disk(aid)
-    if got and got.get("source") == "abstract" and time.time() >= got.get("retry_after", 0):
+    if not got:
+        return None
+    if got.get("source") == "abstract" and time.time() >= got.get("retry_after", 0):
+        return None
+    if _needs_reparse(got) and time.time() >= got.get("retry_after", 0):
         return None
     return got
 
@@ -354,11 +380,12 @@ def _fetch_fulltext(aid: str) -> dict[str, Any]:
         text = parsed["text"]
         if len(text) > 2000:
             result.update(source="html", text=text, tables=parsed.get("tables") or [])
+            result.pop("retry_after", None)
     except ArxivError as exc:
         # 没有 HTML 版（404）就只用摘要；临时失败（超时、断网、5xx）也先给摘要，但很快再试，不把半份论文永久缓存
         if exc.status != 404:
             retry = RETRY_TRANSIENT
-    if result["source"] == "abstract":
+    if result["source"] == "abstract" or _needs_reparse(result):
         result["retry_after"] = time.time() + retry
     _save(aid, result)
     return result
