@@ -30,7 +30,7 @@ import store  # noqa: E402
 
 pytestmark = pytest.mark.real_auth
 SERVER = Path(__file__).resolve().parent.parent
-PRIVACY_DIGEST = "33898201acac"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
+PRIVACY_DIGEST = "e7a8229ddfbb"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
 TOKEN = "test-token"
 OPENID = "o_test_user_1"
 
@@ -414,22 +414,27 @@ def test_consent_is_recorded_against_the_current_privacy_version(client):
 
 # ---------- 删号与导出 ----------
 
-def test_delete_account_removes_every_row_and_the_session(client, wx):
+def test_delete_account_removes_every_row_and_the_session(client, wx, capsys):
     r = _wechat_login(client)
     uid, h = r["uid"], _h(r["token"])
     client.post("/api/edges", json={"uid": uid, "kind": "language", "text": "粤语母语", "evidence_url": ""}, headers=h)
     client.post("/api/tasks/generate", json={"uid": uid, "direction": "ai", "level": 1}, headers=h)
     client.post("/api/onboard/start", json={"uid": uid}, headers=h)
+    store.save_tutor(uid, "llm-eval", "2009.03300", "active", {"rev": 1, "slots": []}, None)
+    store.put_tutor_questions("2009.03300", "abstract", "sha", 1, "sk", [{"qid": "q"}])
     other, _ = _guest(client, "别人")
 
     exported = client.get("/api/me/export", headers=h)
     assert exported.status_code == 200 and "attachment" in exported.headers["content-disposition"]
     data = exported.json()
     assert data["user"]["wechat_openid"] == OPENID and data["edges"] and data["tasks"]
+    assert data["tutor_sessions"] and "tutor_questions" not in data
     assert "sessions" not in data and "token" not in data["user"]
 
     out = client.delete("/api/me", headers=h).json()
     assert out["ok"] and out["deleted"]["users"] == 1
+    logged = capsys.readouterr().out
+    assert '"event": "user_deleted"' in logged and uid in logged
     with sqlite3.connect(store.DB_PATH) as c:
         c.row_factory = sqlite3.Row
         for t in store._user_tables(c):
@@ -493,7 +498,7 @@ def test_privacy_text_and_version_change_together():
     text = re.search(r"const PRIVACY_HTML = `(.*?)`;", js, re.S).group(1)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     # 改了隐私说明：把 auth.PRIVACY_VERSION 换成当天日期（老用户会再同意一次），再把这里的指纹和日期一起更新
-    assert (auth.PRIVACY_VERSION, digest) == ("2026-10-12", PRIVACY_DIGEST), digest
+    assert (auth.PRIVACY_VERSION, digest) == ("2026-10-13", PRIVACY_DIGEST), digest
 
 
 def test_sessions_slide_forward_when_used_after_a_day(client):

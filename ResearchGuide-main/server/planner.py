@@ -216,51 +216,6 @@ def _course_block(d: dict[str, Any]) -> dict[str, Any]:
             "term": res.get("term") or "", "items": items}
 
 
-def next_best_action(uid: str) -> dict[str, Any]:
-    """规则层 NBA 主入口（对应 NEXT_PRE 演示链路 ④/⑨）。"""
-    facts = store.list_facts(uid, statuses=["confirmed", "active"])
-    tasks = store.list_tasks(uid)
-    direction_state = _user_direction(uid, facts)
-
-    if not direction_state:
-        # S0：还没有确认的兴趣方向 → 推荐方向卡
-        return _speak(NBA(
-            action="explore_direction",
-            title="先看看你可能适合的 3 个探索方向",
-            rationale="你刚完成初始对话，AI 对你的兴趣已有初步信号，但还没有确认任何方向。按产品原则，下一步是「探索」而不是「上课」。",
-            rationale_facts=[f.id for f in facts if f.category == "interest"][:3],
-            payload={"cards": direction_cards(uid, with_courses=False)},
-        ).to_dict(), facts, uid=uid)
-
-    done = [t for t in tasks if t.status == "done"]
-    if direction_state and not done:
-        # S1：已选方向，未完成任务 → 生成首个微任务
-        d = DIRECTIONS.get(direction_state)
-        return _speak(NBA(
-            action="micro_task",
-            title=f"开始你在「{d['name']}」的第一个 20 分钟微任务",
-            rationale=f"你已选择「{d['name']}」且尚未完成任何任务。行动大于信息——先用一个小任务验证这个方向对你的吸引程度。",
-            payload={"direction": direction_state, "task_level": 1},
-        ).to_dict(), facts, uid=uid)
-
-    # S2：有已完成任务 → 进阶 NBA
-    d = DIRECTIONS.get(direction_state) or DIRECTIONS["ai"]
-    last = done[-1] if done else None
-    behavior_fact = next((f for f in facts if f.source == "behavior"), None)
-    quote = f"「{behavior_fact.value}」" if behavior_fact else "你提交的第一次任务产出"
-    return _speak(NBA(
-        action="micro_task",
-        title=f"进阶一步：「{d['name']}」的第 2 个微任务",
-        rationale=f"行为证据：{quote[:60]}——说明你能在这个方向完成闭环。下一个任务难度 +1，仍然 20 分钟内。",
-        rationale_facts=[behavior_fact.id] if behavior_fact else [],
-        alternatives=[
-            {"action": "explore_direction", "title": "换个方向再试试（生成新的 3 张推荐卡）"},
-            {"action": "review_progress", "title": "回顾「AI 认识的我」，看看积累的证据"},
-        ],
-        payload={"direction": direction_state, "task_level": 2},
-    ).to_dict(), facts, uid=uid)
-
-
 def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dict[str, str | None],
                  uid: str | None = None) -> list[dict[str, Any]]:
     """规则层已选出方向；模型只改写「为什么是你」，失败保留原文。"""
@@ -303,33 +258,6 @@ def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dic
     for c in cards:
         c.setdefault("voice", "rules")
     return cards
-
-
-def _speak(nba: dict[str, Any], facts: list[UserFact], uid: str | None = None) -> dict[str, Any]:
-    """规则层决定行动；模型只改写标题和理由，失败保持原文。"""
-    if not llm.ready(uid):
-        nba["voice"] = "rules"
-        return nba
-    quotes = [f"{f.category}:{f.value}" for f in facts[:6]]
-    data = llm.chat_json(
-        "你在改写科研导师的「下一步」文案。不得改变行动类型，不得编造证据里没有的经历。"
-        "title 不超过 28 字，rationale 不超过 90 字，必须能对应给出的事实。",
-        "行动=" + nba.get("action", "") + "\n原标题=" + nba.get("title", "")
-        + "\n原理由=" + nba.get("rationale", "") + "\n已知事实=\n- " + "\n- ".join(quotes)
-        + '\n输出 JSON：{"title":"...","rationale":"..."}',
-        timeout=20, uid=uid,
-    )
-    if not data:
-        nba["voice"] = "rules"
-        return nba
-    title = str(data.get("title") or "").strip()
-    rationale = str(data.get("rationale") or "").strip()
-    if 4 <= len(title) <= 40:
-        nba["title"] = title
-    if 12 <= len(rationale) <= 180:
-        nba["rationale"] = rationale
-    nba["voice"] = "llm"
-    return nba
 
 
 def _user_direction(uid: str, facts: list[UserFact]) -> str | None:

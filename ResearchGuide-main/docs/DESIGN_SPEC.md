@@ -51,9 +51,9 @@
 
 | 组件 | 类名 | 说明 |
 | --- | --- | --- |
-| 侧栏 | `.side-nav` + `.side-brand` + `.nav-btn` + `.side-foot` | 品牌只出现一次；当前项左侧 2px 主色线；窄屏变顶栏 |
+| 侧栏 | `.side-nav` + `.side-brand` + `.nav-btn` + `.nav-soon` + `.side-foot` | 今日 / 对话 / 研读 / 定位 / 项目（待开发）。作业不占栏目。对话按钮在进入启研后才出现。窄屏变顶栏，「待开发」用 `.nav-soon` 仍可见 |
 | 工作区标题 | `.ws-head` + `.ws-status` | 标题下一行灰字写「方向 · 第几个节点」 |
-| 分段切换 | `.ws-tabs .ws-tab` | 画像的对话 / 核对 |
+| 分段切换 | `.ws-tabs .ws-tab` | 研读工具包 / 阅读卡 / 矩阵 |
 | 面板 | `.panel` | 一切内容容器；面板里不再套带边框的卡片，用分隔线分组 |
 | 小标题 | `.section-label` | 12px 灰色，面板内分段 |
 | 按钮 | `.btn` / `.secondary` / `.ghost` / `.small` | 一屏只有一个 `.btn` 主按钮 |
@@ -65,7 +65,7 @@
 | 任务 | `.task-head` + `.step-list` + `.criteria` + `.submit-box` | 步骤是可勾选的行，标准是圆点列表 |
 | 反馈 | `.feedback` + `.rubric-item.pass/.fail` + `.why-box` | 分数写成「3 / 3 条做到」；下一步只指一处 |
 | 建议卡 | `.nba-card` | 今日唯一重点 |
-| 首页 | `.land` + `.snap-inner` + `.land-steps` + `.land-skip` | 每屏一色的发光粒子（`TONES` / `FIG_ANIMS`），左右对调，钉住文字淡入 |
+| 首页 | `.land` + `.snap-inner` + `.land-steps` + `.land-skip` | 每屏一色的发光粒子（`TONES` / `FIG_ANIMS`），左右对调，钉住文字淡入。遮罩撤后聚形 900ms，换屏 `SWAP_MS` 1400ms，能排队连翻 |
 | 房间引导 | `.room-guide` | 页头下 3 步，可关掉；不是弹窗 |
 | 作业题干 | `.task-stem` + `.task-ask` + `.task-fold` | 先看见已知 / 求 / 交；细则点开 |
 | 论文表 | `.paper-table` | 阅读区里的真表格，窄屏可横滑 |
@@ -86,7 +86,7 @@
 
 ## 7. 布局
 
-- 侧栏 216px + 主栏；主栏内容宽 ≤ 880px（方向页放宽到 1240px 给树），左对齐；<920px 侧栏变顶栏、单列；
+- 侧栏 216px + 主栏；主栏内容宽 ≤ 880px（方向页、研读矩阵放宽到 1240px），左对齐；<920px 侧栏变顶栏、单列；
 - 主工作区两栏 `.two-col`（1.6fr : 1fr）：左主内容、右辅栏（实时记录/治理原则）；移动端叠放；
 - 列表卡片网格 `.dir-cards`：`repeat(auto-fit, minmax(300px, 1fr))`。
 

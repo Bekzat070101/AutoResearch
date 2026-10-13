@@ -6,6 +6,62 @@
 
 ---
 
+## [2026-10-13] [FIX] deploy_fc 适配当前 FC SDK 的 GetFunction
+
+- 变更内容：`get_function` 必须带 `GetFunctionRequest`，否则读现有环境变量在发版时直接 TypeError。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/deploy_fc.py
+- 决策来源：邬程灿（现场发版）
+- 登记人：助手
+
+## [2026-10-13] [FIX] 带读 404 与抽表前的论文缓存
+
+- 变更内容：抽表之前写下的 HTML 正文缓存（没有 `tables` 字段）下次打开会重取。latexml 用 `<td>` 写的表头升成表头。本机旧进程没有 `/api/tutor`，需重启后带读才通。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/arxiv.py
+- 决策来源：邬程灿（现场）
+- 登记人：助手
+
+## [2026-10-13] [OPS] 运维止血、备份接口与手册
+
+- 变更内容：`deploy_fc` 读现有环境变量失败不再当空字典；生产缺盘或缺 `QIYAN_SECRET`/`WECHAT_APP_ID` 拒绝发布；单实例 `reserved_concurrency=1`。新增 `/api/admin/backup|restore|stats|maintenance|user/delete|rewrap`。删号打 `user_deleted` 日志。个人密钥改 AES-GCM。health 增加 `checks`（状态码仍 200）。探活工作流、发版清单和事故手册写入 DEPLOY.md。NAS / 钉钉 / RAM 标待确认，没有持久盘不准把生产发版写成已完成。人工找回口径改为用户名密码、每次打开要重新登录。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/deploy/README.md、.env.example
+- 影响模块：tools/deploy/deploy_fc.py、tools/deploy/fc_safety.py、tools/deploy/pack_fc.py、tools/deploy/publish_gh_pages.py、server/admin.py、server/store.py、server/auth.py、server/main.py、server/llm.py、.github/workflows/
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [FEAT] 服务端带读论文
+
+- 变更内容：研读论文页加「让它带我读」。启研 DeepSeek 按 `skills/paper-tutor/SKILL.md` 出题，代码按节判对错；学生作答不发给模型。读完预填阅读卡七栏，不自动交卡。只允许工具包论文。隐私说明列出「带读里的作答」并升到 2026-10-13。界面 w74。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/ARCHITECTURE.md、docs/DESIGN_PROPOSAL.md、skills/README.md
+- 影响模块：server/tutor.py、server/quotes.py、server/reading.py、server/store.py、server/main.py、skills/paper-tutor/SKILL.md、web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [FEAT] 今日按兴趣推荐每日新论文
+
+- 变更内容：每日候选按策展词表匹配兴趣与方向节点，不调模型翻译。今日主体改为分拣最近新论文；无话题时仍走先聊聊/核对/选方向。页面不加搜索框。删 `/api/nba`。界面 w73。
+- 影响文档：docs/CHANGELOG.md、docs/ARCHITECTURE.md、docs/DESIGN_SPEC.md
+- 影响模块：server/interests.py、server/reading.py、server/arxiv.py、server/store.py、server/main.py、server/planner.py、knowledge/arxiv_topics.json、web/js/app.js
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [UX] 开场全屏对话，「我的」承接核对与记忆
+
+- 变更内容：登录后未进入的人先全屏开场对话，可随时「进入启研」。进入按人记在 prefs。记忆编辑收到「我的」页，对话右栏只读。刷新仍要重新登录，登录后按后端 entered 恢复，不关回开场。界面 w72。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md、docs/TASK2_DIALOGUE.md、docs/DIALOGUE_CONTRACT.md、docs/ARCHITECTURE.md
+- 影响模块：server/auth.py、server/main.py、server/dialogue.py、server/onboarding.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
+## [2026-10-13] [UX] 壳与栏目：首页加快、作业出侧栏、项目待开发、对话进侧栏
+
+- 变更内容：首页换屏约 1.4s、能排队连翻。侧栏改为今日 / 对话 / 研读 / 定位 / 项目（待开发）。作业不占栏目，任务页改称「这一步」。项目进占位页。研读修正文溢出、字重、伪章节、前置信息、矩阵宽度。界面 w71。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-13）
+- 登记人：助手
+
 ## [2026-10-12] [UX] 打开页面必须重新登录
 
 - 变更内容：登录只记在这一页的内存里，不再写入 `localStorage`。刷新或重新打开都要重新登录。界面 w70。

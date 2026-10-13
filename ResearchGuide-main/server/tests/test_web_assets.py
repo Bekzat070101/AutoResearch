@@ -66,8 +66,9 @@ def test_no_questionnaire_view_is_left():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     assert '"问卷"' not in js, "「问卷」又被当成标签名了"
     assert 'case "onboarding"' not in js, "onboarding 视图分支又回来了"
-    assert re.search(r'\[\["dialogue",\s*"对话"\],\s*\["confirm",\s*"核对"\]\]', js), \
-        "画像页应该只有「对话」「核对」两个标签"
+    assert "function portraitTabs" not in js
+    assert "function renderConfirm" not in js
+    assert "function confirmDrafts" in js
 
 
 def test_build_stamp_matches_every_cache_buster():
@@ -155,14 +156,14 @@ def test_the_mark_done_button_is_gone():
     js = _strip_js_comments((WEB / "js" / "chat.js").read_text(encoding="utf-8"))
     assert "标记完成" not in js, "「标记完成」按钮又回来了"
     assert '"complete"' not in js, "前端又在直接发 complete 事件（应该走任务提交）"
-    assert "去作业区完成" in js, "少了「去作业区完成」这个入口"
+    assert "去做这一步" in js, "少了「去做这一步」这个入口"
 
 
 def test_memory_panel_renders_project_folders():
     """一个项目一张卡——用户要的「大文件夹」。"""
-    js = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     assert "function projectFolders" in js, "项目文件夹的渲染没了"
-    assert "r.projects" in js, "没有把 /api/memory 的 projects 用起来"
+    assert "r.projects" in js or "mem.projects" in js, "没有把 /api/memory 的 projects 用起来"
 
 
 def test_returning_to_the_chat_shows_what_was_finished():
@@ -313,7 +314,13 @@ def test_new_class_names_all_have_rules():
                 "land-closing", "snap-no", "room-guide",
                 "task-stem", "task-fold", "task-ask",
                 "paper-table", "sec-jump", "pos-lead", "map-card", "pos-tab",
-                "login-tabs", "login-tab", "login-body"):
+                "login-tabs", "login-tab", "login-body",
+                "nav-soon", "tex", "paper-front",
+                "enter-bar", "enter-card", "mem-sum-row",
+                "today-papers", "triage-hit", "today-next",
+                "tutor-panel", "tutor-head", "tutor-voice", "tutor-prog",
+                "tutor-notice", "tutor-q", "tutor-hint", "tutor-acts",
+                "tutor-hit", "tutor-alt", "tutor-miss", "tutor-launch", "tutor-minor"):
         # 用 (?![\w-]) 而不是 \b：类名里允许 `-`，所以 `\b` 会把
         # `.chat-next-nonexistent` 也当成 `.chat-next` 存在——那样把规则改名
         # 测试照样绿。（这个弱点是我回滚验证时发现的。）
@@ -322,12 +329,13 @@ def test_new_class_names_all_have_rules():
 
 
 def test_sidebar_is_five_rooms_and_user_owns_portrait():
-    """侧栏只留今日 / 作业 / 项目 / 研读 / 定位。
-    对话、方向、记录从栏目里拿掉，改到右上角用户和方向。"""
+    """侧栏是今日 / 对话 / 研读 / 定位 / 项目。作业不在栏目里。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")
-    views = re.findall(r'data-view="([^"]+)"', html)
-    assert views == ["today", "workbench", "projects", "read", "position"], views
-    assert "作业" in html
+    nav = re.search(r'<nav class="side-links".*?</nav>', html, re.S).group(0)
+    views = re.findall(r'data-view="([^"]+)"', nav)
+    assert views == ["today", "dialogue", "read", "position", "projects"], views
+    assert "作业" not in nav
+    assert "待开发" in nav
     assert 'id="dirChip"' in html
     assert 'id="userMenuBtn"' in html
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
@@ -349,3 +357,29 @@ def test_read_does_not_blame_kit_when_user_is_gone():
     assert "Authorization" in js
     # 工具包失败文案只在单独取 kit 失败时用，不能再和 cards 绑死
     assert '工具包加载失败' in js
+
+
+def test_hero_swap_is_queued_and_fast():
+    """首页换屏必须短于旧的 4.2s，且滚轮去抖、忙时排队。"""
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "/ 4200)" not in js
+    m = re.search(r"const SWAP_MS\s*=\s*(\d+)", js)
+    assert m, "缺少 SWAP_MS"
+    assert int(m.group(1)) <= 1600, m.group(1)
+    assert "e.timeStamp - lastWheelT" in js
+    assert "queued = Math.sign" in js
+
+
+def test_projects_view_is_placeholder():
+    """render() 的 projects/project 必须走占位页，不直接打开旧项目页。"""
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "function renderProjectsSoon" in js
+    block = re.search(r"switch \(S\.view\) \{(.*?)default:", js, re.S)
+    assert block, "找不到 render() 的 switch"
+    assert "renderProjectsSoon()" in block.group(1)
+    assert re.search(r'case "projects":\s*case "project":\s*renderProjectsSoon\(\)', block.group(1))
+
+
+def test_nav_soon_rule_exists():
+    css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+    assert re.search(r"\.nav-soon(?![\w-])", css)

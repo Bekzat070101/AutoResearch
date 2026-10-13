@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from deploy_fc import STATE
+STATE = Path(__file__).resolve().parent / ".deploy.env"
 
 WEB = Path(__file__).resolve().parents[2] / "web"
 ROOT = Path(__file__).resolve().parents[4] / "qiyan-gh-pages"
@@ -18,9 +18,10 @@ REPO = "repos/ChengcanWu/AutoResearch"
 def gh(method: str, path: str, payload: dict | None = None) -> dict:
     cmd = ["gh", "api", "--method", method, path]
     if payload is not None:
-        p = subprocess.run(cmd + ["--input", "-"], input=json.dumps(payload), text=True, capture_output=True)
+        p = subprocess.run(cmd + ["--input", "-"], input=json.dumps(payload),
+                           text=True, encoding="utf-8", capture_output=True)
     else:
-        p = subprocess.run(cmd, text=True, capture_output=True)
+        p = subprocess.run(cmd, text=True, encoding="utf-8", capture_output=True)
     if p.returncode != 0:
         raise SystemExit((p.stderr or p.stdout)[:800])
     return json.loads(p.stdout) if p.stdout.strip() else {}
@@ -34,18 +35,27 @@ def api_url() -> str:
     return API_FALLBACK
 
 
+def _static_files(html: str) -> list[str]:
+    import re
+    return re.findall(r"static/[\w./-]+\.(?:css|js)", html)
+
+
 def assemble() -> None:
+    if ROOT.exists():
+        shutil.rmtree(ROOT)
     ROOT.mkdir(parents=True, exist_ok=True)
-    (ROOT / "static/css").mkdir(parents=True, exist_ok=True)
-    (ROOT / "static/js").mkdir(parents=True, exist_ok=True)
     html = (WEB / "index.html").read_text(encoding="utf-8").replace(
         'window.QIYAN_API = window.QIYAN_API || "";',
         f'window.QIYAN_API = "{api_url()}";',
     )
     (ROOT / "index.html").write_text(html, encoding="utf-8")
-    shutil.copy2(WEB / "css/styles.css", ROOT / "static/css/styles.css")
-    for name in ("app.js", "chat.js", "directions.js"):
-        shutil.copy2(WEB / "js" / name, ROOT / "static/js" / name)
+    for rel in _static_files(html):
+        src = WEB / rel.replace("static/", "", 1)
+        dest = ROOT / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not src.exists():
+            raise SystemExit(f"index 引用了不存在的 {rel}")
+        shutil.copy2(src, dest)
     (ROOT / ".nojekyll").write_text("", encoding="ascii")
     if "启研" not in html or "static/css" not in html:
         raise SystemExit("assembled index looks wrong")
@@ -66,8 +76,13 @@ def main() -> None:
         tree.append({"path": rel, "mode": "100644", "type": "blob", "sha": blob["sha"]})
         print("blob", rel)
     tr = gh("POST", f"{REPO}/git/trees", {"tree": tree})
+    import re
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    stamp = (re.search(r"<b>(w\d+)</b>", html) or type("m", (), {"group": lambda n: ""})()).group(1)
+    sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WEB.parent, capture_output=True, text=True)
+    src = (sha.stdout or "").strip() or "unknown"
     commit = gh("POST", f"{REPO}/git/commits", {
-        "message": "relative static paths for project Pages",
+        "message": f"pages {stamp} {src}",
         "tree": tr["sha"],
         "parents": [parent],
     })

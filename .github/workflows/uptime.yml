@@ -1,0 +1,34 @@
+# 每 15 分钟探活。失败打 secrets.ALERT_WEBHOOK（钉钉/企微机器人，待确认）。
+# 已知限制：最短约 5 分钟且常延迟；仓库 60 天无活动会停；失败通知只发给最后改 cron 的人。
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Health
+        env:
+          QIYAN_URL: ${{ secrets.QIYAN_URL }}
+        run: |
+          set -euo pipefail
+          URL="${QIYAN_URL:-https://qiyan-caxplsowco.cn-hangzhou.fcapp.run}"
+          curl -fsS -m 20 "$URL/api/health" | python -c "import json,sys; d=json.load(sys.stdin); assert d.get('ok'); print('health ok ephemeral=', d.get('db',{}).get('ephemeral'))"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/wechat?signature=x&timestamp=1&nonce=1&echostr=p")
+          test "$code" = "403"
+          curl -fsS https://chengcanwu.github.io/AutoResearch/ | grep -q build-stamp
+      - name: Alert
+        if: failure()
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+        run: |
+          if [ -n "$ALERT_WEBHOOK" ]; then
+            curl -fsS -X POST "$ALERT_WEBHOOK" -H 'content-type: application/json' -d '{"msg":"qiyan uptime failed"}'
+          else
+            echo "ALERT_WEBHOOK 未设：钉钉群待确认，只在 Actions 里看红"
+          fi

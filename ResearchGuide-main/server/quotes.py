@@ -101,20 +101,24 @@ def clear_prepared() -> None:
         _PREPARED.clear()
 
 
-def locate(quote: str, paper: dict[str, Any]) -> dict[str, Any]:
-    """返回 {found, section, where, reason}。paper 是 arxiv.fulltext() 的结果。"""
+def locate(quote: str, paper: dict[str, Any], within: tuple[int, int] | None = None) -> dict[str, Any]:
+    """返回 {found, section, where, reason, at}。paper 是 arxiv.fulltext() 的结果。"""
     q = norm(quote).strip(' "\'')
     if len(q) < MIN_LEN:
-        return {"found": False, "reason": f"引文太短（至少 {MIN_LEN} 个字符），没法当证据"}
+        return {"found": False, "reason": f"引文太短（至少 {MIN_LEN} 个字符），没法当证据", "at": None}
     hay, pos, hay2 = _prepared(paper.get("text") or "")
     i = hay.find(q)
     if i < 0 and hay2 != hay and q in hay2:
         i = -2
     if i == -1:
-        return {"found": False, "reason": "原文里找不到这句" + ("（只拿到了摘要，正文核对不了）" if paper.get("source") == "abstract" else "")}
+        return {"found": False, "reason": "原文里找不到这句" + ("（只拿到了摘要，正文核对不了）" if paper.get("source") == "abstract" else ""), "at": None}
     if i == -2:
-        return {"found": True, "section": "", "where": "正文", "reason": ""}
+        return {"found": True, "section": "", "where": "正文", "reason": "", "at": None}
     src_pos = pos[i] if i < len(pos) else 0
+    if within is not None:
+        start, end = within
+        if not (start <= src_pos < end):
+            return {"found": False, "reason": "这句不在这一节", "at": src_pos}
     sec = arxiv.section_at(paper["text"], src_pos)
     where = arxiv.section_cn(sec) if sec else ("摘要" if paper.get("source") == "abstract" else "正文")
-    return {"found": True, "section": sec, "where": where, "reason": ""}
+    return {"found": True, "section": sec, "where": where, "reason": "", "at": src_pos}

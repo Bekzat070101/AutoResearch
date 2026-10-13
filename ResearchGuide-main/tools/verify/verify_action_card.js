@@ -131,7 +131,7 @@ const txt = () => actions.textContent;
   console.log("        按钮变成：" + labels().join(" / "));
 
   console.log("\n=== ② accepted：唯一动作是「去任务区完成」 ===");
-  check(labels().includes("去作业区完成"), "有「去作业区完成」");
+  check(labels().includes("去做这一步"), "有「去做这一步」");
   check(!labels().includes("就做这个"), "不再显示「就做这个」（已经接过了）");
   check(!labels().includes("标记完成"), "没有「标记完成」");
   check(!labels().includes("先不做"), "已接的任务不再给「先不做」（要放弃得另有出口）");
@@ -139,7 +139,7 @@ const txt = () => actions.textContent;
   console.log("\n=== 点「去任务区完成」→ 跳到任务区并带上 task_id ===");
   CFG.views.length = 0;
   S.openTaskId = "";
-  btns().find((b) => b._text === "去作业区完成").click();
+  btns().find((b) => b._text === "去做这一步").click();
   check(CFG.views.includes("workbench"), "切到了任务区（workbench）",
     JSON.stringify(CFG.views));
   check(S.openTaskId === "t-9", "带上了 task_id，任务区会直接打开那一条",

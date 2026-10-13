@@ -58,7 +58,7 @@ def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
         key = (override.get("api_key") or override.get("key") or "").strip()
         base = (override.get("base_url") or "https://api.deepseek.com/v1").strip().rstrip("/")
         model = (override.get("model") or "deepseek-flash").strip()
-        return {"enabled": bool(key), "base_url": base, "model": model, "has_key": bool(key), "key": key}
+        return {"enabled": bool(key), "base_url": base, "model": model, "has_key": bool(key), "key": key, "own": True}
     if uid:
         import store
         secret = store.llm_secret(uid)
@@ -69,6 +69,7 @@ def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
                 "model": (secret.get("model") or "deepseek-flash").strip(),
                 "has_key": True,
                 "key": secret["key"],
+                "own": True,
             }
     cfg = config()
     key = (
@@ -77,7 +78,7 @@ def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
         or os.environ.get("DEEPSEEK_API_KEY")
         or ""
     ).strip()
-    return {**cfg, "key": key}
+    return {**cfg, "key": key, "own": False}
 
 
 def enabled(uid: str | None = None) -> bool:
@@ -213,6 +214,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": bool(text), "ms": int((time.time() - t0) * 1000),
         "tokens": usage.get("total_tokens"), "error": err or None,
+        "own": bool(cfg.get("own")),
     }, ensure_ascii=False))
     return text
 
@@ -299,4 +301,5 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": pieces > 0,
         "ms": int((time.time() - t0) * 1000), "chunks": pieces, "error": err or None,
+        "own": bool(cfg.get("own")),
     }, ensure_ascii=False))

@@ -16,12 +16,10 @@ const S = {
   llmKeyTail: "",
   auth: null,
   view: "home",
-  resume: "login",
-  onboard: { facts: [], messages: [] },
+  entered: false,
   lastTask: null,
   lastFeedback: null,
   newFactIds: [],
-  portraitTab: "dialogue",
   cardsPane: "direction",
   kitId: localStorage.getItem("rg_kit") || "",
   readTab: "kit",
@@ -65,7 +63,8 @@ const PRIVACY_HTML = `
   <h4>存了什么</h4>
   <ul>
     <li><b>账号</b>：用户名和称呼；密码只存哈希。用微信登录的话还有公众号给的 openid——一串只对「启研」公众号有效的编号，不是你的微信号。我们拿不到你的手机号和微信资料。</li>
-    <li><b>你写下和做过的</b>：对话；从对话里记下的画像（每条都标来源，在「记录」里能改能删）；你粘贴的成绩单；任务和项目提交；阅读卡；定位里的边、陈述和下注；作业草稿和项目路径进度。</li>
+    <li><b>你写下和做过的</b>：对话；从对话里记下的画像（每条都标来源，在「我的」里能改能删）；你粘贴的成绩单；任务和项目提交；阅读卡；定位里的边、陈述和下注；作业草稿和项目路径进度。</li>
+    <li><b>带读里的作答</b>：存在你的账号下，用来预填阅读卡草稿。不发给大模型。</li>
     <li><b>你上传的模型密钥</b>：封装后存在你自己的账号下，不出现在页面回显和导出全文里。对话和作业提示会用这把密钥请求大模型。</li>
     <li><b>登录会话</b>：只存令牌的哈希，三十天不用就失效。</li>
   </ul>
@@ -96,6 +95,7 @@ function setSession(r) {
   S.guest = r.guest !== false && !r.wechat && !S.username;
   S.hasLlmKey = !!r.has_llm_key;
   S.llmKeyTail = r.llm_key_tail || "";
+  if (r.entered !== undefined) S.entered = !!r.entered;
   dropPersistedSession();
   const chip = document.getElementById("userNickname");
   if (chip) chip.textContent = S.nickname;
@@ -112,6 +112,7 @@ function clearSession() {
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
   S.username = ""; S.hasLlmKey = false; S.llmKeyTail = "";
   S.nickname = "";
+  S.entered = false;
   S.myDir = undefined;
   dropPersistedSession();
 }
@@ -204,10 +205,10 @@ const SRC_CN = { declared: "自述", inferred: "推断", behavior: "行为" };
 
 const WORKSPACE = {
   today: "today",
-  dialogue: "portrait",
-  confirm: "portrait",
+  dialogue: "dialogue",
+  confirm: "me",
   cards: "cards",
-  workbench: "workbench",
+  workbench: "today",
   projects: "projects",
   project: "projects",
   position: "position",
@@ -218,14 +219,33 @@ const WORKSPACE = {
 
 /* ---------- 视图切换 ---------- */
 
+function firstView() {
+  return S.entered ? "today" : "dialogue";
+}
+
+function enterApp() {
+  S.entered = true;
+  if (S.uid) api("POST", "/api/onboard/enter", { uid: S.uid }).catch(() => {});
+  setView("today");
+}
+
 function setView(name) {
+  if (name === "confirm") {
+    S.scrollToConfirm = true;
+    name = "me";
+  }
+  const stay = name === "dialogue" || name === "me" || name === "login" || name === "home";
+  if (S.uid && !stay && !S.entered) {
+    enterApp();
+    return;
+  }
   S.view = name;
-  if (name === "dialogue" || name === "confirm") S.portraitTab = name;
   document.body.dataset.view = name;
   const home = name === "home";
   const inApp = !home && name !== "login" && !!S.uid;
   document.body.classList.toggle("is-home", home);
   document.body.classList.toggle("app-mode", inApp);
+  document.body.classList.toggle("is-onboarding", inApp && !S.entered);
   if (!home && stopField) { stopField(); stopField = null; }
   if (name !== "cards") document.getElementById("nodeSheet")?.remove();
   closeUserMenu();
@@ -235,7 +255,11 @@ function setView(name) {
     if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     b.disabled = !S.uid;
   });
-  $nav.hidden = !inApp;
+  const dlgBtn = document.querySelector('.nav-btn[data-view="dialogue"]');
+  if (dlgBtn) dlgBtn.hidden = !S.entered;
+  const dirChip = document.getElementById("dirChip");
+  if (dirChip) dirChip.hidden = !S.entered;
+  $nav.hidden = !inApp || !S.entered;
   $header.hidden = !inApp;
   paintChrome();
   render();
@@ -255,11 +279,11 @@ async function render() {
   switch (S.view) {
     case "login": renderLogin(); break;
     case "dialogue": ChatView.render($app); break;
-    case "confirm": await renderConfirm(); break;
+    case "confirm": await renderMe(); break;
     case "cards": await renderCards(); break;
     case "workbench": await renderWorkbench(); break;
-    case "projects": await renderProjects(); break;
-    case "project": await renderProject(); break;
+    case "projects":
+    case "project": renderProjectsSoon(); break;
     case "position": await renderPosition(); break;
     case "read": await renderRead(); break;
     case "card": await renderCard(); break;
@@ -343,7 +367,7 @@ function renderHome() {
     const sec = el("section", "snap");
     sec.dataset.index = String(i);
     const points = (page.points || [])
-      .map(([k, v], j) => `<li style="--i:${j}"><b>${k}</b><span>${v}</span></li>`).join("");
+      .map(([k, v]) => `<li><b>${k}</b><span>${v}</span></li>`).join("");
     sec.innerHTML = `<div class="snap-inner">`
       + (i === 0 ? `<p class="hero-kicker">${page.kicker}</p>` : `<p class="snap-no">${page.kicker}</p>`)
       + `<h2>${page.title}</h2>`
@@ -385,7 +409,7 @@ function beginExperience() {
   if (stopField) stopField();
   if (S.uid) {
     document.getElementById("userNickname").textContent = S.nickname || "";
-    setView("today");
+    setView(firstView());
     return;
   }
   setView("login");
@@ -706,6 +730,9 @@ function mountSketch(canvas, scroller) {
   let busy = true;  // 剧本进行中（锁输入）；开场聚形后自动播 00 屏动画再亮提示
   let phaseFrom = 0; // 本段换屏的相位起点
   let transStart = 0; // 本段换屏起播时间
+  let queued = 0;
+  let lastWheelT = 0;
+  const SWAP_MS = 1400;
   const hintEl = canvas.parentElement ? canvas.parentElement.querySelector(".land-hint") : null;
   const skipEl = canvas.parentElement ? canvas.parentElement.querySelector(".land-skip") : null;
   const hint = (show) => {
@@ -1120,7 +1147,12 @@ function mountSketch(canvas, scroller) {
      聚形后动画 → 亮「滚动以继续」提示；期间锁输入，不吃连续滚动 */
   const go = (n) => {
     const next = Math.min(figs.length - 1, Math.max(0, n));
-    if (busy || next === step) return;
+    if (next === step && !busy) return;
+    if (busy || intro < 1) {
+      if (intro >= 1) queued = Math.sign(n - step);
+      return;
+    }
+    queued = 0;
     busy = true;
     actCur = 0;
     actStart = 0;
@@ -1136,13 +1168,17 @@ function mountSketch(canvas, scroller) {
     if (!canvas.isConnected) return;
     let moving = false;
     if (intro < 1) {
-      if (!introStart) introStart = now;
-      intro = Math.min(1, (now - introStart) / 2200);
+      const boot = document.getElementById("boot");
+      const bootGone = !boot || boot.classList.contains("out");
+      if (bootGone) {
+        if (!introStart) introStart = now;
+        intro = Math.min(1, (now - introStart) / 900);
+      }
       moving = true;
     }
     if (busy && intro >= 1) { // 开场聚形先走完，剧本才开始——00 屏的过程要看得见
       if (!transStart) transStart = now;
-      const kk = still ? 1 : Math.min(1, (now - transStart) / 4200); // 换屏整段 4.2s，帧率无关
+      const kk = still ? 1 : Math.min(1, (now - transStart) / SWAP_MS);
       const ee = kk * kk * (3 - 2 * kk); // smoothstep：缓起缓收，全程可见的运动
       phase = phaseFrom + (target - phaseFrom) * ee;
       moving = true;
@@ -1153,13 +1189,20 @@ function mountSketch(canvas, scroller) {
         syncSkip();
         if (!actStart) {
           actStart = now;
-          busy = false;
-          hint(true);
+          if (queued) {
+            const q = queued;
+            queued = 0;
+            busy = false;
+            go(step + q);
+          } else {
+            busy = false;
+            hint(true);
+          }
         }
       }
     }
     if (!busy && actStart && actCur < 1) { // 动画与收尾并行，播完转入空闲心跳
-      actCur = still ? 1 : Math.min(1, (now - actStart) / 1600);
+      actCur = still ? 1 : Math.min(1, (now - actStart) / 900);
       moving = true;
     }
     draw(now);
@@ -1179,6 +1222,8 @@ function mountSketch(canvas, scroller) {
   const onWheel = (e) => {
     if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
     e.preventDefault();
+    if (e.timeStamp - lastWheelT < 200) return;
+    lastWheelT = e.timeStamp;
     if (e.deltaY > 12) go(step + 1);
     else if (e.deltaY < -12) go(step - 1);
   };
@@ -1194,6 +1239,7 @@ function mountSketch(canvas, scroller) {
   };
   const onKey = (e) => {
     if (e.target && e.target.closest && e.target.closest("button, input, textarea")) return;
+    if (e.repeat) return;
     if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") { e.preventDefault(); go(step + 1); }
     else if (e.key === "ArrowUp" || e.key === "PageUp") { e.preventDefault(); go(step - 1); }
     else if (e.key === "Home") { e.preventDefault(); go(0); }
@@ -1244,11 +1290,11 @@ const ROOM_GUIDES = {
   },
   projects: {
     key: "rg_guide_projects",
-    steps: ["先回答几句你现在想碰哪一类，越往后越具体。", "启研按你的回答去公开来源里找，找不到就如实说。", "选中一个，交压缩包；来源页以后再看。"],
+    steps: ["这一栏还在做。先用今日和研读。"],
   },
   read: {
     key: "rg_guide_read",
-    steps: ["按工具包顺序打开一篇能打开的论文。", "左边读，右边写阅读卡；原句从正文里圈。", "过线之后再看矩阵。一张卡也能看。"],
+    steps: ["按工具包顺序打开一篇能打开的论文。", "先读原文，再在阅读卡里写；原句从正文里圈。", "过线之后再看矩阵。一张卡也能看。"],
   },
   position: {
     key: "rg_guide_position",
@@ -1294,17 +1340,6 @@ function roomGuide(room, hasProgress) {
   };
   paint();
   return box;
-}
-
-function portraitTabs(active) {
-  const nav = el("nav", "ws-tabs");
-  [["dialogue", "对话"], ["confirm", "核对"]].forEach(([view, label]) => {
-    const b = el("button", `ws-tab${view === active ? " on" : ""}`, label);
-    b.type = "button";
-    b.onclick = () => setView(view);
-    nav.appendChild(b);
-  });
-  return nav;
 }
 
 async function logout() {
@@ -1390,9 +1425,7 @@ function renderLogin() {
             nickname: nick.value.trim() || user.value.trim(), consent: true,
           }));
           S.myDir = undefined;
-          await api("POST", "/api/onboard/start", { uid: S.uid });
-          toast(`你好，${S.nickname}`);
-          setView("dialogue");
+          await afterEnter();
         } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "注册并进入"; }
       };
       pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
@@ -1420,17 +1453,20 @@ function renderLogin() {
 }
 
 async function afterEnter() {
-  try {
-    const st = await api("GET", `/api/onboard/result?uid=${S.uid}`);
-    if (st.state && st.state.phase === "done") {
-      toast(`欢迎回来，${S.nickname}`);
-      setView("today");
-      return;
+  if (!S.entered) {
+    try {
+      const h = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
+      if (!(h.messages || []).length) {
+        await api("POST", "/api/onboard/start", { uid: S.uid }).catch(() => {});
+      }
+    } catch (_) {
+      await api("POST", "/api/onboard/start", { uid: S.uid }).catch(() => {});
     }
-  } catch (_) { /* 新号或没有向导记录 */ }
-  await api("POST", "/api/onboard/start", { uid: S.uid }).catch(() => {});
-  toast(`你好，${S.nickname}`);
-  setView("dialogue");
+    toast(`你好，${S.nickname}`);
+  } else {
+    toast(`欢迎回来，${S.nickname}`);
+  }
+  setView(firstView());
 }
 
 function openConnect() {
@@ -1575,13 +1611,6 @@ async function openUserMenu() {
   menu.id = "userMenu";
   menu.setAttribute("role", "menu");
   menu.appendChild(el("p", "user-menu-kicker", "你的档案"));
-  try {
-    const bar = await portraitBar();
-    bar.classList.add("user-menu-portraits");
-    menu.appendChild(bar);
-  } catch (e) {
-    menu.appendChild(el("p", "form-note", e.message || "画像列表没加载出来"));
-  }
   const go = (label, view) => {
     const b = el("button", "user-menu-item", label);
     b.type = "button";
@@ -1589,9 +1618,8 @@ async function openUserMenu() {
     b.onclick = () => { closeUserMenu(); setView(view); };
     return b;
   };
-  menu.appendChild(go("继续聊", S.portraitTab || "dialogue"));
-  menu.appendChild(go("核对这些记录", "confirm"));
-  menu.appendChild(go("它记下的", "me"));
+  menu.appendChild(go("我的", "me"));
+  menu.appendChild(go("继续聊", "dialogue"));
   if (!S.guest) {
     const mine = el("button", "user-menu-item", "我的 DeepSeek");
     mine.type = "button";
@@ -1614,7 +1642,7 @@ async function portraitBar() {
       if (p.active) return;
       S.portraitId = p.id;
       await api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
-      setView(S.view === "confirm" ? "confirm" : "dialogue");
+      setView(S.view === "me" ? "me" : "dialogue");
     };
     const del = el("button", "portrait-x", "删除");
     del.type = "button";
@@ -1645,30 +1673,19 @@ async function portraitBar() {
    后端 /api/onboard/* 仍然保留：它现在是「读画像事实」的通用出口，
    核对页、方向页、任务页都在用它拿 facts。 */
 
-/* ---------- ③ 确认页 ---------- */
-
-async function renderConfirm() {
-  const seq = S.renderSeq;
-  const [r, bar] = await Promise.all([api("GET", `/api/onboard/result?uid=${S.uid}`), portraitBar()]);
-  if (stale(seq)) return;
-  $app.innerHTML = "";
-  $app.appendChild(workspaceHead("核对", "说得不对就改，不属实就划掉。保存之后，方向才按你来。"));
-  $app.appendChild(bar);
-  $app.appendChild(portraitTabs("confirm"));
-  const main = el("div", "panel");
-
+function confirmDrafts(facts) {
+  const box = el("section", "panel");
+  box.id = "me-confirm";
+  box.appendChild(el("h3", "section-label", "核对"));
+  const drafts = facts.filter((f) => f.status === "draft");
   const list = el("div", "fact-list");
-  const drafts = r.facts.filter((f) => f.status === "draft");
-  const others = r.facts.filter((f) => f.status === "confirmed" || f.status === "active");
   const edits = {};
   const dismissed = new Set();
-
   if (drafts.length) {
-    main.appendChild(el("p", "panel-sub", "这些是它从对话里记下的。说得不对就直接改，不属实就划掉。保存之后才会用来推荐方向。"));
-  } else if (!others.length) {
-    main.appendChild(el("div", "note-box", "还没有可核对的记录。先去对话里聊几句。"));
+    box.appendChild(el("p", "panel-sub", "这些是它从对话里记下的。说得不对就直接改，不属实就划掉。保存之后才会用来推荐方向。"));
+  } else {
+    box.appendChild(el("p", "panel-sub", "没有待核对的草稿。聊过的已生效条目在下面的记忆里。"));
   }
-
   drafts.forEach((f) => {
     const card = factCard(f, true);
     const input = card.querySelector("input");
@@ -1687,14 +1704,9 @@ async function renderConfirm() {
     card.querySelector(".fact-actions").appendChild(del);
     list.appendChild(card);
   });
-  if (others.length) {
-    if (drafts.length) list.appendChild(el("p", "section-label", "已核对"));
-    others.forEach((f) => list.appendChild(factCard(f, false)));
-  }
-  main.appendChild(list);
-
-  const actions = el("div", "submit-actions");
+  box.appendChild(list);
   if (drafts.length) {
+    const actions = el("div", "submit-actions");
     const ok = el("button", "btn", "保存核对");
     ok.type = "button";
     ok.onclick = async () => {
@@ -1708,16 +1720,9 @@ async function renderConfirm() {
       } catch (e) { toast(e.message); ok.disabled = false; }
     };
     actions.appendChild(ok);
+    box.appendChild(actions);
   }
-  const later = el("button", drafts.length ? "btn ghost" : "btn", "去方向区");
-  later.type = "button";
-  later.onclick = () => setView("cards");
-  actions.appendChild(later);
-  main.appendChild(actions);
-  $app.appendChild(main);
-
-  // 字段清单按九大类分列：填了的给值，没填的显示成空格 + 「填了有什么用」。
-  main.appendChild(coverageBoard());
+  return box;
 }
 
 /* 把「还缺什么、填了能得到什么」摊开给用户看。
@@ -1778,7 +1783,7 @@ function coverageBoard() {
         // 摆一排输入框只会让人填一半就走。
         row.onclick = () => {
           if (s.presumed) { toast(`「${s.label}」是默认前提（${s.value}），不用填。`); return; }
-          toast(s.filled ? `「${s.label}」已经记下了，想改就去左边侧栏改。`
+          toast(s.filled ? `「${s.label}」已经记下了，想改就在下面的记忆里改。`
             : `去对话里说一句就行——${s.why}`);
           if (!s.filled) setView("dialogue");
         };
@@ -2470,10 +2475,6 @@ function openNodeSheet(field, node, ctx) {
   sheet.appendChild(el("p", "sheet-intro", esc(node.intro || "")));
   if (node.main && node.done_when) {
     sheet.appendChild(el("div", "why-box", `<b>做完怎样算过了　</b>${esc(node.done_when)}`));
-    const find = el("button", "btn secondary", "找能交出这一步的项目");
-    find.type = "button";
-    find.onclick = () => { document.getElementById("nodeSheet")?.remove(); findProjectsForStep(field.backend || field.code, node.stage); };
-    sheet.appendChild(find);
   }
   if (node.id === entry.id && ctx.why) {
     sheet.appendChild(el("p", "sheet-why", esc(ctx.why)));
@@ -3016,6 +3017,12 @@ async function hydrateDraft(tid, ta) {
   } catch (_) { /* 断网先用本地 */ }
 }
 
+function renderProjectsSoon() {
+  $app.innerHTML = "";
+  $app.appendChild(workspaceHead("项目", "这一栏还在做，先用今日和研读。"));
+  $app.appendChild(emptyPanel("项目栏还在做。已经选过或交过的项目还在库里，导出账号能带出来。", "回今日", "today"));
+}
+
 function emptyPanel(text, label, view) {
   const p = el("div", "panel");
   p.appendChild(el("p", "panel-sub", text));
@@ -3291,7 +3298,7 @@ function taskPanelDone(p, task, opts) {
    以前这里是整页 return，所以「对话出了任务但任务区是空的」。 */
 function dialogueTaskSection(tasks) {
   const box = el("div", "panel dialogue-tasks");
-  box.appendChild(el("h3", "section-label", "对话给你的作业"));
+  box.appendChild(el("h3", "section-label", "对话给你的这一步"));
   if (!tasks.length) {
     box.appendChild(el("p", "panel-sub",
       "还没有。在对话里点「就做这个」，任务会出现在这里，做完回对话继续。"));
@@ -3328,7 +3335,7 @@ async function renderWorkbench() {
   if (stale(seq)) return;
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("作业", "先看题。做完再对。"));
+  wrap.appendChild(workspaceHead("这一步", "先看题。做完再对。"));
   $app.appendChild(wrap);
 
   const listed = taskRes.tasks || [];
@@ -3401,16 +3408,12 @@ async function renderWorkbench() {
     if (!step) return null;
     const note = el("div", "note-box step-note");
     note.innerHTML = `${node.main ? "这是" : "这一节点属于"}路径第 ${step.stage} 步「${esc(step.label)}」。这一步做完要交：${esc(step.done_when)}`;
-    const find = el("button", "linkish", "找能交出它的项目");
-    find.type = "button";
-    find.onclick = () => findProjectsForStep(code, step.stage);
-    note.appendChild(find);
     return note;
   };
 
   /* 树上的任务和对话给的任务共用 taskPanel（对话那条路在 chat.js 里也调它）。
      差别只在完成后的去处，所以用 onDone 注入：
-     树上任务要「进入下一节点」+「找个项目练手」，对话任务回对话。 */
+     树上任务要「进入下一节点」，教程走完给「回方向区换一个方向」，对话任务回对话。 */
   wrap.appendChild(taskPanel(task, {
     title: node.label,
     intro: node.intro || task.brief,
@@ -3446,13 +3449,11 @@ async function renderWorkbench() {
         };
         acts.appendChild(go);
       }
-      const doneHere = listed.filter((tk) => tk.status === "done" && tk.direction === code && tk.id !== task.id).length + 1;
-      if (doneHere >= PROJECT_AFTER_TASKS || !next) {
-        const proj = el("button", next ? "btn secondary" : "btn", "学完一块了，找个项目练手");
-        proj.type = "button";
-        proj.title = `在「${field.name}」交过 ${doneHere} 次小任务`;
-        proj.onclick = () => goFindProjects();
-        acts.appendChild(proj);
+      if (!next) {
+        const back = el("button", "btn", "回方向区换一个方向");
+        back.type = "button";
+        back.onclick = () => setView("cards");
+        acts.appendChild(back);
       }
       const me = el("button", "btn ghost", "看它记下了什么");
       me.type = "button";
@@ -3501,16 +3502,7 @@ function renderFeedbackInto(p, opts) {
   p.appendChild(box);
 }
 
-/* ---------- 今日 / ⑨ NBA ---------- */
-
-const NBA_ACTION_VIEW = {
-  micro_task: ["去做这一步", "workbench"],
-  explore_direction: ["去选方向", "cards"],
-  course_action: ["去选方向", "cards"],
-  read_paper: ["去研读", "read"],
-  ask_clarifying: ["去对话", "dialogue"],
-  review_progress: ["去记录", "me"],
-};
+/* ---------- 今日 ---------- */
 
 function loopStrip(steps, nowIdx) {
   const strip = el("nav", "loop-strip");
@@ -3549,10 +3541,9 @@ async function renderToday() {
   if (stale(seq)) return;
   $app.innerHTML = "";
   $app.appendChild(skeleton(3));
-  const [taskRes, onboard, mine] = await Promise.all([
+  const [taskRes, onboard] = await Promise.all([
     api("GET", `/api/tasks?uid=${S.uid}`).catch(() => null),
     api("GET", `/api/onboard/result?uid=${S.uid}`).catch(() => null),
-    api("GET", `/api/projects/mine?uid=${S.uid}`).catch(() => ({ projects: [] })),
   ]);
   if (stale(seq)) return;
   adoptDirection((onboard && onboard.facts) || []);
@@ -3568,12 +3559,9 @@ async function renderToday() {
   const field = activeField(saved);
   const node = field ? currentOnPath(field, saved.done) : null;
   const facts = (onboard && onboard.facts) || [];
-  const talked = onboard && onboard.state && onboard.state.phase === "done";
+  const talked = S.entered || (onboard && onboard.state && onboard.state.phase === "done");
   const drafts = facts.filter((f) => f.status === "draft").length;
   const doneTasks = ((taskRes && taskRes.tasks) || []).filter((t) => t.status === "done" && t.direction === saved.code).length;
-  const projects = (mine && mine.projects) || [];
-  const toFix = projects.find((p) => p.status === "reviewed" && p.reviews[0] && p.reviews[0].passed < p.reviews[0].total);
-  const toSubmit = projects.find((p) => p.status === "picked");
 
   // 每条建议：一个主动作 + 至多一个备选，落到一件具体的事
   let title; let why; let primary; let alt = null;
@@ -3585,39 +3573,20 @@ async function renderToday() {
   } else if (!field && drafts) {
     title = `核对这些记录（${drafts} 条）`;
     why = "刚才记下的还是草稿。改掉不对的、划掉不属实的，方向才按你来。";
-    primary = goView("去核对", "confirm");
+    primary = goView("去我的页面核对", "me");
   } else if (!field) {
     title = "先选定一个方向";
-    why = "按你刚说的会标出建议。确认一个，作业从它的教程起点开始。";
+    why = "按你刚说的会标出建议。确认一个，这一步从它的教程起点开始。";
     primary = goView("去选方向", "cards");
-  } else if (toFix) {
-    let detail = null;
-    try { detail = await api("GET", `/api/projects/${toFix.id}?uid=${S.uid}`); } catch (_) { /* 拿不到详情就用概要 */ }
-    if (stale(seq)) return;
-    const last = (detail && detail.reviews && detail.reviews[0]) || toFix.reviews[0];
-    title = `把《${toFix.name}》再改一处`;
-    why = `上次评阅 ${last.passed} / ${last.total} 条做到。${last.next_step || "按评阅里第一条没做到的标准补一处，再交一版。"}`;
-    primary = { label: "去改这一处", run: () => openProject(toFix.id) };
-    if (node) alt = { label: `先继续「${node.label}」`, run: () => setView("workbench") };
-  } else if (toSubmit) {
-    title = `交《${toSubmit.name}》的成果`;
-    why = "这个项目已经选定，还没交。按项目页的要求打成一个 .zip：README、results/、代码或方法。没做完也可以先交一版，评阅会指出先补哪里。";
-    primary = { label: "去交成果", run: () => openProject(toSubmit.id) };
-    if (node) alt = { label: `先继续「${node.label}」`, run: () => setView("workbench") };
-  } else if (doneTasks >= PROJECT_AFTER_TASKS) {
-    title = "找一个真题练手";
-    why = `「${field.name}」已经交过 ${doneTasks} 次作业。作业练一个点，项目把点连起来：找一个公开真题，交一个压缩包。`;
-    primary = { label: "去找项目", run: () => goFindProjects() };
-    if (node) alt = { label: `先继续「${node.label}」`, run: () => setView("workbench") };
   } else if (node) {
     title = `继续「${node.label}」`;
     why = node.intro;
     primary = goView("去做这一步", "workbench");
   } else {
     title = `「${field.name}」这条路已经走到头`;
-    why = "可以找一个项目把这一路学的用起来，或者回方向区换一棵树。";
-    primary = { label: "去找项目", run: () => goFindProjects() };
-    alt = { label: "回方向区", run: () => setView("cards") };
+    why = "回方向区换一棵树，或先去研读。";
+    primary = goView("回方向区", "cards");
+    alt = goView("去研读", "read");
   }
 
   $app.innerHTML = "";
@@ -3626,22 +3595,19 @@ async function renderToday() {
   const status = el("div", "status-chips");
   status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没有方向"));
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
-  if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次作业`));
-  if (projects.length) status.appendChild(el("span", "status-chip", `${projects.length} 个项目`));
+  if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
   wrap.appendChild(status);
   const confirmed = facts.filter((f) => f.status === "confirmed" || f.status === "active").length;
   const steps = [
     { label: "聊过", done: !!talked, view: "dialogue" },
-    { label: "核对", done: !!talked && drafts === 0 && confirmed > 0, view: "confirm" },
+    { label: "我的", done: !!talked && drafts === 0 && confirmed > 0, view: "me" },
     { label: "方向", done: !!field, view: "cards" },
-    { label: "作业", done: doneTasks > 0, view: "workbench" },
-    { label: "项目", done: projects.length > 0, view: "projects" },
-    { label: "记录", done: confirmed > 0, view: "me" },
+    { label: "这一步", done: doneTasks > 0, view: "workbench" },
   ];
   wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));
-  const card = el("div", "nba-card");
-  card.appendChild(el("h3", "nba-title", esc(title)));
-  card.appendChild(el("p", "nba-why", esc(why)));
+  const ruleCard = el("div", "nba-card");
+  ruleCard.appendChild(el("h3", "nba-title", esc(title)));
+  ruleCard.appendChild(el("p", "nba-why", esc(why)));
   const act = el("div", "submit-actions");
   const go = el("button", "btn", esc(primary.label));
   go.type = "button";
@@ -3653,42 +3619,21 @@ async function renderToday() {
     other.onclick = alt.run;
     act.appendChild(other);
   }
-  card.appendChild(act);
-  wrap.appendChild(card);
-  $app.appendChild(wrap);
-  if ((talked && drafts === 0) || field) {
-    api("POST", "/api/nba", { uid: S.uid }).then((nba) => {
-      if (stale(seq) || !nba || !nba.title || !nba.rationale) return;
-      card.querySelector(".nba-title").textContent = nba.title;
-      card.querySelector(".nba-why").textContent = nba.rationale;
-      const hit = NBA_ACTION_VIEW[nba.action] || NBA_ACTION_VIEW.micro_task;
-      go.textContent = hit[0];
-      go.onclick = () => setView(hit[1]);
-      (nba.rationale_facts || []).slice(0, 2).forEach((fid) => {
-        const f = facts.find((x) => x.id === fid);
-        if (f && f.value) card.insertBefore(el("p", "nba-evidence", `你说过的：「${esc(f.value)}」`), act);
-      });
-      const alts = (nba.alternatives || []).slice(0, 2);
-      if (alts.length && !card.querySelector(".nba-alts")) {
-        const altRow = el("div", "nba-alts");
-        alts.forEach((a) => {
-          const to = NBA_ACTION_VIEW[a.action];
-          const b = el("button", "btn small ghost", esc(a.title || a.action));
-          b.type = "button";
-          if (to) b.onclick = () => setView(to[1]);
-          altRow.appendChild(b);
-        });
-        card.appendChild(altRow);
-      }
-    }).catch(() => { /* 保持本地建议 */ });
-  }
-  // 每日情报：开过研读、或方向正好有工具包时出现；单独加载，arXiv 慢也不挡上面的主建议
-  if (S.kitId || saved.code === "ai") {
-    if (!S.kitId) useKit(DEFAULT_KIT);
-    const slot = el("div", "panel daily", '<p class="panel-sub">正在取今天的 arXiv 新论文…</p>');
-    $app.appendChild(slot);
+  ruleCard.appendChild(act);
+  const showPapers = !!(talked || field);
+  if (!showPapers) wrap.appendChild(ruleCard);
+  else {
+    const slot = el("div", "today-papers panel daily", '<p class="panel-sub">正在取最近的新论文…</p>');
+    wrap.appendChild(slot);
+    const next = el("p", "today-next", `继续：${esc(title)} `);
+    const more = el("button", "linkish", esc(primary.label));
+    more.type = "button";
+    more.onclick = primary.run;
+    next.appendChild(more);
+    wrap.appendChild(next);
     dailyBlock(seq).then((box) => { if (!stale(seq)) slot.replaceWith(box); });
   }
+  $app.appendChild(wrap);
 }
 
 /* ---------- 研读：工具包 / 阅读卡 / 矩阵（docs/DESIGN_PROPOSAL.md §1C） ---------- */
@@ -3697,6 +3642,7 @@ const DEFAULT_KIT = "llm-eval";
 const DIR_LABEL = { up: "↑ 提升", down: "↓ 下降 / 失效", mixed: "~ 有好有坏", none: "? 没报告" };
 
 function readTabs(active) {
+  document.body.dataset.readTab = active || "kit";
   const nav = el("nav", "ws-tabs");
   [["kit", "工具包"], ["cards", "阅读卡"], ["matrix", "矩阵"]].forEach(([key, label]) => {
     const b = el("button", `ws-tab${key === active ? " on" : ""}`, label);
@@ -3755,9 +3701,15 @@ async function renderRead() {
   const byPaper = Object.fromEntries((cards.cards || []).map((c) => [c.arxiv_id, c]));
   $app.innerHTML = "";
   $app.appendChild(workspaceHead("研读", "先读一篇能打开的。记下原句，再写你怎么看。"));
+  const todayLink = el("p", "form-note");
+  const goToday = el("button", "linkish", "这个工具包的新论文在今日");
+  goToday.type = "button";
+  goToday.onclick = () => setView("today");
+  todayLink.appendChild(goToday);
+  $app.appendChild(todayLink);
   const passed = Object.values(byPaper).filter((c) => c.status === "pass").length;
   $app.appendChild(roomGuide("read", passed > 0));
-  $app.appendChild(el("div", "ws-status", `<span>工具包「${esc(kit.name)}」v${esc(kit.version)}</span><span>过线阅读卡 ${passed} 张</span><span>${esc(kit.status)}</span>`));
+  $app.appendChild(el("div", "ws-status", `<span>工具包「${esc(kit.name)}」v${esc(kit.version)}</span><span>过线阅读卡 ${passed} 张</span>`));
   $app.appendChild(readTabs(tab));
   const mismatch = kitMismatch(kit.direction, await myDirection());
   if (stale(seq)) return;
@@ -3769,18 +3721,37 @@ async function renderRead() {
   const goal = el("div", "panel");
   goal.appendChild(el("p", "section-label", "这个工具包要你弄懂"));
   goal.appendChild(el("p", "", esc(kit.goal)));
+  if (kit.status) goal.appendChild(el("p", "form-note", esc(kit.status)));
   $app.appendChild(goal);
 
   const papers = el("div", "panel");
   papers.appendChild(el("h3", "panel-title", "阅读顺序"));
   papers.appendChild(el("p", "panel-sub", "按顺序读；每篇一张卡。已经会的可以跳着读。"));
   const list = el("ol", "kit-papers");
+  let firstUnread = true;
   kit.papers.forEach((p) => {
     const c = byPaper[p.arxiv_id];
+    const unread = !c;
+    const primary = unread && firstUnread;
+    if (unread) firstUnread = false;
     const state = c ? (c.status === "pass" ? `<span class="kp-state pass">✓ 过线 v${c.version}</span>` : `<span class="kp-state revise">待改 v${c.version}</span>`) : "";
     const li = el("li", "kit-paper");
-    li.innerHTML = `<div class="kp-main"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a> ${state}<p>${esc(p.why)}</p><small>arXiv:${esc(p.arxiv_id)} · ${esc(p.published)}</small></div>`;
-    const go = el("button", c ? "btn small secondary" : "btn small", c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡");
+    const main = el("div", "kp-main");
+    const title = el("button", "linkish", esc(p.title));
+    title.type = "button";
+    title.onclick = () => openCard(p.arxiv_id);
+    main.appendChild(title);
+    if (state) {
+      const badge = el("span");
+      badge.innerHTML = " " + state;
+      main.appendChild(badge);
+    }
+    main.appendChild(el("p", "", esc(p.why)));
+    const small = el("small");
+    small.innerHTML = `arXiv:${esc(p.arxiv_id)} · ${esc(p.published)} · <a href="${esc(p.url)}" target="_blank" rel="noopener">arXiv ↗</a>`;
+    main.appendChild(small);
+    li.appendChild(main);
+    const go = el("button", primary ? "btn small" : "btn small secondary", c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡");
     go.type = "button";
     go.onclick = () => openCard(p.arxiv_id);
     li.appendChild(go);
@@ -3812,7 +3783,8 @@ function renderCardList(kit, byPaper) {
   const cards = Object.values(byPaper);
   if (!cards.length) {
     panel.appendChild(el("p", "panel-sub", "还没有阅读卡。从「工具包」里按顺序挑第一篇开始。"));
-    const go = el("button", "btn", `写第一张：${esc(kit.papers[0].title)}`);
+    panel.appendChild(el("p", "panel-sub", esc(kit.papers[0].title)));
+    const go = el("button", "btn", "写第一张阅读卡");
     go.type = "button";
     go.style.marginTop = "16px";
     go.onclick = () => openCard(kit.papers[0].arxiv_id);
@@ -3821,10 +3793,12 @@ function renderCardList(kit, byPaper) {
     return;
   }
   const rows = el("div", "fact-list");
-  cards.sort((a, b) => (a.status === b.status ? 0 : a.status === "pass" ? 1 : -1)).forEach((c) => {
+  const order = Object.fromEntries((kit.papers || []).map((p, i) => [p.arxiv_id, i]));
+  cards.sort((a, b) => (order[a.arxiv_id] ?? 99) - (order[b.arxiv_id] ?? 99)).forEach((c) => {
     const row = el("button", "mine-row");
     row.type = "button";
-    row.innerHTML = `<span class="mine-name">${esc(c.title)}</span><span class="mine-meta">v${c.version} · ${c.status === "pass" ? "过线" : `待改：${esc(c.review.next_step || "")}`}</span>`;
+    const badge = c.status === "pass" ? '<span class="kp-state pass">过线</span>' : '<span class="kp-state revise">待改</span>';
+    row.innerHTML = `<span class="mine-name">${esc(c.title)} ${badge}</span><span class="mine-meta">v${c.version}${c.status === "pass" ? "" : ` · ${esc(c.review.next_step || "")}`}</span>`;
     row.onclick = () => openCard(c.arxiv_id);
     rows.appendChild(row);
   });
@@ -3840,7 +3814,8 @@ async function renderMatrix(seq, kit) {
   if (!m.ready) {
     panel.appendChild(el("p", "panel-sub", "先交一张过线的阅读卡。格子只来自你自己的过线卡。卡越多，空格和冲突才有意义。"));
     if (kit && kit.papers && kit.papers[0]) {
-      const go = el("button", "btn", `写第一张：${esc(kit.papers[0].title)}`);
+      panel.appendChild(el("p", "panel-sub", esc(kit.papers[0].title)));
+      const go = el("button", "btn", "写第一张阅读卡");
       go.type = "button";
       go.onclick = () => openCard(kit.papers[0].arxiv_id);
       panel.appendChild(go);
@@ -3906,15 +3881,172 @@ function renderPaperTable(tb) {
 
 /* ---------- 阅读卡工作台 ---------- */
 
+function applyTutorPrefill(fields, prefill) {
+  const alts = [];
+  Object.entries(prefill || {}).forEach(([k, v]) => {
+    if (!(String(fields[k] || "").trim())) fields[k] = v;
+    else if (fields[k] !== v) alts.push({ key: k, text: v });
+  });
+  return alts;
+}
+
+function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
+  const box = el("section", "tutor-panel");
+  box.hidden = !session;
+  let sess = session || null;
+  const paint = () => {
+    box.innerHTML = "";
+    if (!sess) {
+      const empty = el("p", "form-note");
+      empty.textContent = "点「让它带我读」，按节出考察题。作答不发给模型。";
+      box.appendChild(empty);
+      return;
+    }
+    const head = el("div", "tutor-head");
+    const voice = el("span", "tutor-voice");
+    voice.textContent = sess.voice === "llm" ? "模型出题" : sess.voice === "mixed" ? "模型出题 / 规则版" : "规则版";
+    head.appendChild(voice);
+    const prog = el("span", "tutor-prog");
+    prog.textContent = `${sess.cur || 0}/${sess.total || 0}`;
+    head.appendChild(prog);
+    box.appendChild(head);
+    if (sess.notice) {
+      const n = el("p", "tutor-notice");
+      n.textContent = sess.notice;
+      box.appendChild(n);
+    }
+    const slots = sess.slots || [];
+    const cur = sess.cur || 0;
+    const sl = slots[cur];
+    if (sess.status === "stale") {
+      const tip = el("p", "tutor-miss");
+      tip.textContent = "原文变了，请重开。";
+      const again = el("button", "btn small", "重开带读");
+      again.type = "button";
+      again.onclick = () => startTutor(true);
+      box.append(tip, again);
+      return;
+    }
+    if (sess.status === "read" || sess.status === "done" || !sl) {
+      const tip = el("p", "form-note");
+      tip.textContent = "读完了。把你写过的答案预填进阅读卡，改完再交。";
+      const fin = el("button", "btn small", "预填进阅读卡");
+      fin.type = "button";
+      fin.onclick = finishTutor;
+      box.append(tip, fin);
+      return;
+    }
+    const q = el("p", "tutor-q");
+    q.textContent = sl.question || "";
+    box.appendChild(q);
+    if (sl.hint) {
+      const hint = el("details", "tutor-hint");
+      const sum = el("summary");
+      sum.textContent = "提示";
+      const hp = el("p");
+      hp.textContent = sl.hint;
+      hint.append(sum, hp);
+      box.appendChild(hint);
+    }
+    if (sl.type === "number") {
+      const warn = el("p", "tutor-miss");
+      warn.textContent = "表格里的字核对不了，选正文句子。";
+      box.appendChild(warn);
+    }
+    const ta = el("textarea");
+    ta.rows = sl.type === "own" ? 3 : 4;
+    ta.value = sl.answer || "";
+    const acts = el("div", "tutor-acts");
+    if (sl.type === "find_quote" || sl.type === "number" || sl.type === "limitation") {
+      const useSel = el("button", "linkish", "用选中的原文作答");
+      useSel.type = "button";
+      useSel.onclick = () => {
+        const got = selection ? selection() : "";
+        if (!got) { toast("先在左边原文里选中一句"); return; }
+        ta.value = got;
+      };
+      acts.appendChild(useSel);
+    }
+    const send = el("button", "btn small", "作答");
+    send.type = "button";
+    send.onclick = () => turnTutor(sl.qid, ta.value, false);
+    acts.appendChild(send);
+    if (sl.skippable || (sl.attempts || 0) >= 3 || sl.status === "skipped") {
+      const sk = el("button", "linkish", "跳过");
+      sk.type = "button";
+      sk.onclick = () => turnTutor(sl.qid, "", true);
+      acts.appendChild(sk);
+    }
+    box.appendChild(acts);
+    if (sl.note) {
+      const note = el("p", "form-note");
+      note.textContent = sl.note;
+      box.appendChild(note);
+    }
+    if (sl.anchor_station && scrollTo) {
+      const jump = el("button", "linkish", `跳到「${sl.anchor_station}」`);
+      jump.type = "button";
+      jump.onclick = () => scrollTo(sl.anchor_station);
+      box.appendChild(jump);
+    }
+  };
+  async function startTutor(restart) {
+    try {
+      sess = await api("POST", `/api/tutor/${aid}/start`, { uid: S.uid, kit: kitId, restart: !!restart });
+      box.hidden = false;
+      paint();
+    } catch (e) { toast(e.message); }
+  }
+  async function turnTutor(qid, answer, skip) {
+    try {
+      const out = await api("POST", `/api/tutor/${aid}/turn`, {
+        uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0,
+      });
+      sess = out.session;
+      paint();
+    } catch (e) {
+      if (/已经答过|刷新/.test(e.message || "")) toast("这题已经答过了，刷新");
+      else toast(e.message);
+    }
+  }
+  async function finishTutor() {
+    try {
+      const out = await api("POST", `/api/tutor/${aid}/finish`, { uid: S.uid, kit: kitId });
+      sess = out.session;
+      const alts = onPrefill ? onPrefill(out.prefill || {}, out.missing || []) : [];
+      paint();
+      (alts || []).forEach((a) => {
+        const row = el("p", "tutor-alt");
+        const label = el("span");
+        label.textContent = `带读里你写的是 ${a.text} `;
+        const swap = el("button", "linkish", "换成这句");
+        swap.type = "button";
+        swap.onclick = () => { if (onPrefill) onPrefill({ [a.key]: a.text }, []); };
+        row.append(label, swap);
+        box.appendChild(row);
+      });
+      (out.missing || []).forEach((m) => {
+        const miss = el("p", "tutor-miss");
+        miss.textContent = m;
+        box.appendChild(miss);
+      });
+    } catch (e) { toast(e.message); }
+  }
+  box.startTutor = startTutor;
+  box.loadSession = (s) => { sess = s; box.hidden = false; paint(); };
+  paint();
+  return box;
+}
+
 async function renderCard() {
   const seq = S.renderSeq;
   const kitId = S.kitId || DEFAULT_KIT;
   const aid = S.cardId;
   if (!aid) { setView("read"); return; }
   $app.innerHTML = "";
-  const back = el("button", "linkish back-link", "← 研读");
+  const back = el("button", "linkish back-link", S.cardFrom === "today" ? "← 今日" : "← 研读");
   back.type = "button";
-  back.onclick = () => setView("read");
+  back.onclick = () => { const to = S.cardFrom === "today" ? "today" : "read"; S.cardFrom = ""; setView(to); };
   $app.appendChild(back);
   const loading = el("div", "note-box", "正在取原文（arXiv HTML 版，第一次稍慢）…");
   $app.appendChild(loading);
@@ -3941,7 +4073,8 @@ async function renderCard() {
   const save = () => { try { localStorage.setItem(draftKey, JSON.stringify(state)); } catch (_) { /* 存不了不影响提交 */ } };
 
   $app.appendChild(workspaceHead(esc(paper.title)));
-  $app.appendChild(el("div", "ws-status", `<span><a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a></span><span>${paper.source === "html" ? "正文已取到，引文可逐字核对" : "只取到摘要：正文引文核对不了，请先读 arXiv 原文"}</span>${prev ? `<span>上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}</span>` : ""}`));
+  const status = el("div", "ws-status", `<span><a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a></span><span>${paper.source === "html" ? "正文已取到，引文可逐字核对" : "只取到摘要：正文引文核对不了，请先读 arXiv 原文"}</span>${prev ? `<span>上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}</span>` : ""}`);
+  $app.appendChild(status);
 
   const bench = el("div", "bench");
   // 左：原文
@@ -3961,23 +4094,52 @@ async function renderCard() {
     node.innerHTML = `这张表没能排版，请看原文 <a href="${esc(htmlUrl)}" target="_blank" rel="noopener">HTML ↗</a> · <a href="${esc(absUrl)}" target="_blank" rel="noopener">摘要 ↗</a>`;
     return node;
   };
+  const lineIndex = [];
   let off = 0;
   let currentJump = null;
+  let sawSec = false;
+  let frontWrap = null;
+  let frontCount = 0;
+  const fillPaperLine = (node, line) => {
+    line.split(/(\s+)/).forEach((part) => {
+      if (/\\[a-zA-Z]+|[_^]\{/.test(part)) {
+        const s = el("span", "tex");
+        s.textContent = part;
+        node.appendChild(s);
+      } else {
+        node.appendChild(document.createTextNode(part));
+      }
+    });
+  };
   paper.text.split("\n").forEach((line) => {
     const sec = starts.get(off);
     let node;
     const fail = /^\[\[table:fail:([^\]]+)\]\]$/.exec(line);
     const hit = /^\[\[table:([^\]]+)\]\]$/.exec(line);
+    const asHead = !!(sec && line.length <= 80 && !/^\d+$/.test(line.trim()));
     if (fail || (hit && String(hit[1]).startsWith("fail:"))) node = tableMiss();
     else if (hit && byTable[hit[1]]) node = renderPaperTable(byTable[hit[1]]);
     else if (hit) node = tableMiss();
     else {
-      node = el(sec ? "h4" : "p");
-      node.textContent = line;
+      node = el(asHead ? "h4" : "p");
+      fillPaperLine(node, line);
     }
-    pane.appendChild(node);
+    if (!sawSec && !asHead && !hit && !fail) {
+      if (!frontWrap) {
+        frontWrap = el("details", "paper-front");
+        frontWrap.appendChild(el("summary", "", "作者与单位"));
+        pane.appendChild(frontWrap);
+      }
+      frontWrap.appendChild(node);
+      frontCount += 1;
+    } else {
+      if (asHead) sawSec = true;
+      pane.appendChild(node);
+    }
+    const offBefore = off;
     off += line.length + 1;
-    if (!sec || jumped.has(sec.label)) return;
+    lineIndex.push({ start: offBefore, end: off, node });
+    if (!asHead || jumped.has(sec.label)) return;
     jumped.add(sec.label);
     const b = el("button", "sec-chip", esc(sec.label));
     b.type = "button";
@@ -3989,6 +4151,10 @@ async function renderCard() {
     };
     jump.appendChild(b);
   });
+  if (frontWrap) {
+    const sum = frontWrap.querySelector("summary");
+    if (sum) sum.textContent = `作者与单位（${frontCount} 行）`;
+  }
   quoteFields.forEach((f) => {
     const b = el("button", "chip", `引为「${esc(f.label.replace(" · 原句", ""))}」`);
     b.type = "button";
@@ -4007,9 +4173,60 @@ async function renderCard() {
   const right = el("section", "bench-card");
   const form = el("div", "card-form");
   const result = el("div", "card-result");
-  right.append(form, result);
+  const scrollToStation = (label) => {
+    pane.querySelectorAll(".tutor-hit").forEach((n) => n.classList.remove("tutor-hit"));
+    const hit = lineIndex.find((x) => (x.node.textContent || "").includes(label));
+    if (hit) {
+      hit.node.classList.add("tutor-hit");
+      pane.scrollTo({ top: hit.node.offsetTop - 8, behavior: "smooth" });
+    }
+  };
+  const readSelection = () => {
+    const sel = (window.getSelection() || "").toString().replace(/\s+/g, " ").trim();
+    if (!sel || !pane.contains(window.getSelection().anchorNode)) return "";
+    return sel;
+  };
+  const panel = tutorPanel({
+    aid, kitId,
+    scrollTo: scrollToStation,
+    selection: readSelection,
+    onPrefill: (prefill, missing) => {
+      const alts = applyTutorPrefill(state.fields, prefill);
+      save();
+      paintForm();
+      if (missing && missing.length) toast(missing.join("；"));
+      return alts;
+    },
+  });
+  right.append(panel, form, result);
   bench.append(left, right);
   $app.appendChild(bench);
+  const passedCount = (cards.cards || []).filter((c) => c.status === "pass").length;
+  if (S.uid) {
+    const launch = el("button", passedCount >= 2 ? "linkish tutor-launch tutor-minor" : "btn small tutor-launch");
+    launch.type = "button";
+    launch.textContent = passedCount >= 2 ? "再带读一遍" : "让它带我读";
+    launch.onclick = () => {
+      if (panel.hidden === false) return;
+      panel.startTutor(passedCount >= 2);
+    };
+    status.appendChild(launch);
+    api("GET", `/api/tutor/${aid}?uid=${S.uid}&kit=${kitId}`).then((r) => {
+      if (stale(seq) || !r || !r.session) return;
+      const s = r.session;
+      if (s.status === "active") {
+        launch.textContent = `继续带读 ${s.cur}/${s.total}`;
+        launch.className = "btn small tutor-launch";
+        launch.onclick = () => panel.loadSession(s);
+      } else if (s.status === "read") {
+        launch.textContent = "继续带读（预填）";
+        launch.onclick = () => panel.loadSession(s);
+      } else if (passedCount >= 2) {
+        launch.textContent = "再带读一遍";
+        launch.onclick = () => panel.startTutor(true);
+      }
+    }).catch(() => { /* 没有会话就不显示继续 */ });
+  }
 
   function paintForm() {
     form.innerHTML = "";
@@ -4120,40 +4337,103 @@ async function renderCard() {
     sec.appendChild(list);
     if (card.fact) sec.appendChild(el("div", "why-box", `<b>写进账本　</b>${esc(card.fact.value)}`));
     result.appendChild(sec);
+    loadCardHistory();
+  }
+
+  async function loadCardHistory() {
+    if (!S.uid) return;
+    try {
+      const h = await api("GET", `/api/cards/${aid}/history?uid=${S.uid}&kit=${kitId}`);
+      const vers = h.versions || [];
+      if (!vers.length) return;
+      result.querySelector(".card-hist")?.remove();
+      const box = el("details", "card-hist");
+      box.appendChild(el("summary", "", `历次版本 ${vers.length}`));
+      vers.forEach((v) => {
+        const r = v.review || {};
+        box.appendChild(el("p", "form-note",
+          `v${v.version} · ${r.passed ?? "—"}/${r.total ?? "—"} · ${esc(v.created_at || "")} · ${esc(r.next_step || "")}`));
+      });
+      result.appendChild(box);
+    } catch (_) { /* 没有历史就不画 */ }
   }
 
   paintForm();
   if (prev) paintReview(prev);
+  else loadCardHistory();
 }
 
 /* ---------- 今日 · 每日情报（≤10 分钟） ---------- */
 
+function clipAbs(text) {
+  const t = String(text || "");
+  const parts = t.split(/(?<=(?<!e\.g|i\.e|et al)\.)\s+/);
+  return parts.slice(0, 2).join(" ");
+}
+
+function highlightHits(text, hits) {
+  const node = el("p", "triage-abs");
+  const terms = (hits || []).map((h) => h.term_en).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!terms.length) { node.textContent = text; return node; }
+  const re = new RegExp("(" + terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
+  let last = 0;
+  const src = String(text || "");
+  src.replace(re, (m, _g, i) => {
+    if (i > last) node.appendChild(document.createTextNode(src.slice(last, i)));
+    const mark = el("span", "triage-hit");
+    mark.textContent = m;
+    node.appendChild(mark);
+    last = i + m.length;
+    return m;
+  });
+  if (last < src.length) node.appendChild(document.createTextNode(src.slice(last)));
+  if (!node.childNodes.length) node.textContent = src;
+  return node;
+}
+
 async function dailyBlock(seq) {
-  const box = el("section", "panel daily");
+  const box = el("section", "panel daily today-papers");
   let d;
   try {
-    d = await api("GET", `/api/daily?uid=${S.uid}&kit=${S.kitId || DEFAULT_KIT}`);
+    const q = S.kitId ? `&kit=${encodeURIComponent(S.kitId)}` : "";
+    d = await api("GET", `/api/daily?uid=${S.uid}${q}`);
   } catch (e) {
     box.appendChild(el("p", "panel-sub", `今日情报暂时取不到（如实说明）：${esc(e.message)}`));
     return box;
   }
   if (stale(seq)) return box;
+  const kitName = d.kit && d.kit.name ? `「${d.kit.name}」` : "按你的兴趣";
   const head = el("div", "daily-head");
-  head.innerHTML = `<div><p class="section-label">每日情报 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣今天的新论文</h3><p class="panel-sub">「${esc(d.kit.name)}」相关的 arXiv 新论文。只看标题和摘要原文，决定留还是过，写一句为什么——这是在练判断，不是在读论文。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
+  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(kitName)}相关的 arXiv 论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
   box.appendChild(head);
   if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上（如实说明）：${esc(d.error)}`));
-  if (!d.items.length && !d.error) box.appendChild(el("p", "panel-sub", "今天没有新的待分拣论文（周末 arXiv 不更新）。"));
+  if (!d.items.length) {
+    const reason = d.empty_reason;
+    if (reason === "thin") {
+      box.appendChild(el("p", "panel-sub", "这个方向 arXiv 上很少。先去这些信息源看。"));
+      (d.channels || []).forEach((c) => {
+        box.appendChild(el("p", "", `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)} ↗</a>`));
+      });
+    } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "这个话题最近的都分拣完了。"));
+    else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上 arXiv，这是已缓存的候选。`));
+    else if (reason === "no_topics") box.appendChild(el("p", "panel-sub", "还没有能用来检索的兴趣话题。先聊几句或选定方向。"));
+    else box.appendChild(el("p", "panel-sub", "最近没有待分拣论文。"));
+  }
   d.items.forEach((it) => {
     const row = el("article", "triage");
-    const first = it.abstract.split(/(?<=\.)\s/).slice(0, 2).join(" ");
-    row.innerHTML = `<a class="triage-title" href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a><p class="triage-abs">${esc(first)}</p><small>${esc(it.authors.join(", "))} · ${esc(it.published)}</small>`;
+    const title = el("a", "triage-title");
+    title.href = it.url; title.target = "_blank"; title.rel = "noopener";
+    title.textContent = it.title;
+    row.appendChild(title);
+    row.appendChild(highlightHits(clipAbs(it.abstract), it.hits));
+    row.appendChild(el("small", "", `${esc((it.authors || []).join(", "))} · ${esc(it.published || "")}`));
     const ctl = el("div", "triage-ctl");
     const why = el("input");
     why.placeholder = "为什么（一句，≤30 字）：碰到了什么 / 离你的问题多远";
     why.maxLength = 80;
     const send = async (verdict) => {
       try {
-        await api("POST", "/api/daily/triage", { uid: S.uid, kit: d.kit.id, arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
+        await api("POST", "/api/daily/triage", { uid: S.uid, arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
@@ -4167,6 +4447,16 @@ async function dailyBlock(seq) {
     skip.type = "button";
     skip.onclick = () => send("skip");
     ctl.append(why, keep, skip);
+    if (it.card_kit) {
+      const card = el("button", "btn small ghost", "读成一张卡");
+      card.type = "button";
+      card.onclick = () => { S.kitId = it.card_kit; S.cardFrom = "today"; openCard(it.arxiv_id); };
+      ctl.appendChild(card);
+    } else {
+      const ext = el("a", "linkish", "在 arXiv 读");
+      ext.href = it.url; ext.target = "_blank"; ext.rel = "noopener";
+      ctl.appendChild(ext);
+    }
     row.appendChild(ctl);
     box.appendChild(row);
   });
@@ -4638,36 +4928,143 @@ async function paintBets(seq, body) {
 
 /* ---------- ⑧ me 页 ---------- */
 
+function projectFolders(projects) {
+  const box = el("div", "mem-layer mem-layer-practice");
+  box.appendChild(el("p", "mem-layer-head",
+    `在做的项目<span class="mem-layer-n">${projects.length}</span>`));
+  box.appendChild(el("p", "mem-layer-hint", "一个项目一张卡。里面每条都能单独改或删。"));
+  projects.forEach((pj) => {
+    const wrap = el("div", "proj");
+    const head = el("div", "proj-head");
+    head.appendChild(el("span", "proj-name", esc(pj.name)));
+    head.appendChild(el("span", "proj-n", `${pj.facts.length} 条`));
+    const body = el("div", "proj-body");
+    pj.facts.forEach((f) => body.appendChild(memoryCard(f)));
+    wrap.append(head, body);
+    box.appendChild(wrap);
+  });
+  return box;
+}
+
+function layerBlock(L) {
+  const box = el("div", `mem-layer mem-layer-${L.layer}`);
+  box.appendChild(el("p", "mem-layer-head",
+    `${esc(L.label)}<span class="mem-layer-n">${L.facts.length}</span>`));
+  if (L.layer_hint) box.appendChild(el("p", "mem-layer-hint", esc(L.layer_hint)));
+  const list = el("div", "mem-layer-list");
+  L.facts.forEach((f) => list.appendChild(memoryCard(f)));
+  box.appendChild(list);
+  return box;
+}
+
+function memoryCard(f) {
+  const derived = f.source === "derived";
+  const card = el("div", `mem-card${derived ? " mem-derived" : ""}`);
+  const value = el("div", "mem-value", esc(f.value));
+  const meta = el("div", "mem-meta");
+  const srcCn = {
+    declared: "你说的", inferred: "我推断的", behavior: "做过的",
+    derived: "成绩单推的", user_edit: "你改的",
+  };
+  meta.appendChild(el("span", `badge src-${f.source}`, srcCn[f.source] || esc(f.source)));
+  if (f.affects_label) meta.appendChild(el("span", "badge plain", `影响${f.affects_label}`));
+  if (f.valid_until) meta.appendChild(el("span", "badge plain", `到 ${esc(String(f.valid_until).slice(0, 10))} 失效`));
+  card.append(value, meta);
+  const quotes = (f.evidence || []).map((e) => e.quote).filter(Boolean);
+  if (quotes.length) card.appendChild(el("p", "mem-basis", "依据：" + quotes.map((q) => `「${q}」`).join("")));
+  else if (derived) {
+    const ev = (f.evidence || []).filter((e) => e.type === "transcript");
+    if (ev.length) {
+      card.appendChild(el("p", "mem-basis",
+        "依据：" + ev.map((e) => `${esc(e.course)} ${esc(String(e.grade))}`).join("、")));
+    }
+  }
+  const acts = el("div", "mem-acts");
+  if (!derived) {
+    const edit = el("button", "linkish", "改");
+    edit.type = "button";
+    edit.onclick = () => {
+      if (value.querySelector("input")) return;
+      const input = el("input");
+      input.type = "text";
+      input.value = f.value;
+      value.innerHTML = "";
+      value.appendChild(input);
+      input.focus();
+      let done = false;
+      const restore = (v) => { value.textContent = v; };
+      const save = async () => {
+        if (done) return;
+        done = true;
+        const v = input.value.trim();
+        if (!v || v === f.value) { restore(f.value); return; }
+        try {
+          await api("PATCH", `/api/me/facts/${f.id}`, { uid: S.uid, value: v });
+          restore(v);
+          toast("改好了。这条现在算你亲口说的。");
+        } catch (e) { toast(e.message); restore(f.value); }
+      };
+      input.addEventListener("blur", save);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.isComposing) input.blur();
+        if (e.key === "Escape") { done = true; restore(f.value); }
+      });
+    };
+    acts.appendChild(edit);
+  }
+  const del = el("button", "linkish danger", derived ? "不算" : "删");
+  del.type = "button";
+  del.onclick = async () => {
+    del.disabled = true;
+    try {
+      await api("DELETE", `/api/me/facts/${f.id}?uid=${encodeURIComponent(S.uid)}`);
+      card.classList.add("is-dismissed");
+      toast(derived ? "好，这条不再拿来说事。" : "已删掉。");
+    } catch (e) { toast(e.message); del.disabled = false; }
+  };
+  acts.appendChild(del);
+  card.appendChild(acts);
+  return card;
+}
+
 async function renderMe() {
   const seq = S.renderSeq;
-  const r = await api("GET", `/api/me/facts?uid=${S.uid}`);
+  const [mem, mine, portraits] = await Promise.all([
+    api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ layers: [], projects: [] })),
+    api("GET", `/api/me/facts?uid=${S.uid}`).catch(() => ({ facts: [] })),
+    portraitBar().catch(() => null),
+  ]);
   if (stale(seq)) return;
-  const facts = r.facts.filter((f) => f.status !== "deleted" && f.status !== "dismissed");
+  const live = new Set(["draft", "confirmed", "active"]);
+  const facts = (mine.facts || []).filter((f) => live.has(f.status));
+  const now = Date.now();
+  const expired = facts.filter((f) => f.valid_until && new Date(f.valid_until).getTime() < now);
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("记录", "每条都写着从哪来。不对就改，不想留着就删。"));
+  $app.appendChild(workspaceHead("我的", "账号、核对和它记下的，都在这一页。"));
   $app.appendChild(accountPanel());
-  const main = el("div", "panel");
-
-  const groups = {};
-  facts.forEach((f) => { (groups[f.category] = groups[f.category] || []).push(f); });
-  Object.keys(CAT_CN).forEach((cat) => {
-    if (!groups[cat] || !groups[cat].length) return;
-    const g = el("section", "fact-group");
-    g.appendChild(el("h3", "section-label", `${CAT_CN[cat]} · ${groups[cat].length}`));
-    const list = el("div", "fact-list");
-    groups[cat].forEach((f) => list.appendChild(factCard(f, false, S.newFactIds.includes(f.id))));
-    g.appendChild(list);
-    main.appendChild(g);
-  });
-  if (!facts.length) {
-    main.appendChild(el("p", "panel-sub", "还没有记录。先去对话里聊几句。"));
-    const go = el("button", "btn", "去对话");
-    go.type = "button";
-    go.style.marginTop = "16px";
-    go.onclick = () => setView("dialogue");
-    main.appendChild(go);
+  if (portraits) $app.appendChild(portraits);
+  $app.appendChild(confirmDrafts(facts));
+  $app.appendChild(coverageBoard());
+  const board = el("section", "panel");
+  board.appendChild(el("h3", "section-label", "它记下的"));
+  const layers = (mem.layers || []).filter((L) => (L.facts || []).length);
+  const projects = mem.projects || [];
+  if (projects.length) board.appendChild(projectFolders(projects));
+  layers.forEach((L) => board.appendChild(layerBlock(L)));
+  if (!layers.length && !projects.length) {
+    board.appendChild(el("p", "panel-sub", "还没有已生效的记忆。先去对话里聊几句，再回这里核对。"));
   }
-  $app.appendChild(main);
+  $app.appendChild(board);
+  if (expired.length) {
+    const fold = el("details", "inventory");
+    fold.appendChild(el("summary", "", `已过期 ${expired.length} 条`));
+    expired.forEach((f) => fold.appendChild(el("p", "form-note", `${esc(f.value)} · 到 ${esc(String(f.valid_until).slice(0, 10))}`)));
+    $app.appendChild(fold);
+  }
+  if (S.scrollToConfirm) {
+    S.scrollToConfirm = false;
+    document.getElementById("me-confirm")?.scrollIntoView({ block: "start" });
+  }
 }
 
 /* ---------- 边学边练：项目 ---------- */
@@ -5333,7 +5730,7 @@ document.getElementById("dirChip").addEventListener("click", () => {
 document.getElementById("userMenuBtn").addEventListener("click", (e) => {
   e.stopPropagation();
   if (!S.uid) return;
-  openUserMenu();
+  setView("me");
 });
 document.addEventListener("click", (e) => {
   const menu = document.getElementById("userMenu");
@@ -5363,17 +5760,12 @@ document.addEventListener("click", (e) => {
         const prefs = await api("GET", "/api/me/prefs");
         if (prefs.kit_id) useKit(prefs.kit_id);
       } catch (_) { /* 没有偏好就用本地 */ }
-      const st = await api("GET", `/api/onboard/result?uid=${S.uid}`);
-      S.portraitTab = st.state && st.state.phase === "done" ? "confirm" : "dialogue";
-      S.resume = "today";
       await ensurePortrait();
     } catch (_) {
       clearSession();
-      S.resume = "login";
     }
   } else if (S.uid) {
     clearSession();
-    S.resume = "login";
   }
   setView("home");
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒

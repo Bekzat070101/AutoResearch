@@ -187,9 +187,9 @@ const DIALOGUE_TASK = {
   const txt = allText(box);
 
   console.log("=== ① 对话任务必须渲染出来（这是过去失败的那一种） ===");
-  check(byClass(box, "dialogue-tasks").length === 1, "作业区里有「对话给你的作业」这一块");
+  check(byClass(box, "dialogue-tasks").length === 1, "作业区里有「对话给你的这一步」这一块");
   check(txt.includes("挑 KotobaAI"), "作业的标题渲染出来了");
-  check(txt.includes("对话给你的作业"), "分组标题在");
+  check(txt.includes("对话给你的这一步"), "分组标题在");
   check(byClass(box, "task-panel").length === 1, "渲染成了一个任务面板");
 
   console.log("\n=== ② 三问齐全 ===");
@@ -226,7 +226,7 @@ const DIALOGUE_TASK = {
   await m2.renderWorkbench();
   const box2 = CFG.app;
   const txt2 = allText(box2);
-  check(txt2.includes("对话给你的作业"), "对话作业那一块还在");
+  check(txt2.includes("对话给你的这一步"), "对话作业那一块还在");
   check(txt2.includes("挑 KotobaAI"), "对话任务的标题仍在");
   check(txt2.includes("人工智能"), "方向路径那一段也在");
   check(byClass(box2, "dialogue-tasks").length === 1, "对话任务独立成块（没有被树挤掉）");
@@ -243,7 +243,7 @@ const DIALOGUE_TASK = {
     note ? JSON.stringify(note.innerHTML.slice(0, 60)) : "(没有 .step-note)");
   check(!!note && note.innerHTML.includes("特征与标签"), "说明里带上了这一步的名字");
   check(!!note && note.innerHTML.includes("一份能跑的小例子"), "说明里写清了这一步要交什么");
-  check(allText(box2).includes("找能交出它的项目"), "说明里有「找能交出它的项目」入口");
+  check(!allText(box2).includes("找能交出它的项目"), "任务页不再出现找项目入口");
   check(txt2.includes("填入演示示例"), "树任务有「填入演示示例」按钮（对话任务没有）");
   check(txt2.includes("来自方向"), "树任务标明它来自方向（不是「来自对话」）");
 

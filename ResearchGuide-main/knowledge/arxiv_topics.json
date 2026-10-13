@@ -1,0 +1,298 @@
+{
+  "status": "草稿",
+  "checked_at": "",
+  "reviewed_by": "",
+  "word_whitelist": ["LLM", "NLP", "RL", "CNN", "GNN", "PDE", "OS", "SQL", "GPU", "CPU", "MRI", "EEG", "BERT", "GPT", "SVM", "PCA", "OLS", "RCT", "DNA", "RNA", "HIV", "transformer", "algorithm", "biochemistry", "computability", "database", "econometrics", "fMRI", "immunology", "kernel", "macroeconomics", "microarchitecture", "pathology", "pharmacology", "rendering", "synchronization"],
+  "topics": {
+    "llm-eval": {
+      "name": "大模型评测",
+      "zh": ["大模型评测", "基准评测", "LLM 评测"],
+      "slugs": ["llm-eval", "llm_eval", "eval"],
+      "en": ["LLM evaluation", "evaluation benchmark", "LLM-as-a-judge", "data contamination", "benchmark contamination"],
+      "categories": ["cs.CL", "cs.LG", "cs.AI"]
+    },
+    "ai": {
+      "name": "人工智能",
+      "zh": ["人工智能", "机器学习", "大模型"],
+      "slugs": ["ml", "ai", "machine-learning"],
+      "en": ["large language model", "foundation model", "deep learning"],
+      "categories": ["cs.AI", "cs.LG", "cs.CL"]
+    },
+    "nlp": {
+      "name": "自然语言处理",
+      "zh": ["自然语言", "NLP", "文本"],
+      "slugs": ["nlp"],
+      "en": ["natural language processing", "language model", "NLP"],
+      "categories": ["cs.CL"]
+    },
+    "pr": {
+      "name": "模式识别",
+      "zh": ["模式识别", "分类"],
+      "slugs": ["pr", "pattern"],
+      "en": ["pattern recognition", "image classification"],
+      "categories": ["cs.CV", "cs.LG"]
+    },
+    "nn": {
+      "name": "神经网络",
+      "zh": ["神经网络", "深度学习"],
+      "slugs": ["nn", "neural"],
+      "en": ["neural network", "transformer", "CNN"],
+      "categories": ["cs.LG", "cs.NE"]
+    },
+    "cs-algo": {
+      "name": "算法",
+      "zh": ["算法", "复杂度"],
+      "slugs": ["algo", "algorithm"],
+      "en": ["algorithm", "time complexity", "approximation algorithm"],
+      "categories": ["cs.DS"]
+    },
+    "cs-ds": {
+      "name": "数据结构",
+      "zh": ["数据结构"],
+      "slugs": ["ds", "datastructure"],
+      "en": ["data structure", "hash table", "balanced tree"],
+      "categories": ["cs.DS"]
+    },
+    "cs-found": {
+      "name": "计算机基础",
+      "zh": ["可计算性", "自动机"],
+      "slugs": ["found", "theory"],
+      "en": ["computability", "automata theory", "computational complexity"],
+      "categories": ["cs.CC", "cs.LO"]
+    },
+    "cs-arch": {
+      "name": "系统结构",
+      "zh": ["体系结构", "系统结构"],
+      "slugs": ["arch", "architecture"],
+      "en": ["computer architecture", "microarchitecture", "instruction set"],
+      "categories": ["cs.AR", "cs.DC"]
+    },
+    "cs-net": {
+      "name": "计算机网络",
+      "zh": ["计算机网络", "网络"],
+      "slugs": ["net", "network"],
+      "en": ["computer network", "routing protocol", "congestion control"],
+      "categories": ["cs.NI"]
+    },
+    "cs-para": {
+      "name": "并行处理",
+      "zh": ["并行", "分布式"],
+      "slugs": ["para", "parallel"],
+      "en": ["parallel computing", "distributed system", "synchronization"],
+      "categories": ["cs.DC", "cs.PF"]
+    },
+    "se": {
+      "name": "计算机软件",
+      "zh": ["软件", "软件工程"],
+      "slugs": ["se", "software"],
+      "en": ["software engineering", "program analysis", "software testing"],
+      "categories": ["cs.SE"]
+    },
+    "cs-os": {
+      "name": "操作系统",
+      "zh": ["操作系统"],
+      "slugs": ["os"],
+      "en": ["operating system", "kernel", "virtual memory"],
+      "categories": ["cs.OS"]
+    },
+    "cs-db": {
+      "name": "数据库",
+      "zh": ["数据库"],
+      "slugs": ["db", "database"],
+      "en": ["database", "query optimization", "SQL"],
+      "categories": ["cs.DB"]
+    },
+    "cs-app": {
+      "name": "计算机应用",
+      "zh": ["计算机应用", "仿真"],
+      "slugs": ["app"],
+      "en": ["computer graphics", "scientific simulation"],
+      "categories": ["cs.GR", "cs.CE"]
+    },
+    "cs-cg": {
+      "name": "图形学",
+      "zh": ["图形学", "计算机图形"],
+      "slugs": ["cg", "graphics"],
+      "en": ["computer graphics", "rendering", "ray tracing"],
+      "categories": ["cs.GR"]
+    },
+    "cs-overview": {
+      "name": "计算机科学技术",
+      "zh": ["计算机"],
+      "slugs": ["cs"],
+      "en": ["computer science", "computing systems"],
+      "categories": ["cs.GL"]
+    },
+    "math": {
+      "name": "数学",
+      "zh": ["数学", "数学分析"],
+      "slugs": ["math"],
+      "en": ["real analysis", "functional analysis"],
+      "categories": ["math.CA", "math.FA"]
+    },
+    "math-alg": {
+      "name": "代数学",
+      "zh": ["代数", "代数学"],
+      "slugs": ["alg", "algebra"],
+      "en": ["abstract algebra", "commutative algebra", "group theory"],
+      "categories": ["math.AC", "math.GR"]
+    },
+    "math-geo": {
+      "name": "几何学",
+      "zh": ["几何"],
+      "slugs": ["geo", "geometry"],
+      "en": ["differential geometry", "algebraic geometry"],
+      "categories": ["math.DG", "math.AG"]
+    },
+    "math-pde": {
+      "name": "偏微分方程",
+      "zh": ["偏微分", "PDE"],
+      "slugs": ["pde"],
+      "en": ["partial differential equation", "PDE"],
+      "categories": ["math.AP"]
+    },
+    "math-comp": {
+      "name": "计算数学",
+      "zh": ["计算数学", "数值"],
+      "slugs": ["compmath"],
+      "en": ["numerical analysis", "finite element"],
+      "categories": ["math.NA"]
+    },
+    "stat-prob": {
+      "name": "概率论",
+      "zh": ["概率论", "随机过程"],
+      "slugs": ["prob", "probability"],
+      "en": ["probability theory", "stochastic process"],
+      "categories": ["math.PR"]
+    },
+    "stat": {
+      "name": "数理统计",
+      "zh": ["统计", "统计学"],
+      "slugs": ["stat", "statistics"],
+      "en": ["statistical inference", "high dimensional statistics"],
+      "categories": ["stat.ME", "math.ST"]
+    },
+    "stat-ht": {
+      "name": "假设检验",
+      "zh": ["假设检验"],
+      "slugs": ["ht"],
+      "en": ["hypothesis testing", "multiple testing"],
+      "categories": ["stat.ME", "math.ST"]
+    },
+    "stat-si": {
+      "name": "统计推断",
+      "zh": ["统计推断"],
+      "slugs": ["si", "inference"],
+      "en": ["statistical inference", "confidence interval"],
+      "categories": ["stat.ME"]
+    },
+    "math-or": {
+      "name": "运筹学",
+      "zh": ["运筹"],
+      "slugs": ["or"],
+      "en": ["operations research", "convex optimization"],
+      "categories": ["math.OC"]
+    },
+    "psy": {
+      "name": "心理学",
+      "zh": ["心理", "认知"],
+      "slugs": ["psy", "cognitive"],
+      "en": ["cognitive psychology"],
+      "categories": ["q-bio.NC"]
+    },
+    "psy-cns": {
+      "name": "认知神经",
+      "zh": ["认知神经"],
+      "slugs": ["cns"],
+      "en": ["cognitive neuroscience", "fMRI", "EEG"],
+      "categories": ["q-bio.NC"]
+    },
+    "psy-soc": {"name": "社会心理", "zh": ["社会心理"], "slugs": ["socpsy"], "en": ["social psychology"], "categories": ["q-bio.NC"]},
+    "psy-exp": {"name": "实验心理", "zh": ["实验心理"], "slugs": ["exppsy"], "en": ["experimental psychology"], "categories": ["q-bio.NC"]},
+    "psy-dev": {"name": "发展心理", "zh": ["发展心理"], "slugs": ["devpsy"], "en": ["developmental psychology"], "categories": ["q-bio.NC"]},
+    "psy-clin": {"name": "临床心理", "zh": ["临床心理"], "slugs": ["clinpsy"], "en": ["clinical psychology"], "categories": ["q-bio.NC"]},
+    "psy-physio": {"name": "生理心理", "zh": ["生理心理"], "slugs": ["physiopsych"], "en": ["physiological psychology"], "categories": ["q-bio.NC"]},
+    "econ": {"name": "经济学", "zh": ["经济"], "slugs": ["econ"], "en": ["economic theory"], "categories": ["econ.TH"]},
+    "econ-macro": {"name": "宏观", "zh": ["宏观"], "slugs": ["macro"], "en": ["macroeconomics"], "categories": ["econ.GN"]},
+    "econ-quant": {"name": "数量经济", "zh": ["计量"], "slugs": ["quant"], "en": ["econometrics"], "categories": ["econ.EM"]},
+    "econ-em": {"name": "经济计量", "zh": ["计量经济"], "slugs": ["em"], "en": ["econometrics", "causal inference"], "categories": ["econ.EM"]},
+    "econ-dev": {"name": "发展经济", "zh": ["发展经济"], "slugs": ["dev"], "en": ["development economics"], "categories": ["econ.GN"]},
+    "econ-intl": {"name": "国际经济", "zh": ["国际经济"], "slugs": ["intl"], "en": ["international trade"], "categories": ["econ.GN"]},
+    "econ-labor": {"name": "劳动经济", "zh": ["劳动经济"], "slugs": ["labor"], "en": ["labor economics"], "categories": ["econ.GN"]},
+    "econ-env": {"name": "环境经济", "zh": ["环境经济"], "slugs": ["env"], "en": ["environmental economics"], "categories": ["econ.GN"]},
+    "med": {"name": "基础医学", "zh": ["基础医学"], "slugs": ["med"], "en": ["molecular medicine"], "categories": ["q-bio.MN"]},
+    "med-biochem": {"name": "医学生化", "zh": ["生物化学"], "slugs": ["biochem"], "en": ["biochemistry"], "categories": ["q-bio.BM"]},
+    "med-anat": {"name": "人体解剖", "zh": ["解剖"], "slugs": ["anat"], "en": ["human anatomy"], "categories": ["q-bio.TO"]},
+    "med-physio": {"name": "人体生理", "zh": ["生理"], "slugs": ["physio"], "en": ["human physiology"], "categories": ["q-bio.TO"]},
+    "med-immuno": {"name": "人体免疫", "zh": ["免疫"], "slugs": ["immuno"], "en": ["immunology"], "categories": ["q-bio.CB"]},
+    "med-micro": {"name": "医学微生物", "zh": ["微生物"], "slugs": ["micro"], "en": ["medical microbiology"], "categories": ["q-bio.MN"]},
+    "med-patho": {"name": "病理学", "zh": ["病理"], "slugs": ["patho"], "en": ["pathology"], "categories": ["q-bio.TO"]},
+    "med-pharma": {"name": "药理学", "zh": ["药理"], "slugs": ["pharma"], "en": ["pharmacology"], "categories": ["q-bio.MN"]},
+    "med-gene": {"name": "医学遗传", "zh": ["遗传学"], "slugs": ["gene"], "en": ["medical genetics", "DNA"], "categories": ["q-bio.GN"]}
+  },
+  "nodes": {
+    "520": ["cs-overview"],
+    "520.10": ["cs-found"],
+    "520.10.algo": ["cs-algo"],
+    "520.10.ds": ["cs-ds"],
+    "520.20": ["ai"],
+    "520.20.nlp": ["nlp"],
+    "520.20.pr": ["pr"],
+    "520.20.nn": ["nn"],
+    "520.30": ["cs-arch"],
+    "520.30.net": ["cs-net"],
+    "520.30.para": ["cs-para"],
+    "520.40": ["se"],
+    "520.40.os": ["cs-os"],
+    "520.40.db": ["cs-db"],
+    "520.60": ["cs-app"],
+    "520.60.cg": ["cs-cg"],
+    "110": ["math"],
+    "110.21": ["math-alg"],
+    "110.34": ["math"],
+    "110.27": ["math-geo"],
+    "110.47": ["math-pde"],
+    "110.61": ["math-comp"],
+    "110.64": ["stat-prob"],
+    "110.67": ["stat"],
+    "110.67.ht": ["stat-ht"],
+    "110.67.si": ["stat-si"],
+    "110.74": ["math-or"],
+    "190": ["psy"],
+    "190.15": ["psy"],
+    "190.15.cns": ["psy-cns"],
+    "190.20": ["psy-soc"],
+    "190.25": ["psy-exp"],
+    "190.30": ["psy-dev"],
+    "190.42": ["psy-clin"],
+    "190.50": ["psy-physio"],
+    "790": ["econ"],
+    "790.15": ["econ"],
+    "790.13": ["econ-macro"],
+    "790.35": ["econ-quant"],
+    "790.35.em": ["econ-em"],
+    "790.21": ["econ-dev"],
+    "790.29": ["econ-intl"],
+    "790.45": ["econ-labor"],
+    "790.51": ["econ-env"],
+    "310": ["med"],
+    "310.11": ["med-biochem"],
+    "310.14": ["med-anat"],
+    "310.21": ["med-physio"],
+    "310.34": ["med-immuno"],
+    "310.41": ["med-micro"],
+    "310.44": ["med-patho"],
+    "310.47": ["med-pharma"],
+    "310.27": ["med-gene"]
+  },
+  "legacy": {
+    "ai": "520.20",
+    "math": "110",
+    "stat": "110.67",
+    "psy": "190.15",
+    "econ": "790",
+    "se": "520.40",
+    "med": "310"
+  },
+  "thin": ["190", "190.15", "190.15.cns", "190.20", "190.25", "190.30", "190.42", "190.50", "790", "790.15", "790.13", "790.35", "790.35.em", "790.21", "790.29", "790.45", "790.51", "310", "310.11", "310.14", "310.21", "310.34", "310.41", "310.44", "310.47", "310.27"]
+}

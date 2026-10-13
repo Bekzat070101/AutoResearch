@@ -79,28 +79,22 @@ function layoutBlock() {
   return src.slice(start, end + endMark.length);
 }
 
-/* ---- ① 页头：一块，不是三层 ---- */
-console.log("=== ① 页头是一块，画像管理退到右侧 ===");
-// 注意：new Function 返回的是 dialogueHead **这个函数**，必须再调用一次。
-// （第一版忘了调，于是把函数本身 append 进了 DOM，① 全红——是桩的错，不是产品的错。）
-const mkHead = new Function("el", "portraitTabs", "portraitBar",
-  extract("dialogueHead") + "\nreturn dialogueHead;")(el, (a) => el("nav", "ws-tabs"),
-  () => el("div", "portrait-bar"));
-const head = mkHead(el("div", "portrait-bar"));
+/* ---- ① 页头：一块；核对已去「我的」，未进入时有进入启研 ---- */
+console.log("=== ① 页头是一块，核对不在对话页 ===");
+const mkHead = new Function("el", "S",
+  extract("dialogueHead") + "\nreturn dialogueHead;")(el, { entered: true });
+const head = mkHead();
 
 const $app = el("main", "page");
 $app.appendChild(head);
 check(byClass($app, "ws-head").length === 1, "只有一块页头",
   `实际 ${byClass($app, "ws-head").length} 块`);
-check(byClass($app, "ws-tabs").length === 1, "页头里有主标签（对话|核对）");
-check(byClass($app, "portrait-bar").length === 1, "页头里有画像 chip 组");
-check(byClass($app, "ws-bar-side").length === 1, "画像 chip 组在右侧那一格里");
-check(byClass($app, "ws-lead").length === 1, "有一行说明（ws-lead）");
-// 标题和标签必须在同一行容器里，不能再竖着叠
-const mainRow = byClass($app, "ws-bar-main")[0];
-check(mainRow && mainRow.children.length === 2,
-  "标题和标签同行（ws-bar-main 里两个孩子）");
-check(byClass($app, "ws-head-bar")[0] !== undefined, "页头用的是两行布局 ws-head-bar");
+check(byClass($app, "ws-tabs").length === 0, "对话页不再放对话|核对标签");
+check(byClass($app, "portrait-bar").length === 0, "画像管理不在对话页头");
+check(byClass($app, "enter-bar").length === 0, "已进入的人不显示进入条");
+const mkOpen = new Function("el", "S",
+  extract("dialogueHead") + "\nreturn dialogueHead;")(el, { entered: false });
+check(byClass(mkOpen(), "enter-bar").length === 1, "未进入时页头有「进入启研」");
 
 /* ---- ② 三个区，顺序固定 ---- */
 console.log("\n=== ② 对话面板是三个有名字的区，顺序固定 ===");

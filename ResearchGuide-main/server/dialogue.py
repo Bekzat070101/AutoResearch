@@ -156,7 +156,7 @@ def _registry_doc() -> str:
                  "写进对应的 practice / interest 层，别自己造一条经历。")
     lines.append("· transcript:<slug>：成绩单推出来的结论，由代码从底稿算出来。"
                  "它已经在「我记住的」里了（source=derived，带 derived_from），"
-                 "**直接引用，不要重写**。用户说他修过什么课，让他去「核对」页粘成绩单。")
+                 "**直接引用，不要重写**。用户说他修过什么课，让他去「我的」页粘成绩单。")
     lines.append("另外要注意 capability:<slug> 是**用户自述或你推断**的能力印象"
                  "（「我会一点 Python」），和 transcript:* 的硬证据是两回事，别混着写。")
     lines.append("标了「别问」的字段（性别、年龄）：用户主动说了就存，**但不要追问**——"
@@ -786,7 +786,7 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
             lines.append("从这份底稿我推出几条结论，写进「能力」了：")
             for d in derived[:4]:
                 lines.append(f"· {d.value}")
-        lines.append("你可以在右边的「它记住的我」里看到，也可以在「核对」页逐条改。")
+        lines.append("你可以在右边的「它记住的我」里看到，也可以去「我的」页核对。")
     else:
         lines.append("这看起来像成绩单，但我一门课都没读出来。")
         lines.append("多半是缺了学期标题行（形如「25-26学年度1学期」）——"
@@ -962,6 +962,7 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         "degraded": degraded,
         "fabrication_risk": fabrication_risk,
         "trace": env["trace"],
+        "onboard_done": onboard_done(uid),
     })
 
 
@@ -1045,13 +1046,19 @@ def _validate_next_action(uid: str, next_action: dict[str, Any] | None) -> dict[
     return next_action
 
 
+def onboard_done(uid: str) -> bool:
+    """开场聊完：phase 到 done，或已经出过行动（有模型时 phase 常常停在 background）。"""
+    state = store.get_onboard_state(uid)
+    return state.get("phase") == "done" or bool(store.last_action(uid))
+
+
 def _sync_onboard_state(uid: str, env: dict[str, Any]) -> None:
     """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。"""
     state = store.get_onboard_state(uid)
     if state.get("phase") == "done":
         return
     if env["active_plan"].get("direction"):
-        store.set_onboard_state(uid, {"phase": "done", "round_no": 999})
+        store.set_onboard_state(uid, {**state, "phase": "done", "round_no": 999})
 
 
 # ---------- 行动事件（契约 §6）----------
@@ -1166,4 +1173,5 @@ def history(uid: str, conversation_id: str | None = None) -> dict[str, Any]:
         "pending_action": _public_action(pending),
         "last_action": _public_action(last),
         "just_finished": just,
+        "onboard_done": onboard_done(uid),
     }

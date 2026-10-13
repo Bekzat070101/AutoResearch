@@ -10,7 +10,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     defaults:
       run:
         working-directory: ResearchGuide-main
@@ -21,9 +24,18 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Server tests
-        run: uv run --no-project --python 3.12 --with pytest --with fastapi --with pydantic --with httpx --with cryptography pytest server/tests -q
+        run: uv run --no-project --python ${{ matrix.python-version }} --with pytest --with fastapi --with pydantic --with httpx --with cryptography pytest server/tests -q
       - name: Frontend syntax
-        run: node --check web/js/app.js
+        run: |
+          for f in web/js/*.js; do node --check "$f"; done
+      - name: Web stamp moves with web/
+        run: |
+          if git diff --name-only origin/main...HEAD | grep -q '^ResearchGuide-main/web/'; then
+            if ! git diff origin/main...HEAD -- ResearchGuide-main/web/index.html | grep -q '?v=w'; then
+              echo "改了 web/ 但 index.html 版本戳没动"
+              exit 1
+            fi
+          fi
       - name: Path data in sync with docs/paths
         run: |
           uv run --no-project --python 3.12 python knowledge/build_paths.py

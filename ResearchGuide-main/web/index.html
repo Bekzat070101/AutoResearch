@@ -6,7 +6,7 @@
   <title>启研 · 本科生进科研</title>
   <meta name="description" content="给北大本科一、二年级。先聊你现在卡在哪，再给一件能做完的事。" />
   <meta name="theme-color" content="#f5f2ea" />
-  <link rel="stylesheet" href="static/css/styles.css?v=w70" />
+  <link rel="stylesheet" href="static/css/styles.css?v=w74" />
   <!-- 标题衬线字体走国内可达的镜像，且不阻塞首屏；加载失败时回退系统宋体 -->
   <link rel="preconnect" href="https://fonts.googleapis.cn" />
   <link rel="stylesheet" media="print" onload="this.media='all'"
@@ -24,10 +24,10 @@
       <button class="side-brand" id="brandHome" type="button" title="回到首页">启研<small>本科生进科研</small></button>
       <nav class="side-links" aria-label="工作区">
         <button class="nav-btn" type="button" data-view="today" data-workspace="today"><span>今日</span><small>先做这个</small></button>
-        <button class="nav-btn" type="button" data-view="workbench" data-workspace="workbench"><span>作业</span><small>现在该交的</small></button>
-        <button class="nav-btn" type="button" data-view="projects" data-workspace="projects"><span>项目</span><small>找个真题练</small></button>
+        <button class="nav-btn" type="button" data-view="dialogue" data-workspace="dialogue" hidden><span>对话</span><small>接着聊</small></button>
         <button class="nav-btn" type="button" data-view="read" data-workspace="read"><span>研读</span><small>先读懂一篇</small></button>
         <button class="nav-btn" type="button" data-view="position" data-workspace="position"><span>定位</span><small>凭什么是我</small></button>
+        <button class="nav-btn" type="button" data-view="projects" data-workspace="projects"><span>项目</span><small>待开发</small><i class="nav-soon">待开发</i></button>
       </nav>
       <div class="side-foot">
         <button class="llm-pill" id="llmPill" type="button">连接模型</button>
@@ -55,7 +55,7 @@
              每次改前端都要把这个号 +1，并同步下面三个 ?v=。
              **三个都必须一样** —— 上次 CSS 停在 w27 而 JS 到了 w28，
              用户就拿到了「新 JS + 旧 CSS」，样式全不对。有测试钉着这件事。 -->
-        <p class="build-stamp">界面版本 <b>w70</b> · 文案收过。硬刷新用 Ctrl+Shift+R。</p>
+        <p class="build-stamp">界面版本 <b>w74</b> · 「我的」页能导出。硬刷新用 Ctrl+Shift+R。</p>
       </footer>
     </div>
   </div>
@@ -64,8 +64,8 @@
   window.apiUrl = function (path) {
     return String(window.QIYAN_API || "").replace(/\/$/, "") + path;
   };</script>
-  <script src="static/js/directions.js?v=w70"></script>
-  <script src="static/js/chat.js?v=w70"></script>
-  <script src="static/js/app.js?v=w70"></script>
+  <script src="static/js/directions.js?v=w74"></script>
+  <script src="static/js/chat.js?v=w74"></script>
+  <script src="static/js/app.js?v=w74"></script>
 </body>
 </html>

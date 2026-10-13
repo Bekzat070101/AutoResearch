@@ -41,7 +41,7 @@ python deploy_fc.py qiyan-test
 
 ## 账号与数据
 
-- 登录：用户名 + 密码注册后，换浏览器能找回。访客仍可「先看看」，但换设备找不回；访客要保存自己的 DeepSeek 或换设备，须先升级成用户名密码。若开了公众号，网页给一个 6 位数字，学生关注后把数字发过去就能认回同一个号。会话令牌放请求头 `Authorization: Bearer`；所有接口默认要登录，公开的列在 `server/auth.py` 的 `PUBLIC`，请求里带的 `uid` 必须是登录的这个人。
+- 登录：用户名 + 密码。打开或刷新页面必须重新登录（会话只在这一页的内存里，不写 `localStorage` 的 `rg_uid` / `rg_token` / `rg_nick`）。页面入口只有登录 / 注册，没有「先看看」和「升级成可找回的账号」。`POST /api/auth/login` 仍是访客接口（测试还在），页面不要把它当入口。若开了公众号，网页给一个 6 位数字，学生关注后把数字发过去就能认回同一个号。会话令牌放请求头 `Authorization: Bearer`；所有接口默认要登录，公开的列在 `server/auth.py` 的 `PUBLIC`，请求里带的 `uid` 必须是登录的这个人。
 - 每人一把 DeepSeek：登录后在「我的 DeepSeek」上传，探测成功才写入 `user_secrets`。调用时按这个人的 key 发请求，不写 `os.environ`。管理员「连接模型」仍只改整台机器的兜底 key。生产请设 `QIYAN_SECRET` 用来封装用户密钥。
 - 为什么是公众号消息：网站扫码登录要微信开放平台企业认证 + 备案域名，公众号网页授权要认证服务号，个人都拿不到。个人订阅号能收用户消息，消息里带 openid（只对这个公众号有效），够认出是谁。不存手机号。密码只存哈希。
 - 开通（一次）：
@@ -49,9 +49,65 @@ python deploy_fc.py qiyan-test
   2. 后台「设置与开发 → 基本配置 → 服务器配置」：URL 填 `<接口地址>/api/wechat`（现在是 `https://qiyan-caxplsowco.cn-hangzhou.fcapp.run/api/wechat`），Token 填一串长随机字符，EncodingAESKey 点「随机生成」，消息加解密方式选「**安全模式**」，提交、启用。提交时微信会来验一次签名，所以要先把同一串 Token 设成函数的 `WECHAT_TOKEN`、EncodingAESKey 设成 `WECHAT_AES_KEY`、公众号 AppID 设成 `WECHAT_APP_ID`，发布之后再提交。
      为什么必须安全模式：明文模式下微信只签 token、timestamp、nonce，不签消息体；谁拿到一条签过名的回调 URL（函数访问日志里就有），五分钟内就能伪造「某个 openid 发了某个数字」登进别人的号。安全模式的 msg_signature 把密文签进去，消息体才可信。服务端设了 `WECHAT_AES_KEY` 就只收加密消息。
   3. 设 `WECHAT_ACCOUNT_ID`（公众号原始 ID，gh_ 开头，在「设置与开发 → 公众号设置」里）和 `WECHAT_ACCOUNT_NAME`，登录页就会显示关注二维码。二维码也可以下载下来放到页面里，用 `WECHAT_QR_URL` 指过去。
-  没配公众号时页面只给访客入口。`AUTH_DEV_CODES=1` 只在本机用（登录页多一个「模拟微信发送」），配了 `WECHAT_TOKEN` 就自动失效。
+  没配公众号时页面只给用户名密码。`AUTH_DEV_CODES=1` 只在本机用（登录页多一个「模拟微信发送」），配了 `WECHAT_TOKEN` 就自动失效。
 - 函数计算必须尽量只跑一个实例，且库在会保留的盘上。微信的消息回调和网页的轮询是两个请求：落到两个实例上，各自的库里只有一半，登录就永远等不到。线上 SQLite 若仍写 `/tmp`，实例回收会丢掉账号和记录。`/api/health` 的 `db.ephemeral` 为 true 就是这种情况。前端遇到 `user not found` / 401 会清掉过期会话，请重新进入，不再把研读工具包显示成加载失败。`QIYAN_DB` 应指到会保留的盘。
 - 微信要求消息接口五秒内回复，超时会重发两次；处理是幂等的。冷启动太慢的话，学生会看到「该公众号暂时无法提供服务」，重发一次就行。
-- 备份：每天跑一次 `python tools/backup_db.py --out <备份目录> --keep 7`。隐私说明承诺删号后备份最多留 7 天，`--keep` 改大要同步改 `web/js/app.js` 的 `PRIVACY_HTML` 和 `server/auth.py` 的 `PRIVACY_VERSION`。
+- 备份：以 OSS 生命周期为准（`POST /api/admin/backup` → `VACUUM INTO` → gzip → AES-GCM → `BACKUP_DIR` / OSS `daily/`）。隐私说明承诺删号后备份最多留 7 天；生命周期改成 >7 天必须同时改 `PRIVACY_HTML`、`PRIVACY_VERSION`、`PRIVACY_DIGEST` 并记 CHANGELOG。本机 `tools/backup_db.py` 只作开发备用。
 - 上线顺序：前端和接口一起发。旧前端不带令牌，新接口会一律回 401；老用户浏览器里只有 uid 的，新前端会自动认领一次（`/api/auth/legacy`）。
 - 工作线程数默认 128（`QIYAN_THREADS`）。流式对话有总时限和字数封顶，并对 DeepSeek 关掉思考。
+
+## 发版（没有持久盘不准把生产写成已完成）
+
+```
+cd ResearchGuide-main
+python tools/verify/run_existing_tests.py
+for f in web/js/*.js; do node --check "$f"; done
+cd tools/deploy
+python download_wheels.py
+python deploy_fc.py qiyan-test
+# 看输出的 QIYAN_DB。生产缺 QIYAN_SECRET / WECHAT_APP_ID、或 QIYAN_DB 在 /tmp 时脚本会拒绝，除非 --allow-ephemeral。
+python deploy_fc.py          # 仅当 health.db.ephemeral=false
+python publish_gh_pages.py   # 提交信息带 wNN 和源 sha
+```
+
+`deploy_fc.py`：GetFunction 除 FunctionNotFound 外直接退出；函数上已有 `QIYAN_DB` 时以它为准，改库用 `--db`；`reserved_concurrency=1` 失败则非零退出。
+
+前端：`python tools/deploy/publish_gh_pages.py`。组装目录先清空，文件清单从 `index.html` 的 `static/` 引用解析。
+
+## 待确认（控制台 / 钉钉 / RAM，未做完不要假装已挂盘）
+
+1. 打开 `$PUBLIC_URL/api/health`，记下 `db.ephemeral`、`auth.wechat_login`、`llm.enabled`、`checks`。
+2. 控制台核对：实例数限制是否为 1；是否已挂 NAS `/mnt/nas`；环境变量有无 `QIYAN_SECRET` / `WECHAT_APP_ID` / `TRUST_PROXY` / `ADMIN_TOKEN`；日志是否投递 SLS。
+3. 持久盘（A5，待确认）：给 `qiyan` 配 VPC + NAS 挂 `/mnt/nas`，设 `QIYAN_DB=/mnt/nas/qiyan.db`。验收：`curl -fsS $PUBLIC_URL/api/health | python -c "import json,sys; d=json.load(sys.stdin); assert d['db']['ephemeral'] is False"`。发两次版后用户数不变。**没有这一步，禁止把生产发版写成已完成。**
+4. 先在 `qiyan-test` 压测 SQLite on NAS 30 分钟并中途发版 2 次，看 `integrity_check` 和 `database is locked`。不过关不切生产。
+5. 钉钉/企微群机器人：GitHub `secrets.ALERT_WEBHOOK` + `secrets.QIYAN_URL`。工作时间 1 小时内响应。未建群前探活失败只在 Actions 里红。
+6. RAM 子账号：只给张效端 FC/OSS/BSS 只读发布权。未开子账号前不要用主账号 AK 当长期方案。
+7. OSS 备份桶：私有、SSE-OSS、`daily/` 前缀 7 天删除。设 `BACKUP_OSS_BUCKET` 后备份才上云；没设时只写 `BACKUP_DIR`。
+8. `/code` 是否只读：登录后 `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $TEST_URL/api/papers/2405.00001`。若 500，设 `ARXIV_CACHE_DIR=/tmp/papers`。
+
+## 恢复（B5）
+
+1. 设 `QIYAN_MAINTENANCE=1`（业务接口 503，`/api/admin/*` 和 `/api/health` 照常）。
+2. `curl -XPOST -H "X-Admin-Token: $ADMIN_TOKEN" "$URL/api/admin/restore?object=qiyan-YYYYmmdd-HHMM.db.gz.enc"`
+3. 按 SLS / 日志里的 `{"event":"user_deleted","uid":...}` 重放备份点之后的删号：`POST /api/admin/user/delete`。
+4. 关掉维护模式，看 health 和用户数。
+5. CHANGELOG 记事故。没有 NAS 和 OSS 备份时无法恢复，只能公告重新注册。
+
+## 人工找回 / 删号（E8）
+
+- 用户自己能在「我的」页导出或删号。
+- 登不进去：用户名 + 密码是唯一自助入口；每次打开都要重新登录，没有「记住我」。
+- 忘了密码又没绑微信：系统没有找回密码。核实口径 = 注册用户名 + 最近一次对话内容（待确认由产品负责人拍板）。核实后管理员调 `POST /api/admin/user/delete`，工单只记日期和 uid。
+- 绑了微信的用微信认回。
+
+## 事故手册（通知组内群 + 产品负责人）
+
+- F1 库丢了：`db.ephemeral=true`、探活失败、冷启动后 401 激增。止血：冻结发版和环境变量改动。有 NAS+OSS 按上面恢复；没有备份就无法恢复。A5 没完成不准再发版。
+- F2 微信登录全失败：页面提示改用用户名密码；控制台补回 `WECHAT_*`。
+- F3 模型全失败：功能退回规则版；充值或换钥匙。刚改隐私说明未重新同意的人额度为 0。
+- F4 函数被打满：单实例 200 并发是硬上限。
+- F5 Pages 坏了：按 `gh-pages` 上一版 sha 回滚。
+- F6 误删单个用户：从最近备份 ATTACH 该 uid 各表行；用户自己删号有墓碑，不要恢复。
+- F7 个人密钥全失效：多半是改了 `QIYAN_SECRET` / `LLM_API_KEY`，放回原值。
+- F8 钥匙泄露：立即作废 RAM / DeepSeek / GitHub 令牌。
+

@@ -114,27 +114,27 @@ const ChatView = (() => {
        对话        [对话|核对]          画像 [默认] [新建]
        直接说话就行。它会先看你的近况…（一行说明）
      标题和标签同行，画像管理退到右侧。 */
-  function dialogueHead(bar) {
-    const head = el("header", "ws-head ws-head-bar");
-    const main = el("div", "ws-bar-main");
-    main.appendChild(el("h2", "", "对话"));
-    main.appendChild(portraitTabs("dialogue"));
-    const side = el("div", "ws-bar-side");
-    side.appendChild(el("span", "ws-bar-label", "档案"));
-    side.appendChild(bar);
-    head.append(main, side);
-    head.appendChild(el("p", "ws-lead",
-      "有什么想搞清楚的，直接说。年级、专业、卡在哪，都行。"));
+  function dialogueHead() {
+    const head = el("header", "ws-head");
+    head.appendChild(el("h2", "", "对话"));
+    head.appendChild(el("p", "", "有什么想搞清楚的，直接说。年级、专业、卡在哪，都行。"));
+    if (!S.entered) {
+      const bar = el("div", "enter-bar");
+      const go = el("button", "btn", "进入启研");
+      go.type = "button";
+      go.onclick = () => enterApp();
+      bar.appendChild(go);
+      bar.appendChild(el("span", "form-note", "随时可以先做事，不必聊完。"));
+      head.appendChild(bar);
+    }
     return head;
   }
 
   async function render($app) {
     const mySeq = ++seq;
-    const bar = await portraitBar();
-    if (mySeq !== seq) return;
 
     $app.innerHTML = "";
-    $app.appendChild(dialogueHead(bar));
+    $app.appendChild(dialogueHead());
 
     /* 对话页分成**三个有名字的区**，顺序固定，各自管一件事：
          .chat-scroll  对话流     —— 只有气泡，它自己滚
@@ -168,9 +168,9 @@ const ChatView = (() => {
     inputZone.append(stageLine, inputRow);
     chat.append(scroll, actions, inputZone);
 
-    const side = el("div", "panel side-panel");
+    const side = el("div", "panel side-panel mem-sum");
     side.appendChild(el("p", "side-title", "它记住的我"));
-    side.appendChild(el("p", "side-sub", "按「时间跨度」分层。每条都能改——记错了你直接改，比让它一直猜准。"));
+    side.appendChild(el("p", "side-sub", "这里只看摘要。改和删去「我的」页。"));
     const sideList = el("div", "fact-list memory-board");
     const sideEmpty = el("p", "side-empty", "还什么都没记住。聊到值得长期保留的信息时，这里会按层多一条。");
     side.append(sideList, sideEmpty);
@@ -185,8 +185,6 @@ const ChatView = (() => {
     // 编辑框的唯一保存路径是 blur；元素被 innerHTML = "" 拔掉之后
     // blur 不保证触发，用户敲进去的改动会**无声地丢掉**。
     // 所以编辑期间挂起刷新，编辑结束再补一次。
-    let editingCard = false;
-    let refreshQueued = false;
     let history = { messages: [], pending_action: null };
     try {
       history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
@@ -207,6 +205,7 @@ const ChatView = (() => {
     }
     await refreshFacts();
     if (mySeq !== seq) return;
+    if (history.onboard_done && !S.entered) enterCard();
     if (!history.messages.length) {
       addBubble("assistant", "你好。你不用说得很完整——先告诉我你现在最想弄清楚的一件事，或者你手上的情况。");
     }
@@ -286,10 +285,32 @@ const ChatView = (() => {
       const receipt = turnReceipt(result);
       if (receipt) actions.appendChild(receipt);
       if (result.degraded) {
-        const d = el("p", "rc-warn", "当前未连接模型，这一轮是规则回复。连接后判断和措辞会好很多。");
+        const d = el("p", "rc-warn");
+        d.appendChild(document.createTextNode("当前未连接模型，这一轮是规则回复。"));
+        const link = el("button", "linkish", "连接模型");
+        link.type = "button";
+        link.onclick = () => openConnect();
+        d.appendChild(link);
         actions.appendChild(d);
       }
+      if (result.onboard_done && !S.entered) enterCard();
       scroll.scrollTop = scroll.scrollHeight;
+    }
+
+    function enterCard() {
+      if (actions.querySelector(".enter-card")) return;
+      const card = el("div", "enter-card");
+      card.appendChild(el("p", "enter-card-title", "可以进入启研了"));
+      const row = el("div", "submit-actions");
+      const go = el("button", "btn", "进入启研");
+      go.type = "button";
+      go.onclick = () => enterApp();
+      const more = el("button", "btn ghost", "再聊聊");
+      more.type = "button";
+      more.onclick = () => { card.remove(); input.focus(); };
+      row.append(go, more);
+      card.appendChild(row);
+      actions.appendChild(card);
     }
 
     /* 系统这一轮的副作用，收成一个块。没有可说的就不渲染。 */
@@ -401,7 +422,7 @@ const ChatView = (() => {
       if (!jf) return;
       const p = (jf.payload || {});
       const box = el("div", "finished-note");
-      box.appendChild(el("p", "fn-title", `你刚在作业区交了「${esc(jf.title || "")}」`));
+      box.appendChild(el("p", "fn-title", `你刚交了「${esc(jf.title || "")}」`));
       const bits = [];
       if (p.chars) bits.push(`写了 ${p.chars} 字`);
       if (typeof p.score === "number") bits.push(`按标准 ${p.score} 分`);
@@ -452,15 +473,15 @@ const ChatView = (() => {
             });
             renderAction(r.action);
             actions.appendChild(el("p", "action-hint",
-              "作业已建好：说清「做什么 / 交什么 / 怎样算做到」。去作业区完成，回来我按结果给下一步。"));
-            addBubble("assistant", "好。左边作业区里已经有这一步了——做完把它交掉，回来我们接着往下走。");
+              "这一步已建好：说清「做什么 / 交什么 / 怎样算做到」。点下面的按钮就能去做，做完回来接着聊。"));
+            addBubble("assistant", "好。点下面的按钮就能去做，做完回来接着聊。");
             await refreshFacts();
           } catch (e) { toast(e.message); go.disabled = false; }
         };
         row.appendChild(go);
       } else if (a.status === "accepted" || a.status === "in_progress") {
         // 已接：不再提供「标记完成」，只提供「去做」。完成只能通过提交交付物。
-        const go = el("button", "btn small", "去作业区完成");
+        const go = el("button", "btn small", "去做这一步");
         go.type = "button";
         go.onclick = () => {
           S.openTaskId = a.task_id || "";
@@ -495,150 +516,28 @@ const ChatView = (() => {
        单独改删都在），这里只是把它们聚起来看——因为用户的原话是
        「识别为大项目的可以创建为大文件夹存储相关记忆」。 */
     async function refreshFacts() {
-      // 正在改某一条 → 先不动，等编辑结束再补刷。
-      // （见上面 editingCard 的注释：硬刷会把没保存的输入一起抹掉。）
-      if (editingCard) { refreshQueued = true; return; }
       try {
-        const r = await api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`);
+        const [r, mine] = await Promise.all([
+          api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`),
+          api("GET", `/api/me/facts?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ facts: [] })),
+        ]);
         const layers = (r.layers || []).filter((L) => (L.facts || []).length);
-        const projects = r.projects || [];
+        const values = [];
+        layers.forEach((L) => (L.facts || []).forEach((f) => { if (f.value) values.push(f.value); }));
+        const drafts = (mine.facts || []).filter((f) => f.status === "draft");
         sideList.innerHTML = "";
-        if (projects.length) sideList.appendChild(projectFolders(projects));
-        layers.forEach((L) => sideList.appendChild(layerBlock(L)));
-        const empty = !layers.length && !projects.length;
+        layers.forEach((L) => {
+          sideList.appendChild(el("p", "mem-sum-row",
+            `${esc(L.label)} · ${L.facts.length} 条`));
+        });
+        values.slice(0, 3).forEach((v) => sideList.appendChild(el("p", "mem-sum-val", esc(v))));
+        const go = el("button", "linkish", drafts.length ? `去我的页面核对（${drafts.length} 条）` : "去我的页面核对");
+        go.type = "button";
+        go.onclick = () => setView("me");
+        sideList.appendChild(go);
+        const empty = !layers.length && !drafts.length;
         sideEmpty.style.display = empty ? "block" : "none";
       } catch (_) { /* 侧栏失败不影响对话 */ }
-    }
-
-    /* 项目文件夹 */
-    function projectFolders(projects) {
-      const box = el("div", "mem-layer mem-layer-practice");
-      box.appendChild(el("p", "mem-layer-head",
-        `在做的项目<span class="mem-layer-n">${projects.length}</span>`));
-      box.appendChild(el("p", "mem-layer-hint",
-        "一个项目一张卡。里面每条都能单独改或删——它们是分开存的。"));
-      projects.forEach((pj) => {
-        const wrap = el("div", "proj");
-        const head = el("div", "proj-head");
-        head.appendChild(el("span", "proj-name", esc(pj.name)));
-        head.appendChild(el("span", "proj-n", `${pj.facts.length} 条`));
-        const body = el("div", "proj-body");
-        pj.facts.forEach((f) => {
-          const row = el("div", "proj-row");
-          row.appendChild(el("span", "proj-k", esc((pj.attr_label || {})[f.id] || "备注")));
-          const v = el("div", "proj-v");
-          v.appendChild(document.createTextNode(f.value));
-          row.appendChild(v);
-          body.appendChild(row);
-        });
-        // 收起/展开：默认展开，项目信息本来就不多
-        let open = true;
-        head.onclick = () => { open = !open; body.style.display = open ? "" : "none"; };
-        wrap.append(head, body);
-        box.appendChild(wrap);
-      });
-      return box;
-    }
-
-    function layerBlock(L) {
-      const box = el("div", `mem-layer mem-layer-${L.layer}`);
-      box.appendChild(el("p", "mem-layer-head",
-        `${esc(L.label)}<span class="mem-layer-n">${L.facts.length}</span>`));
-      if (L.layer_hint) box.appendChild(el("p", "mem-layer-hint", esc(L.layer_hint)));
-      const list = el("div", "mem-layer-list");
-      L.facts.forEach((f) => list.appendChild(memoryCard(f)));
-      box.appendChild(list);
-      return box;
-    }
-
-    /* 记忆卡：值可点改，删除走软删。改完来源升级为「你说的」，置信度拉满。
-
-       成绩单推出来的（source=derived）是例外：它的依据是真实课程和分数，
-       不给人逐字改。用户对它唯一合理的表态是「这条不算」——
-       所以只给「不算」，不给「改」；而且这个「不算」会被记住，
-       下次重新推导时不会又冒出来。 */
-    function memoryCard(f) {
-      const derived = f.source === "derived";
-      const card = el("div", `mem-card${derived ? " mem-derived" : ""}`);
-      const value = el("div", "mem-value", esc(f.value));
-      const meta = el("div", "mem-meta");
-      const srcCn = {
-        declared: "你说的", inferred: "我推断的", behavior: "做过的",
-        derived: "成绩单推的", user_edit: "你改的",
-      };
-      meta.appendChild(el("span", `badge src-${f.source}`, srcCn[f.source] || esc(f.source)));
-      if (f.affects_label) meta.appendChild(el("span", "badge plain", `影响${f.affects_label}`));
-      if (f.valid_until) {
-        meta.appendChild(el("span", "badge plain", `到 ${esc(String(f.valid_until).slice(0, 10))} 失效`));
-      }
-      card.append(value, meta);
-
-      // 依据摊开：让用户能核对我们是从哪几门课得出这句话的。
-      // 不摆依据的「结论」就是一句我们说了算的断言——那正是要避免的。
-      if (derived) {
-        const ev = (f.evidence || []).filter((e) => e.type === "transcript");
-        if (ev.length) {
-          const basis = el("p", "mem-basis",
-            "依据：" + ev.map((e) => `${esc(e.course)} ${esc(String(e.grade))}`).join("、"));
-          card.appendChild(basis);
-        }
-      }
-
-      const acts = el("div", "mem-acts");
-      if (!derived) {
-        const edit = el("button", "linkish", "改");
-        edit.type = "button";
-        edit.onclick = () => {
-          if (value.querySelector("input")) return;
-          const input = el("input");
-          input.type = "text";
-          input.value = f.value;
-          value.innerHTML = "";
-          value.appendChild(input);
-          input.focus();
-          editingCard = true;
-          let done = false;
-          // 编辑结束（保存 / 取消 / 失焦）时收尾：放掉挂起的刷新。
-          const finish = () => {
-            editingCard = false;
-            if (refreshQueued) { refreshQueued = false; refreshFacts(); }
-          };
-          const restore = (v) => { value.textContent = v; };
-          const save = async () => {
-            if (done) return;
-            done = true;
-            const v = input.value.trim();
-            if (!v || v === f.value) { restore(f.value); finish(); return; }
-            try {
-              await api("PATCH", `/api/me/facts/${f.id}`, { uid: S.uid, value: v });
-              restore(v);
-              toast("改好了。这条现在算你亲口说的，优先级最高。");
-            } catch (e) { toast(e.message); restore(f.value); }
-            finish();
-          };
-          input.addEventListener("blur", save);
-          input.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" && !e.isComposing) input.blur();
-            if (e.key === "Escape") { done = true; restore(f.value); finish(); }
-          });
-        };
-        acts.appendChild(edit);
-      }
-      const del = el("button", "linkish danger", derived ? "不算" : "删");
-      del.type = "button";
-      del.onclick = async () => {
-        del.disabled = true;
-        try {
-          await api("DELETE", `/api/me/facts/${f.id}?uid=${encodeURIComponent(S.uid)}`);
-          card.classList.add("is-dismissed");
-          toast(derived ? "好，这条不再拿来说事。你之后再补课程也不会把它翻出来。"
-                        : "已删掉，之后不再拿它判断你。");
-          setTimeout(refreshFacts, 400);
-        } catch (e) { toast(e.message); del.disabled = false; }
-      };
-      acts.appendChild(del);
-      card.appendChild(acts);
-      return card;
     }
 
     function setStage(name, tool) {

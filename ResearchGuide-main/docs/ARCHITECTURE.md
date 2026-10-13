@@ -69,6 +69,8 @@ knowledge/           disciplines.json 等
 - 切换或新建画像时，现场数据整体序列化进 `portraits.snapshot`，然后清空现场；
 - 因此**任何新增的用户数据表都必须同步加进 `store._dump_live` / `_clear_live` /
   `_RESTORE_COLS`**，否则新表会跨画像泄漏（已用 `server/tests/test_portrait_isolation.py` 兜住）；
+- **跨画像例外**：`cards` / `triage` / `edges` / `drafts` / `trails` / `tutor_sessions` 按 `user_id` 存、不分画像，不进 `_dump_live`；
+- `tutor_questions` 无 `user_id`（全站共享题缓存），不进导出 / 删号；
 - 跨画像 id（任务 id、项目 id、行动 id）取不到就是 404/403，不区分「不存在」和「不属于你」。
 
 ### 3.2 NBA（决策输出）
@@ -121,14 +123,15 @@ DELETE /api/portraits/{pid}    ?uid                          # 删；删最后�
 POST /api/dialogue/turn         {uid, message, conversation_id?} → TurnResult
 POST /api/dialogue/stream       {uid, message, conversation_id?} → SSE         # 同内核，事件为 stage/delta/result/error
 POST /api/dialogue/action       {uid, action_id, event} → {action}             # event: accept|decline|complete
-GET  /api/dialogue/history     ?uid&conversation_id? → {messages, conversations, pending_action}
+GET  /api/dialogue/history     ?uid&conversation_id? → {messages, conversations, pending_action, onboard_done}
 # ---- 向导（保留兼容：配了模型时内部由对话内核接管，见 DIALOGUE_CONTRACT §10）----
 POST /api/onboard/start         {uid} → {reply, options, state}
 POST /api/onboard/message       {uid, msg} → {reply, hint?, options, facts, state, done, dialogue?}
 GET  /api/onboard/result       ?uid → {messages, facts, state}
 POST /api/onboard/confirm       {uid, edits[{id,value?,dismissed?}]} → {facts}
+POST /api/onboard/enter         {uid} → account（按人记下 entered_at）
 # ---- 决策与方向 ----
-POST /api/nba                   {uid} → NBA
+# POST /api/nba 已删（今日不再调模型排下一步）
 GET  /api/directions/recommend ?uid → {directions, reason}
 POST /api/directions/cards      {uid} → {cards}            # 含真实课程检索（慢，慎用）
 POST /api/directions/choose     {uid, code} → {fact}
@@ -167,12 +170,16 @@ GET  /api/projects/{pid}/sample.zip ?uid → 示例成果压缩包
 POST /api/projects/{pid}/submit ?uid  body=.zip → Review                  # 同时写回 behavior 事实
 GET  /api/kits                  → {kits}                                   # 研读层（docs/READING_POSITIONING.md）
 GET  /api/kits/{kit_id}         → Kit
-GET  /api/daily                ?uid&kit → {items, done_today, goal, recent_keeps, error, tweak}   # arXiv 新论文分拣 + 一次定位微调
-POST /api/daily/triage          {uid, kit, arxiv_id, verdict: keep|skip, why, title} → 同上
+GET  /api/daily                ?uid&kit? → {items, topics, unmatched, empty_reason, stale, kit?, tweak?}
+POST /api/daily/triage          {uid, kit?, arxiv_id, verdict: keep|skip, why, title} → 同上
 GET  /api/papers/{arxiv_id}     → {id, title, source: html|abstract, text, url, sections[{name,label,at}]}
 GET  /api/cards                ?uid&kit → {cards（每篇最新版）, fields}
 GET  /api/cards/{arxiv_id}/history ?uid&kit → {versions}
 POST /api/cards                 {uid, kit, arxiv_id, fields, dims, decision_log} → Card（含 review；首次过线写回 behavior 事实）
+GET  /api/tutor/{arxiv_id}     ?uid&kit → {session|null}
+POST /api/tutor/{arxiv_id}/start {uid, kit, restart?} → session
+POST /api/tutor/{arxiv_id}/turn  {uid, kit, qid, answer, skip, rev} → {verdict, session}
+POST /api/tutor/{arxiv_id}/finish {uid, kit} → {prefill, from, review, missing, session}
 GET  /api/matrix               ?uid&kit → {dimensions, rows, flags{empty_cells, empty_columns, conflicts}, ready, need_more}
 GET  /api/brief                ?kit&arxiv_id → AGENTS.md（交给学生自己的 Agent）
 GET  /api/edges                ?uid → {kinds, edges[已证明来自账本 + 自述], suggest, proven, declared}   # 定位层
