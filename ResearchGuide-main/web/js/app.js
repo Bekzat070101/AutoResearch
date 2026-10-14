@@ -22,6 +22,7 @@ const S = {
   newFactIds: [],
   cardsPane: "direction",
   kitId: localStorage.getItem("rg_kit") || "",
+  cardKit: "",
   readTab: "kit",
   cardId: "",
   posTab: "edges",
@@ -64,15 +65,16 @@ const PRIVACY_HTML = `
   <ul>
     <li><b>账号</b>：用户名和称呼；密码只存哈希。用微信登录的话还有公众号给的 openid——一串只对「启研」公众号有效的编号，不是你的微信号。我们拿不到你的手机号和微信资料。</li>
     <li><b>你写下和做过的</b>：对话；从对话里记下的画像（每条都标来源，在「我的」里能改能删）；你粘贴的成绩单；任务和项目提交；阅读卡；定位里的边、陈述和下注；作业草稿和项目路径进度。</li>
-    <li><b>带读里的作答</b>：存在你的账号下，用来预填阅读卡草稿。不发给大模型。</li>
-    <li><b>你上传的模型密钥</b>：封装后存在你自己的账号下，不出现在页面回显和导出全文里。对话和作业提示会用这把密钥请求大模型。</li>
+    <li><b>你导入的 PDF</b>：全文只存在你的账号下，别人打不开。带读出题会把节选发给大模型。</li>
+    <li><b>带读里的作答</b>：存在你的账号下，用来判对错和预填阅读卡草稿。</li>
+    <li><b>你上传的模型密钥</b>：封装后存在你自己的账号下，不出现在页面回显和导出全文里。对话、作业提示、带读出题和判卷会用这把密钥请求大模型。</li>
     <li><b>登录会话</b>：只存令牌的哈希，三十天不用就失效。</li>
   </ul>
   <h4>谁能看到</h4>
   <ul>
     <li>只有登录的你能看到自己的记录。开发团队能在服务器上看到原始数据，只用来排查问题，不给别人。</li>
     <li>公众号只用来登录，不推营销消息。</li>
-    <li>对话和成绩单会发给大模型服务（DeepSeek）生成回复。</li>
+    <li>对话和成绩单会发给大模型服务（DeepSeek）生成回复；考察里的作答会和论文节选一起发给大模型判对错。</li>
     <li>「定位」的竞争地图和稀有度用的是所有人的匿名计数，只出数字，不出名字和原话。</li>
   </ul>
   <h4>存在哪、存多久</h4>
@@ -96,13 +98,28 @@ function setSession(r) {
   S.hasLlmKey = !!r.has_llm_key;
   S.llmKeyTail = r.llm_key_tail || "";
   if (r.entered !== undefined) S.entered = !!r.entered;
-  dropPersistedSession();
+  persistSession();
   const chip = document.getElementById("userNickname");
   if (chip) chip.textContent = S.nickname;
 }
 
+function persistSession() {
+  try {
+    if (S.uid) localStorage.setItem("rg_uid", S.uid);
+    if (S.token) localStorage.setItem("rg_token", S.token);
+    if (S.nickname) localStorage.setItem("rg_nick", S.nickname);
+  } catch (_) { /* ignore */ }
+}
+
+function loadPersistedSession() {
+  try {
+    S.uid = localStorage.getItem("rg_uid") || "";
+    S.token = localStorage.getItem("rg_token") || "";
+    S.nickname = localStorage.getItem("rg_nick") || "";
+  } catch (_) { /* ignore */ }
+}
+
 function dropPersistedSession() {
-  /* 旧版把登录写进 localStorage，打开页面还会是同一个人。现在只记在这一页的内存里。 */
   ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
     try { localStorage.removeItem(k); } catch (_) { /* ignore */ }
   });
@@ -114,12 +131,24 @@ function clearSession() {
   S.nickname = "";
   S.entered = false;
   S.myDir = undefined;
+  S.kitId = "";
+  try { localStorage.removeItem("rg_kit"); } catch (_) { /* ignore */ }
   dropPersistedSession();
+}
+
+function sessionGoneMsg() {
+  return "登录已失效，请重新登录；提示用户名不存在的话，说明服务器数据被重置过，需要重新注册";
+}
+
+function reloadInto(view, msg) {
+  clearSession();
+  if (msg) toast(msg, 6000);
+  setView(view);
 }
 
 function signedOut(msg) {
   clearSession();
-  if (msg) toast(msg);
+  if (msg) toast(msg, 6000);
   setView("login");
 }
 
@@ -131,7 +160,7 @@ async function recoverUser(err) {
       if (me.ok) return false;
     } catch (_) { return false; }
   }
-  signedOut("云上找不到这个账号了。重新起个称呼就能继续。");
+  signedOut("登录已失效，请用用户名和密码重新登录。提示用户名不存在的话，说明服务器数据被重置过，需要重新注册");
   return true;
 }
 
@@ -143,7 +172,7 @@ async function confirmSessionGone() {
   try {
     const me = await apiFetch("/api/auth/me");
     if (me.ok) return;
-    signedOut("这台云上的会话对不上了。再起个称呼就能继续。");
+    signedOut("登录已失效，请用用户名和密码重新登录。提示用户名不存在的话，说明服务器数据被重置过，需要重新注册");
   } catch (_) { /* 网络抖一下不踢人 */ }
 }
 
@@ -223,10 +252,10 @@ function firstView() {
   return S.entered ? "today" : "dialogue";
 }
 
-function enterApp() {
+function enterApp(next) {
   S.entered = true;
   if (S.uid) api("POST", "/api/onboard/enter", { uid: S.uid }).catch(() => {});
-  setView("today");
+  setView(next || "today");
 }
 
 function setView(name) {
@@ -284,7 +313,7 @@ async function render() {
     case "workbench": await renderWorkbench(); break;
     case "projects":
     case "project": renderProjectsSoon(); break;
-    case "position": await renderPosition(); break;
+    case "position": renderPositionSoon(); break;
     case "read": await renderRead(); break;
     case "card": await renderCard(); break;
     case "me": await renderMe(); break;
@@ -1294,11 +1323,11 @@ const ROOM_GUIDES = {
   },
   read: {
     key: "rg_guide_read",
-    steps: ["按工具包顺序打开一篇能打开的论文。", "先读原文，再在阅读卡里写；原句从正文里圈。", "过线之后再看矩阵。一张卡也能看。"],
+    steps: ["挑一篇能打开的论文。", "先读原文，再在阅读卡里写；原句从正文里圈。", "过线之后再看矩阵。一张卡也能看。"],
   },
   position: {
     key: "rg_guide_position",
-    steps: ["先写边：别人不容易有、又能核对的那几条。", "再看这类人在哪说话、哪些开放问题能站。", "有边、有位置，再写「我是能做 X 的人，因为 Y」。"],
+    steps: ["这一栏还在做。先用今日和研读。"],
   },
 };
 
@@ -1342,10 +1371,20 @@ function roomGuide(room, hasProgress) {
   return box;
 }
 
-async function logout() {
+function confirmLeave() {
+  return window.confirm("退出后需要重新登录。确定？");
+}
+
+function clearChatDraft() {
+  try { if (S.uid) sessionStorage.removeItem("rg_chat_draft_" + S.uid); } catch (_) { /* ignore */ }
+}
+
+async function logout(next) {
+  if (!confirmLeave()) return;
+  clearChatDraft();
   try { await api("POST", "/api/auth/logout"); } catch (_) { /* 已经没会话也照样退 */ }
   clearSession();
-  setView("home");
+  setView(next === "login" ? "login" : "home");
 }
 
 function accountPanel() {
@@ -1453,6 +1492,8 @@ function renderLogin() {
 }
 
 async function afterEnter() {
+  await loadPrefs();
+  await ensurePortrait();
   if (!S.entered) {
     try {
       const h = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
@@ -1584,9 +1625,26 @@ function currentDirLabel() {
   return field ? dirTitle(saved.dir, field) : "";
 }
 
+function navCollapsed() {
+  try { return localStorage.getItem("rg_nav_collapsed") === "1"; } catch (_) { return false; }
+}
+
+function setNavCollapsed(on) {
+  try { localStorage.setItem("rg_nav_collapsed", on ? "1" : "0"); } catch (_) { /* 记不住也不挡用 */ }
+  applyNavCollapsed();
+}
+
+function applyNavCollapsed() {
+  const on = navCollapsed();
+  document.body.classList.toggle("nav-collapsed", on);
+  const exp = document.getElementById("navExpand");
+  if (exp) exp.hidden = !on;
+}
+
 function paintChrome() {
   const nick = document.getElementById("userNickname");
   if (nick) nick.textContent = S.nickname || "";
+  applyNavCollapsed();
   const chip = document.getElementById("dirChip");
   if (!chip) return;
   const name = currentDirLabel();
@@ -1601,6 +1659,12 @@ function closeUserMenu() {
   if (btn) btn.setAttribute("aria-expanded", "false");
 }
 
+function accountKind() {
+  if (S.username) return "注册账号";
+  if (S.wechat) return "微信登录";
+  return "访客";
+}
+
 async function openUserMenu() {
   const wrap = document.querySelector(".user-menu-wrap");
   const btn = document.getElementById("userMenuBtn");
@@ -1610,23 +1674,61 @@ async function openUserMenu() {
   const menu = el("div", "user-menu");
   menu.id = "userMenu";
   menu.setAttribute("role", "menu");
-  menu.appendChild(el("p", "user-menu-kicker", "你的档案"));
-  const go = (label, view) => {
+  menu.appendChild(el("p", "user-menu-kicker", `${esc(S.nickname || "未命名")} · ${accountKind()}`));
+  const go = (label, fn) => {
     const b = el("button", "user-menu-item", label);
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.onclick = () => { closeUserMenu(); setView(view); };
+    b.onclick = () => { closeUserMenu(); fn(); };
     return b;
   };
-  menu.appendChild(go("我的", "me"));
-  menu.appendChild(go("继续聊", "dialogue"));
-  if (!S.guest) {
-    const mine = el("button", "user-menu-item", "我的 DeepSeek");
-    mine.type = "button";
-    mine.onclick = () => { closeUserMenu(); openMineKey(); };
-    menu.appendChild(mine);
-  }
+  menu.appendChild(go("我的", () => setView("me")));
+  if (!S.guest) menu.appendChild(go("我的 DeepSeek", () => openMineKey()));
+  menu.appendChild(go("退出", () => logout("home")));
+  menu.appendChild(go("换账号", () => logout("login")));
   wrap.appendChild(menu);
+}
+
+async function loadPrefs() {
+  try {
+    const p = await api("GET", "/api/me/prefs");
+    S.myDirs = Array.isArray(p.directions) ? p.directions : [];
+    if (p.kit_id) useKit(p.kit_id);
+  } catch (_) {
+    S.myDirs = S.myDirs || [];
+  }
+}
+
+async function putPrefs(patch) {
+  const r = await api("PUT", "/api/me/prefs", patch);
+  S.myDirs = Array.isArray(r.directions) ? r.directions : (S.myDirs || []);
+  return r;
+}
+
+async function addMyDirection(nodeId) {
+  const cur = S.myDirs || [];
+  if (cur.includes(nodeId)) { toast("已经在我的方向里"); return; }
+  await putPrefs({ directions: cur.concat(nodeId) });
+  paintChrome();
+  toast("已添加到我的方向");
+}
+
+async function chooseDirection(nodeId) {
+  if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
+  const backend = RG_DIR.backendCode(nodeId);
+  await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
+  const prev = trail();
+  const byDir = Object.assign({}, prev.byDir || {});
+  if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
+  const nxt = byDir[nodeId] || { done: [], tasks: {} };
+  await saveTrail({
+    code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
+  }, true);
+  const dirs = S.myDirs || [];
+  if (!dirs.includes(nodeId)) await putPrefs({ directions: dirs.concat(nodeId) });
+  S.myDir = undefined;
+  paintChrome();
+  toast(`已确认「${dirTitle(nodeId)}」`);
 }
 
 /* ---------- 画像切换 ---------- */
@@ -2234,10 +2336,11 @@ function trail() {
         dir: t.dir || mapped || "",
         done: Array.isArray(t.done) ? t.done : [],
         tasks: t.tasks && typeof t.tasks === "object" ? t.tasks : {},
+        byDir: t.byDir && typeof t.byDir === "object" ? t.byDir : {},
       };
     }
   } catch (_) { /* 坏数据就当没有进度 */ }
-  return { code: "", dir: "", done: [], tasks: {} };
+  return { code: "", dir: "", done: [], tasks: {}, byDir: {} };
 }
 
 function saveTrail(t, force) {
@@ -2258,12 +2361,14 @@ function saveTrail(t, force) {
     dir: t.dir || (force ? "" : prev.dir) || (window.RG_DIR && RG_DIR.legacyDir[code]) || "",
     done,
     tasks: force ? (t.tasks || {}) : Object.assign({}, prev.code === code && prev.dir === (t.dir || prev.dir) ? prev.tasks : {}, t.tasks || {}),
+    byDir: t.byDir && typeof t.byDir === "object" ? t.byDir : (prev.byDir || {}),
   };
   localStorage.setItem(trailStorageKey(), JSON.stringify(packed));
   if (S.token) {
     const pid = S.portraitId || "default";
-    api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
+    return api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
   }
+  return Promise.resolve();
 }
 
 async function pullTrail() {
@@ -2602,6 +2707,10 @@ function openDirSheet(node, ctx) {
     go.onclick = () => { sheet.remove(); S.cardsPane = "tutorial"; render(); };
     sheet.appendChild(go);
   }
+  const add = el("button", "btn secondary", "添加到我的方向");
+  add.type = "button";
+  add.onclick = () => addMyDirection(node.id);
+  sheet.appendChild(add);
   sheet.querySelector(".sheet-x").focus({ preventScroll: true });
 }
 
@@ -2682,18 +2791,10 @@ async function renderCards() {
 
   const chooseFocus = async () => {
     if (!window.RG_DIR || !RG_DIR.byId[focus]) { toast("先点树上的一个方向"); return; }
-    const backend = RG_DIR.backendCode(focus);
-    const field = tutorialOf(focus) || FIELD_TREES[backend];
     try {
-      await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
-      const switching = !!(chosenDir && chosenDir !== focus);
-      saveTrail({ code: backend, dir: focus, done: [], tasks: {} }, true);
-      paintChrome();
-      chosenCode = backend;
+      await chooseDirection(focus);
+      chosenCode = RG_DIR.backendCode(focus);
       chosenDir = focus;
-      toast(switching
-        ? `已切换到「${viewName()}」${field ? `，教程从「${entryNode(field).label}」重新开始` : ""}`
-        : `已确认「${viewName()}」${field ? `，教程从「${entryNode(field).label}」开始` : ""}`);
       document.getElementById("nodeSheet")?.remove();
       picked = null;
       S.dirPicked = null;
@@ -3023,6 +3124,12 @@ function renderProjectsSoon() {
   $app.appendChild(emptyPanel("项目栏还在做。已经选过或交过的项目还在库里，导出账号能带出来。", "回今日", "today"));
 }
 
+function renderPositionSoon() {
+  $app.innerHTML = "";
+  $app.appendChild(workspaceHead("定位", "这一栏还在做。"));
+  $app.appendChild(emptyPanel("定位栏还在做。先用今日和研读。", "回今日", "today"));
+}
+
 function emptyPanel(text, label, view) {
   const p = el("div", "panel");
   p.appendChild(el("p", "panel-sub", text));
@@ -3301,7 +3408,7 @@ function dialogueTaskSection(tasks) {
   box.appendChild(el("h3", "section-label", "对话给你的这一步"));
   if (!tasks.length) {
     box.appendChild(el("p", "panel-sub",
-      "还没有。在对话里点「就做这个」，任务会出现在这里，做完回对话继续。"));
+      "还没有对话里接下来要做的一步。去对话看右边的方向排序，或去今日读一篇。"));
     return box;
   }
   const open = tasks.filter((tk) => tk.status !== "done");
@@ -3653,8 +3760,9 @@ function readTabs(active) {
   return nav;
 }
 
-function openCard(arxivId) {
+function openCard(arxivId, cardKit) {
   S.cardId = arxivId;
+  if (cardKit !== undefined) S.cardKit = cardKit || "";
   setView("card");
 }
 
@@ -3700,89 +3808,193 @@ async function renderRead() {
   if (stale(seq)) return;
   const byPaper = Object.fromEntries((cards.cards || []).map((c) => [c.arxiv_id, c]));
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("研读", "先读一篇能打开的。记下原句，再写你怎么看。"));
-  const todayLink = el("p", "form-note");
-  const goToday = el("button", "linkish", "这个工具包的新论文在今日");
-  goToday.type = "button";
-  goToday.onclick = () => setView("today");
-  todayLink.appendChild(goToday);
-  $app.appendChild(todayLink);
   const passed = Object.values(byPaper).filter((c) => c.status === "pass").length;
-  $app.appendChild(roomGuide("read", passed > 0));
-  $app.appendChild(el("div", "ws-status", `<span>工具包「${esc(kit.name)}」v${esc(kit.version)}</span><span>过线阅读卡 ${passed} 张</span>`));
-  $app.appendChild(readTabs(tab));
+  const bar = el("header", "ws-head ws-head-bar");
+  const leftH = el("div", "ws-bar-main");
+  leftH.appendChild(el("h2", "", "研读"));
+  leftH.appendChild(el("p", "ws-lead", esc((kit.goal || "").slice(0, 42))));
+  const rightH = el("div", "ws-bar-side");
+  rightH.appendChild(readTabs(tab));
+  const search = el("form", "read-search");
+  const q = el("input");
+  q.placeholder = "英文关键词，例如 evaluation benchmark";
+  q.name = "q";
+  const goSearch = el("button", "btn small", "搜索");
+  goSearch.type = "submit";
+  search.append(q, goSearch);
+  const file = el("input");
+  file.type = "file";
+  file.accept = "application/pdf";
+  file.hidden = true;
+  const up = el("button", "btn small", "导入 PDF");
+  up.type = "button";
+  up.onclick = () => file.click();
+  file.onchange = async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    try {
+      const res = await apiFetch(`/api/papers/upload?uid=${S.uid}`, {
+        method: "POST",
+        body: f,
+        headers: { "Content-Type": "application/pdf", "X-Filename": encodeURIComponent(f.name) },
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || res.statusText);
+      }
+      const got = await res.json();
+      S.cardFrom = "read";
+      openCard(got.pid, "");
+    } catch (e) { toast(e.message); }
+  };
+  rightH.append(search, up, file);
+  bar.append(leftH, rightH);
+  $app.appendChild(bar);
   const mismatch = kitMismatch(kit.direction, await myDirection());
   if (stale(seq)) return;
   if (mismatch) $app.appendChild(mismatch);
 
+  document.body.dataset.readTab = tab;
   if (tab === "cards") { renderCardList(kit, byPaper); return; }
   if (tab === "matrix") { await renderMatrix(seq, kit); return; }
 
-  const goal = el("div", "panel");
-  goal.appendChild(el("p", "section-label", "这个工具包要你弄懂"));
-  goal.appendChild(el("p", "", esc(kit.goal)));
-  if (kit.status) goal.appendChild(el("p", "form-note", esc(kit.status)));
-  $app.appendChild(goal);
-
-  const papers = el("div", "panel");
-  papers.appendChild(el("h3", "panel-title", "阅读顺序"));
-  papers.appendChild(el("p", "panel-sub", "按顺序读；每篇一张卡。已经会的可以跳着读。"));
-  const list = el("ol", "kit-papers");
-  let firstUnread = true;
-  kit.papers.forEach((p) => {
-    const c = byPaper[p.arxiv_id];
-    const unread = !c;
-    const primary = unread && firstUnread;
-    if (unread) firstUnread = false;
-    const state = c ? (c.status === "pass" ? `<span class="kp-state pass">✓ 过线 v${c.version}</span>` : `<span class="kp-state revise">待改 v${c.version}</span>`) : "";
-    const li = el("li", "kit-paper");
-    const main = el("div", "kp-main");
-    const title = el("button", "linkish", esc(p.title));
-    title.type = "button";
-    title.onclick = () => openCard(p.arxiv_id);
-    main.appendChild(title);
-    if (state) {
-      const badge = el("span");
-      badge.innerHTML = " " + state;
-      main.appendChild(badge);
+  const grid = el("div", "read-grid");
+  const leftPane = el("section", "read-pane");
+  const leftHead = el("div", "read-pane-head");
+  leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
+  leftHead.appendChild(el("small", "", `过线 ${passed} 张`));
+  const leftBody = el("div", "read-pane-body");
+  const paintPapers = (papers, fromSearch) => {
+    leftBody.innerHTML = "";
+    if (fromSearch) {
+      const back = el("button", "linkish", "← 回到推荐");
+      back.type = "button";
+      back.onclick = () => paintPapers(kit.papers, false);
+      leftBody.appendChild(back);
     }
-    main.appendChild(el("p", "", esc(p.why)));
-    const small = el("small");
-    small.innerHTML = `arXiv:${esc(p.arxiv_id)} · ${esc(p.published)} · <a href="${esc(p.url)}" target="_blank" rel="noopener">arXiv ↗</a>`;
-    main.appendChild(small);
-    li.appendChild(main);
-    const go = el("button", primary ? "btn small" : "btn small secondary", c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡");
-    go.type = "button";
-    go.onclick = () => openCard(p.arxiv_id);
-    li.appendChild(go);
-    list.appendChild(li);
+    if (!papers.length) {
+      leftBody.appendChild(el("p", "panel-sub", "没有结果。arXiv 只认英文关键词。"));
+      return;
+    }
+    const list = el("ol", "kit-papers");
+    let firstUnread = true;
+    papers.forEach((p, i) => {
+      const aid = p.arxiv_id || p.id;
+      const c = byPaper[aid];
+      const unread = !c;
+      const primary = !fromSearch && unread && firstUnread;
+      if (unread && !fromSearch) firstUnread = false;
+      const li = el("li", "kit-paper");
+      const main = el("div", "kp-main");
+      const title = el("button", "linkish", esc(p.title));
+      title.type = "button";
+      title.onclick = () => { S.cardFrom = "read"; openCard(aid, fromSearch ? (p.card_kit || "") : kit.id); };
+      main.appendChild(el("span", "kp-n", String(p.order || i + 1)));
+      main.appendChild(title);
+      if (p.title_zh) {
+        const zh = el("p", "kp-zh");
+        zh.textContent = p.title_zh;
+        main.appendChild(zh);
+      }
+      if ((p.keywords || []).length) {
+        const kws = el("p", "kp-kw");
+        (p.keywords || []).slice(0, 4).forEach((k) => {
+          const s = el("span");
+          s.textContent = k.zh || k.en || k;
+          kws.appendChild(s);
+        });
+        main.appendChild(kws);
+      }
+      if (p.lib === "html" || p.lib === "abstract") {
+        const badge = el("i", "kp-lib", p.lib === "html" ? "库内" : "只有摘要");
+        main.appendChild(badge);
+      }
+      if (c) {
+        main.appendChild(el("span", c.status === "pass" ? "kp-state pass" : "kp-state revise",
+          c.status === "pass" ? `✓ 过线 v${c.version}` : `待改 v${c.version}`));
+      }
+      if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
+      li.appendChild(main);
+      const go = el("button", primary ? "btn small" : "btn small secondary",
+        fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡"));
+      go.type = "button";
+      go.onclick = () => { S.cardFrom = "read"; openCard(aid, fromSearch ? (p.card_kit || "") : kit.id); };
+      li.appendChild(go);
+      list.appendChild(li);
+    });
+    leftBody.appendChild(list);
+  };
+  paintPapers(kit.papers, false);
+  const mineBox = el("div", "read-mine");
+  try {
+    const mine = await api("GET", `/api/papers/mine?uid=${S.uid}`);
+    if ((mine.items || []).length) {
+      mineBox.appendChild(el("p", "section-label", "我导入的"));
+      (mine.items || []).forEach((it) => {
+        const row = el("div", "my-dir-row");
+        const open = el("button", "linkish", esc(it.title || it.pid));
+        open.type = "button";
+        open.onclick = () => { S.cardFrom = "read"; openCard(it.pid, ""); };
+        const del = el("button", "btn small ghost", "删除");
+        del.type = "button";
+        del.onclick = async () => {
+          try {
+            await api("DELETE", `/api/papers/${encodeURIComponent(it.pid)}?uid=${S.uid}`);
+            row.remove();
+          } catch (e) { toast(e.message); }
+        };
+        row.append(open, del);
+        mineBox.appendChild(row);
+      });
+    }
+  } catch (_) { /* 没有导入就不画 */ }
+  search.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const term = q.value.trim();
+    if (!term) return;
+    if (/[\u4e00-\u9fff]/.test(term)) { toast("arXiv 只认英文关键词"); return; }
+    try {
+      const r = await api("GET", `/api/papers/search?q=${encodeURIComponent(term)}&uid=${S.uid}`);
+      paintPapers(r.items || [], true);
+    } catch (e) { toast(e.message); }
+  };
+  leftPane.append(leftHead, leftBody, mineBox);
+  const side = el("div", "read-side");
+  const open = el("section", "read-pane");
+  open.appendChild(el("div", "read-pane-head", "<h3 class=\"panel-title\">作者自己写下的开放问题</h3>"));
+  const openBody = el("div", "read-pane-body");
+  (kit.open_problems || []).forEach((o) => {
+    const li = el("div", "open-item");
+    li.innerHTML = `<blockquote>「${esc(o.quote)}」</blockquote><p>${esc(o.note)}</p>`;
+    const meta = el("small");
+    const jump = el("button", "linkish", `《${esc(o.paper)}》`);
+    jump.type = "button";
+    jump.onclick = () => openCard(o.arxiv_id);
+    meta.append(jump, document.createTextNode(` · ${o.section_label || o.section} · `));
+    const ext = el("a", "", "arXiv ↗");
+    ext.href = `https://arxiv.org/abs/${o.arxiv_id}`; ext.target = "_blank"; ext.rel = "noopener";
+    meta.appendChild(ext);
+    li.appendChild(meta);
+    openBody.appendChild(li);
   });
-  papers.appendChild(list);
-  $app.appendChild(papers);
-
-  const open = el("div", "panel");
-  open.appendChild(el("h3", "panel-title", "作者自己写下的开放问题"));
-  open.appendChild(el("p", "panel-sub", "每一条都是论文局限 / 讨论 / 结论段的原句，已逐字核对。它们是找问题的起点，不是现成的题目。"));
-  const ul = el("ul", "open-problems");
-  kit.open_problems.forEach((o) => {
-    ul.appendChild(el("li", "", `<blockquote>「${esc(o.quote)}」</blockquote><p>${esc(o.note)}</p><small>${esc(o.paper)} · ${esc(o.section)} · <a href="https://arxiv.org/abs/${esc(o.arxiv_id)}" target="_blank" rel="noopener">arXiv ↗</a></small>`));
-  });
-  open.appendChild(ul);
-  $app.appendChild(open);
-
-  const data = el("div", "panel");
-  data.appendChild(el("h3", "panel-title", "数据集与代码"));
+  open.appendChild(openBody);
+  const data = el("section", "read-pane");
+  data.appendChild(el("div", "read-pane-head", "<h3 class=\"panel-title\">数据集与代码</h3>"));
+  const dataBody = el("div", "read-pane-body");
   const dl = el("ul", "criteria");
-  kit.datasets.forEach((d) => dl.appendChild(el("li", "", `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)} ↗</a>　${esc(d.note)}`)));
-  data.appendChild(dl);
-  $app.appendChild(data);
+  (kit.datasets || []).forEach((d) => dl.appendChild(el("li", "", `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)} ↗</a>　${esc(d.note)}`)));
+  dataBody.appendChild(dl);
+  data.appendChild(dataBody);
+  side.append(open, data);
+  grid.append(leftPane, side);
+  $app.appendChild(grid);
 }
 
 function renderCardList(kit, byPaper) {
   const panel = el("div", "panel");
   const cards = Object.values(byPaper);
   if (!cards.length) {
-    panel.appendChild(el("p", "panel-sub", "还没有阅读卡。从「工具包」里按顺序挑第一篇开始。"));
+    panel.appendChild(el("p", "panel-sub", "还没有阅读卡。从「经典文献推荐」挑一篇开始。"));
     panel.appendChild(el("p", "panel-sub", esc(kit.papers[0].title)));
     const go = el("button", "btn", "写第一张阅读卡");
     go.type = "button";
@@ -3890,16 +4102,30 @@ function applyTutorPrefill(fields, prefill) {
   return alts;
 }
 
+function pickBenchMode({ saved, session, hasDraft, hasCard, passedCount, canGrade, inKit }) {
+  if (saved === "tutor" || saved === "card") return saved;
+  const st = session && session.status;
+  if (st === "active" || st === "read") return "tutor";
+  if (hasDraft || hasCard || (passedCount || 0) >= 2) return "card";
+  if (!canGrade || inKit === false) return "card";
+  return "tutor";
+}
+
 function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
   const box = el("section", "tutor-panel");
-  box.hidden = !session;
+  box.hidden = false;
   let sess = session || null;
+  const draft = {};
+  let focusQid = null;
   const paint = () => {
     box.innerHTML = "";
     if (!sess) {
       const empty = el("p", "form-note");
-      empty.textContent = "点「让它带我读」，按节出考察题。作答不发给模型。";
-      box.appendChild(empty);
+      empty.textContent = "按节出题；你写的作答会和论文节选一起发给大模型、按标准判对错。";
+      const go = el("button", "btn small tutor-launch", "开始带读");
+      go.type = "button";
+      go.onclick = () => startTutor(false);
+      box.append(empty, go);
       return;
     }
     const head = el("div", "tutor-head");
@@ -3917,7 +4143,26 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
     }
     const slots = sess.slots || [];
     const cur = sess.cur || 0;
-    const sl = slots[cur];
+    const sl = (focusQid && slots.find((s) => s.qid === focusQid)) || slots[cur];
+    const followups = slots.filter((s) => s.status === "pending" || s.status === "retry");
+    const paintFollowups = () => {
+      followups.forEach((s) => {
+        if (sl && s.qid === sl.qid) return;
+        const row = el("p", "tutor-pending");
+        row.textContent = s.status === "pending" ? `这题稍后再判：${s.question || s.qid}` : `再改一改：${s.question || s.qid}`;
+        if (s.status === "pending") {
+          const rg = el("button", "linkish", "重判");
+          rg.type = "button";
+          rg.onclick = () => turnTutor(s.qid, s.last || "", false, true);
+          row.appendChild(rg);
+        }
+        const edit = el("button", "linkish", "改答案");
+        edit.type = "button";
+        edit.onclick = () => { focusQid = s.qid; paint(); };
+        row.appendChild(edit);
+        box.appendChild(row);
+      });
+    };
     if (sess.status === "stale") {
       const tip = el("p", "tutor-miss");
       tip.textContent = "原文变了，请重开。";
@@ -3927,15 +4172,21 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
       box.append(tip, again);
       return;
     }
-    if (sess.status === "read" || sess.status === "done" || !sl) {
+    if ((sess.status === "read" || sess.status === "done" || !sl) && !focusQid) {
       const tip = el("p", "form-note");
       tip.textContent = "读完了。把你写过的答案预填进阅读卡，改完再交。";
       const fin = el("button", "btn small", "预填进阅读卡");
       fin.type = "button";
       fin.onclick = finishTutor;
       box.append(tip, fin);
+      const again = el("button", "linkish tutor-launch", "再带读一遍");
+      again.type = "button";
+      again.onclick = () => startTutor(true);
+      box.appendChild(again);
+      paintFollowups();
       return;
     }
+    if (!sl) { paintFollowups(); return; }
     const q = el("p", "tutor-q");
     q.textContent = sl.question || "";
     box.appendChild(q);
@@ -3953,54 +4204,102 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
       warn.textContent = "表格里的字核对不了，选正文句子。";
       box.appendChild(warn);
     }
-    const ta = el("textarea");
+    const ta = el("textarea", "tutor-answer");
+    ta.maxLength = 600;
     ta.rows = sl.type === "own" ? 3 : 4;
-    ta.value = sl.answer || "";
+    ta.placeholder = sl.type === "own"
+      ? "用你自己的话写 10–160 字，可以粘贴"
+      : "从左边原文复制一句粘贴进来，或选中后点「填进作答框」";
+    ta.value = draft[sl.qid] ?? sl.last ?? sl.answer ?? "";
+    ta.addEventListener("input", () => { draft[sl.qid] = ta.value; send.disabled = !ta.value.trim(); });
+    box.appendChild(ta);
     const acts = el("div", "tutor-acts");
     if (sl.type === "find_quote" || sl.type === "number" || sl.type === "limitation") {
-      const useSel = el("button", "linkish", "用选中的原文作答");
+      const useSel = el("button", "linkish", "填进作答框");
       useSel.type = "button";
       useSel.onclick = () => {
         const got = selection ? selection() : "";
         if (!got) { toast("先在左边原文里选中一句"); return; }
-        ta.value = got;
+        box.fillAnswer(got);
       };
       acts.appendChild(useSel);
     }
     const send = el("button", "btn small", "作答");
     send.type = "button";
-    send.onclick = () => turnTutor(sl.qid, ta.value, false);
+    send.disabled = !ta.value.trim();
+    send.onclick = async () => {
+      send.disabled = true;
+      send.textContent = "正在判…";
+      try { await turnTutor(sl.qid, ta.value, false); }
+      finally { send.disabled = !ta.value.trim(); send.textContent = "作答"; }
+    };
     acts.appendChild(send);
-    if (sl.skippable || (sl.attempts || 0) >= 3 || sl.status === "skipped") {
+    if (sl.skippable || (sl.attempts || 0) >= 1 || sl.status === "skipped") {
       const sk = el("button", "linkish", "跳过");
       sk.type = "button";
       sk.onclick = () => turnTutor(sl.qid, "", true);
       acts.appendChild(sk);
     }
+    if (sl.status === "pending") {
+      const rg = el("button", "linkish", "重判");
+      rg.type = "button";
+      rg.onclick = () => turnTutor(sl.qid, sl.last || ta.value, false, true);
+      acts.appendChild(rg);
+    }
+    box.fillAnswer = (text) => { ta.value = text || ""; draft[sl.qid] = ta.value; send.disabled = !ta.value.trim(); };
     box.appendChild(acts);
     if (sl.note) {
       const note = el("p", "form-note");
       note.textContent = sl.note;
       box.appendChild(note);
     }
-    if (sl.anchor_station && scrollTo) {
-      const jump = el("button", "linkish", `跳到「${sl.anchor_station}」`);
+    const st = (sess.stations || []).find((x) => x.key === sl.station);
+    if (st && scrollTo) {
+      const jump = el("button", "linkish", `跳到本节`);
       jump.type = "button";
-      jump.onclick = () => scrollTo(sl.anchor_station);
+      jump.onclick = () => scrollTo(st.heading || st.label, st.start);
       box.appendChild(jump);
     }
+    if (sl.status === "pending") {
+      const pend = el("p", "tutor-pending");
+      pend.textContent = "这题稍后再判";
+      box.appendChild(pend);
+    }
+    if (sl.feedback || sl.note) {
+      const kind = sl.status === "pass" ? "tutor-ok" : sl.status === "pending" ? "tutor-pending" : "tutor-bad";
+      const fb = el("p", `tutor-verdict ${kind}`);
+      fb.textContent = sl.feedback || sl.note;
+      box.appendChild(fb);
+    }
+    (sl.missing || []).forEach((m) => {
+      const miss = el("p", "tutor-miss");
+      miss.textContent = m;
+      box.appendChild(miss);
+    });
+    if ((sl.reasons || []).length) {
+      const why = el("details", "tutor-why");
+      why.appendChild(el("summary", "", "判卷依据"));
+      sl.reasons.forEach((r) => {
+        const p = el("p");
+        p.textContent = r;
+        why.appendChild(p);
+      });
+      box.appendChild(why);
+    }
+    paintFollowups();
   };
   async function startTutor(restart) {
     try {
-      sess = await api("POST", `/api/tutor/${aid}/start`, { uid: S.uid, kit: kitId, restart: !!restart });
+      sess = await api("POST", `/api/tutor/${encodeURIComponent(aid)}/start`, { uid: S.uid, kit: kitId, restart: !!restart });
+      focusQid = null;
       box.hidden = false;
       paint();
     } catch (e) { toast(e.message); }
   }
-  async function turnTutor(qid, answer, skip) {
+  async function turnTutor(qid, answer, skip, regrade) {
     try {
-      const out = await api("POST", `/api/tutor/${aid}/turn`, {
-        uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0,
+      const out = await api("POST", `/api/tutor/${encodeURIComponent(aid)}/turn`, {
+        uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0, regrade: !!regrade,
       });
       sess = out.session;
       paint();
@@ -4011,7 +4310,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
   }
   async function finishTutor() {
     try {
-      const out = await api("POST", `/api/tutor/${aid}/finish`, { uid: S.uid, kit: kitId });
+      const out = await api("POST", `/api/tutor/${encodeURIComponent(aid)}/finish`, { uid: S.uid, kit: kitId });
       sess = out.session;
       const alts = onPrefill ? onPrefill(out.prefill || {}, out.missing || []) : [];
       paint();
@@ -4044,44 +4343,141 @@ async function renderCard() {
   const aid = S.cardId;
   if (!aid) { setView("read"); return; }
   $app.innerHTML = "";
+  const isLocal = String(aid).startsWith("local:");
   const back = el("button", "linkish back-link", S.cardFrom === "today" ? "← 今日" : "← 研读");
   back.type = "button";
   back.onclick = () => { const to = S.cardFrom === "today" ? "today" : "read"; S.cardFrom = ""; setView(to); };
-  $app.appendChild(back);
   const loading = el("div", "note-box", "正在取原文（arXiv HTML 版，第一次稍慢）…");
   $app.appendChild(loading);
-  let kit; let paper; let cards = { cards: [] };
+  let kit = { papers: [], dimensions: [], id: kitId };
+  let paper; let cards = { cards: [], fields: [] };
   try {
-    [kit, paper] = await Promise.all([
-      api("GET", `/api/kits/${kitId}`),
-      api("GET", `/api/papers/${aid}`),
-    ]);
-    if (S.uid) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
+    const jobs = [api("GET", `/api/papers/${encodeURIComponent(aid)}`)];
+    if (!isLocal) jobs.unshift(api("GET", `/api/kits/${kitId}`));
+    const got = await Promise.all(jobs);
+    if (!isLocal) { kit = got[0]; paper = got[1]; }
+    else paper = got[0];
+    const showCards = !isLocal && !!(S.cardKit || (kit.papers || []).some((p) => p.arxiv_id === aid));
+    if (S.uid && showCards) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
   } catch (e) {
     if (stale(seq)) return;
     if (await recoverUser(e)) return;
-    loading.textContent = `原文取不到（如实说明）：${e.message}。可以先在 arXiv 上读：https://arxiv.org/abs/${aid}`;
+    const why = e.message || "";
+    if (/503|排队|忙/.test(why)) {
+      loading.textContent = `现在人多，原文在排队（${why}）。稍后重试：https://arxiv.org/abs/${aid}`;
+    } else {
+      loading.textContent = `原文取不到（${why}）。`;
+    }
     return;
   }
   if (stale(seq)) return;
   loading.remove();
+  const showCard = !isLocal && !!(S.cardKit || (kit.papers || []).some((p) => p.arxiv_id === aid));
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
-  const draftKey = `rg_card_${kitId}_${aid}`;
+  const draftKey = `rg_card_${S.uid || "anon"}_${kitId}_${aid}`;
   let draft = null;
   try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch (_) { /* 坏草稿就丢掉 */ }
+  if (!draft) {
+    try { draft = JSON.parse(localStorage.getItem(`rg_card_${kitId}_${aid}`) || "null"); } catch (_) { /* 旧键没有就空着 */ }
+  }
   const state = draft || { fields: { ...((prev && prev.fields) || {}) }, dims: { ...((prev && prev.dims) || {}) }, log: (prev && prev.decision_log) || [] };
   const save = () => { try { localStorage.setItem(draftKey, JSON.stringify(state)); } catch (_) { /* 存不了不影响提交 */ } };
 
-  $app.appendChild(workspaceHead(esc(paper.title)));
-  const status = el("div", "ws-status", `<span><a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a></span><span>${paper.source === "html" ? "正文已取到，引文可逐字核对" : "只取到摘要：正文引文核对不了，请先读 arXiv 原文"}</span>${prev ? `<span>上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}</span>` : ""}`);
-  $app.appendChild(status);
+  const head = el("div", "card-head");
+  head.appendChild(back);
+  head.appendChild(el("h2", "", esc(paper.title)));
+  const kitP = (kit.papers || []).find((p) => p.arxiv_id === aid);
+  const titleZh = paper.title_zh || (kitP && kitP.title_zh) || "";
+  const kws = (paper.keywords && paper.keywords.length) ? paper.keywords : ((kitP && kitP.keywords) || []);
+  let absNote = "正文已取到，引文可逐字核对";
+  if (paper.source === "pdf") absNote = "你导入的 PDF · 只有你能看到";
+  else if (paper.source !== "html") absNote = "只取到摘要：正文引文核对不了，请先读 arXiv 原文";
+  const status = el("div", "ws-status");
+  if (!isLocal && paper.url) {
+    status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a>`));
+  }
+  status.appendChild(el("span", "", absNote));
+  if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
+  if (paper.source !== "html" && paper.source !== "pdf") {
+    const retry = el("button", "linkish", "重新取正文");
+    retry.type = "button";
+    const until = Number(paper.retry_after || 0);
+    if (until && until * 1000 > Date.now()) {
+      const hh = new Date(until * 1000);
+      retry.textContent = `arXiv 在 ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 前不会再试`;
+      retry.disabled = true;
+    } else {
+      retry.onclick = () => renderCard();
+    }
+    status.appendChild(retry);
+  }
+  head.appendChild(status);
+  $app.appendChild(head);
+  if (titleZh) {
+    const zh = el("p", "paper-zh");
+    zh.textContent = titleZh;
+    $app.appendChild(zh);
+  }
+  if (kws.length) {
+    const row = el("p", "paper-kw");
+    kws.slice(0, 5).forEach((k) => {
+      const s = el("span");
+      s.textContent = k.zh || k.en || k;
+      row.appendChild(s);
+    });
+    $app.appendChild(row);
+  }
+
+  let tutorMeta = { session: null, can_grade: false, in_kit: true };
+  if (S.uid) {
+    try { tutorMeta = await api("GET", `/api/tutor/${encodeURIComponent(aid)}?uid=${S.uid}&kit=${kitId}`); }
+    catch (_) { /* 没有会话就当没开始 */ }
+  }
+  const canGrade = !!(tutorMeta && tutorMeta.can_grade);
+  const inKit = !tutorMeta || tutorMeta.in_kit !== false;
+  const modeKey = `rg_mode_${S.uid || "anon"}_${kitId}_${aid}`;
+  let savedMode = "";
+  try { savedMode = localStorage.getItem(modeKey) || ""; } catch (_) { /* 记不住就按规则选 */ }
+  const hasDraft = Object.values((state.fields || {})).some((v) => String(v || "").trim());
+  const passedCount = (cards.cards || []).filter((c) => c.status === "pass").length;
+  let mode = pickBenchMode({
+    saved: savedMode, session: tutorMeta && tutorMeta.session, hasDraft, hasCard: !!prev,
+    passedCount, canGrade, inKit: showCard && inKit,
+  });
+
+  const tabs = el("nav", "ws-tabs bench-modes");
+  const tabTutor = el("button", "ws-tab", "AI 带读");
+  tabTutor.type = "button";
+  tabTutor.dataset.mode = "tutor";
+  const tabCard = el("button", "ws-tab", "写阅读卡");
+  tabCard.type = "button";
+  tabCard.dataset.mode = "card";
+  if (!canGrade) {
+    tabTutor.disabled = true;
+    tabTutor.title = "现在用不了模型（没配 / 没同意隐私说明 / 今天额度用完），先写阅读卡";
+    if (mode === "tutor") mode = "card";
+  }
+  if (!showCard) {
+    tabCard.disabled = true;
+    tabCard.title = "这篇不能交阅读卡";
+    if (mode === "card") mode = canGrade ? "tutor" : "card";
+  }
+  tabs.append(tabTutor, tabCard);
+  $app.appendChild(tabs);
 
   const bench = el("div", "bench");
+  bench.dataset.mode = mode;
   // 左：原文
   const left = el("section", "bench-paper");
   const tools = el("div", "quote-tools");
-  tools.innerHTML = '<span>选中原文里的一句，再点：</span>';
-  const quoteFields = cards.fields.filter((f) => f.quote);
+  const tutorQuote = el("div", "quote-tutor-tools");
+  tutorQuote.appendChild(el("span", "", "选中原文里的一句，再点："));
+  const fillChip = el("button", "chip", "填进作答框");
+  fillChip.type = "button";
+  const cardQuote = el("div", "quote-card-tools");
+  cardQuote.appendChild(el("span", "", "选中原文里的一句，再点："));
+  tools.append(tutorQuote, cardQuote);
+  const quoteFields = (cards.fields || []).filter((f) => f.quote);
   const pane = el("div", "paper-text");
   const jump = el("div", "sec-jump", "<span>跳到</span>");
   const starts = new Map((paper.sections || []).map((sec) => [sec.at, sec]));
@@ -4165,7 +4561,7 @@ async function renderCard() {
       save();
       paintForm();
     };
-    tools.appendChild(b);
+    cardQuote.appendChild(b);
   });
   left.append(tools, jump, pane);
 
@@ -4173,9 +4569,11 @@ async function renderCard() {
   const right = el("section", "bench-card");
   const form = el("div", "card-form");
   const result = el("div", "card-result");
-  const scrollToStation = (label) => {
+  const scrollToStation = (heading, start) => {
     pane.querySelectorAll(".tutor-hit").forEach((n) => n.classList.remove("tutor-hit"));
-    const hit = lineIndex.find((x) => (x.node.textContent || "").includes(label));
+    const text = String(heading || "").trim();
+    let hit = text ? lineIndex.find((x) => (x.node.textContent || "").trim() === text) : null;
+    if (!hit && start != null) hit = lineIndex.find((x) => x.start <= start && start < x.end);
     if (hit) {
       hit.node.classList.add("tutor-hit");
       pane.scrollTo({ top: hit.node.offsetTop - 8, behavior: "smooth" });
@@ -4197,36 +4595,32 @@ async function renderCard() {
       if (missing && missing.length) toast(missing.join("；"));
       return alts;
     },
+    session: tutorMeta && tutorMeta.session,
   });
+  fillChip.onclick = () => {
+    const got = readSelection();
+    if (!got) { toast("先在左边原文里选中一句"); return; }
+    if (panel.fillAnswer) panel.fillAnswer(got);
+  };
+  tutorQuote.appendChild(fillChip);
+  const applyMode = (next) => {
+    mode = next;
+    bench.dataset.mode = next;
+    tabTutor.classList.toggle("on", next === "tutor");
+    tabCard.classList.toggle("on", next === "card");
+    panel.hidden = next !== "tutor";
+    form.hidden = next !== "card";
+    result.hidden = next !== "card";
+    tutorQuote.hidden = next !== "tutor";
+    cardQuote.hidden = next !== "card";
+    try { localStorage.setItem(modeKey, next); } catch (_) { /* 记不住也不挡用 */ }
+  };
+  tabTutor.onclick = () => { if (!tabTutor.disabled) applyMode("tutor"); };
+  tabCard.onclick = () => applyMode("card");
   right.append(panel, form, result);
   bench.append(left, right);
   $app.appendChild(bench);
-  const passedCount = (cards.cards || []).filter((c) => c.status === "pass").length;
-  if (S.uid) {
-    const launch = el("button", passedCount >= 2 ? "linkish tutor-launch tutor-minor" : "btn small tutor-launch");
-    launch.type = "button";
-    launch.textContent = passedCount >= 2 ? "再带读一遍" : "让它带我读";
-    launch.onclick = () => {
-      if (panel.hidden === false) return;
-      panel.startTutor(passedCount >= 2);
-    };
-    status.appendChild(launch);
-    api("GET", `/api/tutor/${aid}?uid=${S.uid}&kit=${kitId}`).then((r) => {
-      if (stale(seq) || !r || !r.session) return;
-      const s = r.session;
-      if (s.status === "active") {
-        launch.textContent = `继续带读 ${s.cur}/${s.total}`;
-        launch.className = "btn small tutor-launch";
-        launch.onclick = () => panel.loadSession(s);
-      } else if (s.status === "read") {
-        launch.textContent = "继续带读（预填）";
-        launch.onclick = () => panel.loadSession(s);
-      } else if (passedCount >= 2) {
-        launch.textContent = "再带读一遍";
-        launch.onclick = () => panel.startTutor(true);
-      }
-    }).catch(() => { /* 没有会话就不显示继续 */ });
-  }
+  applyMode(mode);
 
   function paintForm() {
     form.innerHTML = "";
@@ -4358,9 +4752,14 @@ async function renderCard() {
     } catch (_) { /* 没有历史就不画 */ }
   }
 
-  paintForm();
-  if (prev) paintReview(prev);
-  else loadCardHistory();
+  if (showCard) {
+    paintForm();
+    if (prev) paintReview(prev);
+    else loadCardHistory();
+  } else {
+    form.hidden = true;
+    result.hidden = true;
+  }
 }
 
 /* ---------- 今日 · 每日情报（≤10 分钟） ---------- */
@@ -4395,29 +4794,33 @@ async function dailyBlock(seq) {
   const box = el("section", "panel daily today-papers");
   let d;
   try {
-    const q = S.kitId ? `&kit=${encodeURIComponent(S.kitId)}` : "";
-    d = await api("GET", `/api/daily?uid=${S.uid}${q}`);
+    d = await api("GET", `/api/daily?uid=${S.uid}`);
   } catch (e) {
     box.appendChild(el("p", "panel-sub", `今日情报暂时取不到（如实说明）：${esc(e.message)}`));
     return box;
   }
   if (stale(seq)) return box;
-  const kitName = d.kit && d.kit.name ? `「${d.kit.name}」` : "按你的兴趣";
+  const dirName = d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣";
   const head = el("div", "daily-head");
-  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(kitName)}相关的 arXiv 论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
+  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
   box.appendChild(head);
   if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上（如实说明）：${esc(d.error)}`));
   if (!d.items.length) {
     const reason = d.empty_reason;
     if (reason === "thin") {
-      box.appendChild(el("p", "panel-sub", "这个方向 arXiv 上很少。先去这些信息源看。"));
+      box.appendChild(el("p", "panel-sub", "这个方向 arXiv 上很少。下面是替代来源（例如 PsyArXiv 预印本）。"));
       (d.channels || []).forEach((c) => {
         box.appendChild(el("p", "", `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)} ↗</a>`));
       });
     } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "这个话题最近的都分拣完了。"));
-    else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上 arXiv，这是已缓存的候选。`));
-    else if (reason === "no_topics") box.appendChild(el("p", "panel-sub", "还没有能用来检索的兴趣话题。先聊几句或选定方向。"));
-    else box.appendChild(el("p", "panel-sub", "最近没有待分拣论文。"));
+    else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上来源，这是已缓存的候选。`));
+    else if (reason === "no_topics") {
+      const tip = el("p", "panel-sub", "还没有能用来检索的兴趣话题。先聊几句或选定方向。");
+      const go = el("button", "btn small", "去选方向");
+      go.type = "button";
+      go.onclick = () => setView("dialogue");
+      box.append(tip, go);
+    } else box.appendChild(el("p", "panel-sub", "最近没有待分拣论文。"));
   }
   d.items.forEach((it) => {
     const row = el("article", "triage");
@@ -4425,6 +4828,23 @@ async function dailyBlock(seq) {
     title.href = it.url; title.target = "_blank"; title.rel = "noopener";
     title.textContent = it.title;
     row.appendChild(title);
+    if (it.lib === "html" || it.lib === "abstract") {
+      row.appendChild(el("i", "kp-lib", it.lib === "html" ? "库内" : "只有摘要"));
+    }
+    if (it.title_zh) {
+      const zh = el("p", "triage-zh");
+      zh.textContent = `${it.title_zh} · 机器翻译`;
+      row.appendChild(zh);
+    }
+    if ((it.keywords || []).length) {
+      const kws = el("p", "triage-kw");
+      (it.keywords || []).slice(0, 5).forEach((k) => {
+        const s = el("span");
+        s.textContent = k;
+        kws.appendChild(s);
+      });
+      row.appendChild(kws);
+    }
     row.appendChild(highlightHits(clipAbs(it.abstract), it.hits));
     row.appendChild(el("small", "", `${esc((it.authors || []).join(", "))} · ${esc(it.published || "")}`));
     const ctl = el("div", "triage-ctl");
@@ -4433,7 +4853,7 @@ async function dailyBlock(seq) {
     why.maxLength = 80;
     const send = async (verdict) => {
       try {
-        await api("POST", "/api/daily/triage", { uid: S.uid, arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
+        await api("POST", "/api/daily/triage", { uid: S.uid, kit: "", arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
@@ -4450,30 +4870,24 @@ async function dailyBlock(seq) {
     if (it.card_kit) {
       const card = el("button", "btn small ghost", "读成一张卡");
       card.type = "button";
-      card.onclick = () => { S.kitId = it.card_kit; S.cardFrom = "today"; openCard(it.arxiv_id); };
+      card.onclick = () => { S.kitId = it.card_kit; S.cardFrom = "today"; openCard(it.arxiv_id, it.card_kit); };
       ctl.appendChild(card);
     } else {
-      const ext = el("a", "linkish", "在 arXiv 读");
-      ext.href = it.url; ext.target = "_blank"; ext.rel = "noopener";
+      const ext = el("a", "linkish", /arxiv/i.test(it.source || it.url || "") ? "在 arXiv 读" : "打开原文");
+      ext.href = it.url || "#"; ext.target = "_blank"; ext.rel = "noopener";
       ctl.appendChild(ext);
     }
     row.appendChild(ctl);
     box.appendChild(row);
   });
-  if (d.tweak) {
-    const t = el("div", "daily-tweak");
-    t.appendChild(el("p", "", `<b>定位微调　</b>${esc(d.tweak.text)}`));
-    const go = el("button", "btn small secondary", esc(d.tweak.action));
-    go.type = "button";
-    go.onclick = () => { if (d.tweak.view === "position") S.posTab = "statement"; setView(d.tweak.view); };
-    t.appendChild(go);
-    box.appendChild(t);
-  }
   if (d.recent_keeps.length) {
     const kept = el("details", "inventory");
     kept.appendChild(el("summary", "", `你最近留下的 ${d.recent_keeps.length} 篇（共分拣 ${d.triaged_total} 篇）`));
     const ul = el("ul");
-    d.recent_keeps.forEach((k) => ul.appendChild(el("li", "", `<a href="https://arxiv.org/abs/${esc(k.arxiv_id)}" target="_blank" rel="noopener">${esc(k.title || k.arxiv_id)}</a><span>${esc(k.why)}</span>`)));
+    d.recent_keeps.forEach((k) => {
+      const href = k.url || (/^(psyarxiv|socarxiv):/i.test(k.arxiv_id || "") ? "#" : `https://arxiv.org/abs/${esc(k.arxiv_id)}`);
+      ul.appendChild(el("li", "", `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(k.title || k.arxiv_id)}</a><span>${esc(k.why)}</span>`));
+    });
     kept.appendChild(ul);
     box.appendChild(kept);
   }
@@ -4552,9 +4966,9 @@ async function myDirection() {
 function kitMismatch(kitDirection, code) {
   if (!code || !kitDirection || code === kitDirection || !FIELD_TREES[code]) return null;
   const box = el("div", "note-box", `这个工具包属于「${esc((FIELD_TREES[kitDirection] || {}).name || kitDirection)}」。你的方向「${esc(FIELD_TREES[code].name)}」还没有工具包——可以先看这个方向的人在哪说话。`);
-  const go = el("button", "linkish", "去看信息源 →");
+  const go = el("button", "linkish", "去换方向 →");
   go.type = "button";
-  go.onclick = () => { S.posTab = "sources"; S.srcDir = code; setView("position"); };
+  go.onclick = () => setView("cards");
   box.appendChild(go);
   return box;
 }
@@ -5042,6 +5456,7 @@ async function renderMe() {
   $app.innerHTML = "";
   $app.appendChild(workspaceHead("我的", "账号、核对和它记下的，都在这一页。"));
   $app.appendChild(accountPanel());
+  $app.appendChild(myDirectionsPanel());
   if (portraits) $app.appendChild(portraits);
   $app.appendChild(confirmDrafts(facts));
   $app.appendChild(coverageBoard());
@@ -5723,25 +6138,105 @@ document.querySelectorAll(".nav-btn").forEach((b) => {
   });
 });
 document.getElementById("brandHome").addEventListener("click", () => setView("home"));
-document.getElementById("dirChip").addEventListener("click", () => {
+function closeDirMenu() {
+  document.getElementById("dirMenu")?.remove();
+}
+
+function openDirMenu() {
+  const chip = document.getElementById("dirChip");
+  if (!chip || !S.uid) return;
+  if (document.getElementById("dirMenu")) { closeDirMenu(); return; }
+  const dirs = S.myDirs || [];
+  if (!dirs.length) { setView("cards"); return; }
+  const menu = el("div", "dir-menu");
+  menu.id = "dirMenu";
+  const cur = trail().dir;
+  dirs.forEach((id) => {
+    const b = el("button", "dir-menu-item" + (id === cur ? " on" : ""),
+      `${id === cur ? "✓ " : ""}${esc(dirTitle(id) || id)}`);
+    b.type = "button";
+    b.onclick = async () => {
+      closeDirMenu();
+      if (id !== cur) await chooseDirection(id);
+    };
+    menu.appendChild(b);
+  });
+  const tree = el("button", "dir-menu-item", "查看方向树");
+  tree.type = "button";
+  tree.onclick = () => { closeDirMenu(); S.entered ? setView("cards") : enterApp("cards"); };
+  const mine = el("button", "dir-menu-item", "管理我的方向");
+  mine.type = "button";
+  mine.onclick = () => { closeDirMenu(); setView("me"); };
+  menu.append(tree, mine);
+  chip.parentNode.appendChild(menu);
+}
+
+function myDirectionsPanel() {
+  const box = el("section", "panel my-dirs");
+  box.appendChild(el("h3", "section-label", "我的方向"));
+  const dirs = S.myDirs || [];
+  const cur = trail().dir;
+  if (!dirs.length) {
+    const empty = el("p", "panel-sub", "还没有收藏的方向。");
+    const go = el("button", "btn small", "去方向树添加");
+    go.type = "button";
+    go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+    box.append(empty, go);
+    return box;
+  }
+  const list = el("div", "my-dir-list");
+  dirs.forEach((id) => {
+    const row = el("div", "my-dir-row");
+    row.appendChild(el("span", "", `${id === cur ? "当前 · " : ""}${esc(dirTitle(id) || id)}`));
+    if (id !== cur) {
+      const set = el("button", "btn small", "设为当前");
+      set.type = "button";
+      set.onclick = async () => { await chooseDirection(id); setView("me"); };
+      row.appendChild(set);
+    }
+    const drop = el("button", "btn small ghost", "移出");
+    drop.type = "button";
+    drop.onclick = async () => {
+      await putPrefs({ directions: dirs.filter((x) => x !== id) });
+      setView("me");
+    };
+    row.appendChild(drop);
+    list.appendChild(row);
+  });
+  const go = el("button", "linkish", "去方向树添加");
+  go.type = "button";
+  go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+  box.append(list, go);
+  return box;
+}
+
+document.getElementById("dirChip").addEventListener("click", (e) => {
+  e.stopPropagation();
   if (!S.uid) return;
-  setView("cards");
+  openDirMenu();
 });
 document.getElementById("userMenuBtn").addEventListener("click", (e) => {
   e.stopPropagation();
   if (!S.uid) return;
-  setView("me");
+  openUserMenu();
 });
+const navToggle = document.getElementById("navToggle");
+if (navToggle) navToggle.addEventListener("click", () => setNavCollapsed(!navCollapsed()));
+const navExpand = document.getElementById("navExpand");
+if (navExpand) navExpand.addEventListener("click", () => setNavCollapsed(false));
 document.addEventListener("click", (e) => {
   const menu = document.getElementById("userMenu");
-  if (!menu) return;
-  if (menu.contains(e.target) || e.target.closest("#userMenuBtn")) return;
-  closeUserMenu();
+  if (menu && !menu.contains(e.target) && !e.target.closest("#userMenuBtn")) closeUserMenu();
+  const dirm = document.getElementById("dirMenu");
+  if (dirm && !dirm.contains(e.target) && !e.target.closest("#dirChip")) closeDirMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeUserMenu(); closeDirMenu(); }
 });
 
 (async function boot() {
   const t0 = performance.now();
-  dropPersistedSession();
+  loadPersistedSession();
   try {
     const [h, paths] = await Promise.all([api("GET", "/api/health"), api("GET", "/api/paths").catch(() => null)]);
     applyLlmPill(h.llm);
@@ -5749,25 +6244,27 @@ document.addEventListener("click", (e) => {
     if (paths) applyPaths(paths.paths);
   } catch (_) { /* 健康检查失败不挡页面 */ }
   buildTutorials();
-  if (S.uid && !S.token) {
-    try { setSession(await api("POST", "/api/auth/legacy", { uid: S.uid })); } catch (_) { clearSession(); }
-  }
   if (S.token) {
     try {
-      const me = await api("GET", "/api/auth/me");
-      setSession(me);
-      try {
-        const prefs = await api("GET", "/api/me/prefs");
-        if (prefs.kit_id) useKit(prefs.kit_id);
-      } catch (_) { /* 没有偏好就用本地 */ }
-      await ensurePortrait();
+      const res = await apiFetch("/api/auth/me");
+      if (res.status === 401 || res.status === 404 || res.status === 410) {
+        reloadInto("login", sessionGoneMsg());
+      } else if (res.ok) {
+        setSession(await res.json());
+        await loadPrefs();
+        await ensurePortrait();
+        setView(firstView());
+      } else {
+        clearSession();
+        setView("home");
+      }
     } catch (_) {
       clearSession();
+      setView("home");
     }
-  } else if (S.uid) {
-    clearSession();
+  } else {
+    setView("home");
   }
-  setView("home");
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒
   const splash = document.getElementById("boot");
   setTimeout(() => {

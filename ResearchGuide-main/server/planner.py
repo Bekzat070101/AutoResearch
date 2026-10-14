@@ -267,6 +267,63 @@ def _user_direction(uid: str, facts: list[UserFact]) -> str | None:
     return None
 
 
+LEGACY_DIR = {
+    "ai": "520.20", "math": "110", "stat": "110.67", "psy": "190.15",
+    "econ": "790", "se": "520.40", "med": "310",
+}
+
+
+def direction_ranking(uid: str, limit: int = 5) -> list[dict[str, Any]]:
+    """按树节点排方向。规则分，不调模型。"""
+    import interests
+    facts = store.list_facts(uid)
+    scores: dict[str, dict[str, Any]] = {}
+
+    def bump(node: str | None, pts: int, why: str) -> None:
+        if not node:
+            return
+        rec = scores.setdefault(node, {"node": node, "score": 0, "why": []})
+        rec["score"] += pts
+        text = (why or "").strip()
+        if text and text not in rec["why"] and len(rec["why"]) < 2:
+            rec["why"].append(text[:80])
+
+    for card in direction_cards(uid, limit=7, with_courses=False, voice=False):
+        code = (card.get("direction") or {}).get("code") or ""
+        bump(LEGACY_DIR.get(code), 2, card.get("why_you") or "")
+
+    nodes_of = interests.table()["nodes"]
+
+    def deepest(tid: str) -> str | None:
+        homes = [nid for nid, ids in nodes_of.items() if tid in ids]
+        return max(homes, key=lambda n: (n.count("."), len(n))) if homes else None
+
+    for f in facts:
+        if f.status not in DECISION_STATUSES:
+            continue
+        key = f.key or ""
+        head, _, tail = key.partition(":")
+        if head == "direction":
+            continue
+        if key in ("major", "department") or head in ("interest", "field", "goal", "current", "project"):
+            slug = "" if key in ("major", "department") else tail
+            tid = interests._match_topic(slug, f.value or "")
+            if tid:
+                bump(deepest(tid), 2 if f.source == "declared" else 1, f.value or "")
+
+    pid = store.active_portrait_id(uid) or "default"
+    trail = store.get_trail(uid, pid) or {}
+    current = trail.get("dir") or ""
+    if not current:
+        current = LEGACY_DIR.get(_user_direction(uid, facts) or "", "")
+
+    out = sorted(scores.values(), key=lambda x: (-x["score"], x["node"]))[:limit]
+    for item in out:
+        item["current"] = item["node"] == current
+        item["why"] = item["why"][:2]
+    return out
+
+
 def choose_direction(uid: str, code: str) -> UserFact:
     """用户在推荐卡中选择一个方向 → 写入 UM（confirmed）。"""
     d = DIRECTIONS[code]

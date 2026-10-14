@@ -45,8 +45,9 @@ sys.path.insert(0, str(root))
 import fastapi
 import pydantic
 import uvicorn
+import pypdf
 
-print("deps ok", fastapi.__version__, pydantic.__version__, flush=True)
+print("deps ok", fastapi.__version__, pydantic.__version__, pypdf.__version__, flush=True)
 PY
 export PYTHONPATH="/tmp/pydeps:${PWD}/server:${PYTHONPATH:-}"
 exec python3 -m uvicorn server.main:app --host 0.0.0.0 --port 9000 --log-level info

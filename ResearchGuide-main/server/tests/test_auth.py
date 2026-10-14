@@ -30,7 +30,7 @@ import store  # noqa: E402
 
 pytestmark = pytest.mark.real_auth
 SERVER = Path(__file__).resolve().parent.parent
-PRIVACY_DIGEST = "e7a8229ddfbb"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
+PRIVACY_DIGEST = "74b7c8b0ee3c"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
 TOKEN = "test-token"
 OPENID = "o_test_user_1"
 
@@ -498,7 +498,7 @@ def test_privacy_text_and_version_change_together():
     text = re.search(r"const PRIVACY_HTML = `(.*?)`;", js, re.S).group(1)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     # 改了隐私说明：把 auth.PRIVACY_VERSION 换成当天日期（老用户会再同意一次），再把这里的指纹和日期一起更新
-    assert (auth.PRIVACY_VERSION, digest) == ("2026-10-13", PRIVACY_DIGEST), digest
+    assert (auth.PRIVACY_VERSION, digest) == ("2026-10-15", PRIVACY_DIGEST), digest
 
 
 def test_sessions_slide_forward_when_used_after_a_day(client):

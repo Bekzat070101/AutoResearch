@@ -39,7 +39,7 @@ PER_IP_HOUR = 30           # 同一来源一小时最多开三十次登录、三
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
-PRIVACY_VERSION = "2026-10-13"
+PRIVACY_VERSION = "2026-10-15"
 
 # 不登录也能用的接口（按路由模板写）。新加的接口默认要登录：要么带 uid，要么加到这里并说明为什么可以公开。
 PUBLIC = frozenset({
@@ -51,11 +51,18 @@ PUBLIC = frozenset({
     "/api/explore/courses", "/api/explore/teachers", "/api/explore/majors", "/api/explore/major",
     "/api/explore/minor", "/api/explore/course", "/api/curriculum/match", "/api/curriculum/stats",
     "/mcp", "/api/projects/sources", "/api/paths", "/api/kits", "/api/kits/{kit_id}",
-    "/api/papers/{arxiv_id}", "/api/brief",
+    "/api/brief",
     "/api/llm/connect",  # 自己核对管理员口令
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
     "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
+    "/api/admin/papers/warm",
 })
+
+_ARXIV_PAPER_PATH = re.compile(r"^/api/papers/\d{4}\.\d{4,5}$")
+
+
+def _public_arxiv_paper(path: str) -> bool:
+    return bool(_ARXIV_PAPER_PATH.match(path or ""))
 
 router = APIRouter()
 
@@ -88,8 +95,11 @@ async def guard(request: Request) -> None:
     route_path = getattr(route, "path", None)
     if path.startswith("/static") or path.startswith("/api/admin") or route_path in PUBLIC or path in PUBLIC:
         return
-    # 路由还没绑上时，公开知识仍按路径放行，避免工具包被过期会话拖成 401
-    if path.startswith("/api/kits/") or path.startswith("/api/papers/"):
+    # 路由还没绑上时，公开知识仍按路径放行，避免工具包被过期会话拖成 401。
+    # 论文原文只放行 arXiv 编号；search / mine / upload / local: 要登录。
+    if path.startswith("/api/kits/"):
+        return
+    if _public_arxiv_paper(path):
         return
     # 查会话是一次 SQLite 读：放线程池，别在事件循环上做。每个请求都经过这里，库在网络盘上时一次就是几毫秒，
     # 在循环上排队会拖慢所有人，包括正在流式输出的对话。

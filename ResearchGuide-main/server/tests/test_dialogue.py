@@ -181,13 +181,13 @@ def test_tool_failure_is_reported_honestly(monkeypatch):
 # ---------- §2 方向门禁 ----------
 
 
-def test_micro_task_without_direction_becomes_explore(monkeypatch):
+def test_micro_task_from_model_is_dropped(monkeypatch):
     uid = make_user()
     fid = seed_fact(uid, "grade", "大二")
     fake_llm(monkeypatch, [proposal(reply="先做这个。", next_action={
         "action": "micro_task", "title": "写一个 CNN", "direction": "ai", "based_on": [fid]})])
     r = dialogue.turn(uid, "我想做点东西")
-    assert r["next_action"]["action"] == "explore_direction"
+    assert r["next_action"] is None
 
 
 def test_task_direction_must_be_an_active_direction(monkeypatch):
@@ -196,12 +196,11 @@ def test_task_direction_must_be_an_active_direction(monkeypatch):
         {"op": "add", "key": "direction:math", "value": "数学", "evidence_quote": "我大二"}])])
     did = dialogue.turn(uid, "我大二")["facts_added"][0]["id"]
 
-    fake_llm(monkeypatch, [proposal(reply="做这个。", next_action={
-        "action": "micro_task", "title": "读一篇论文", "direction": "ai", "based_on": [did]})])
+    fake_llm(monkeypatch, [proposal(reply="看方向。", next_action={
+        "action": "explore_direction", "title": "去看方向排序", "direction": "ai", "based_on": [did]})])
     r = dialogue.turn(uid, "然后呢")
-    # 模型给的方向不在生效方向里，代码拉回到 math
     assert r["next_action"]["direction"] == "math"
-    assert r["next_action"]["action"] == "micro_task"
+    assert r["next_action"]["action"] == "explore_direction"
 
 
 # ---------- §2 个性化闸门（任务必须有依据）----------
@@ -215,7 +214,7 @@ def test_task_without_basis_is_dropped(monkeypatch):
     """
     uid = make_user()
     fake_llm(monkeypatch, [proposal(reply="这周先做这个。", next_action={
-        "action": "micro_task", "title": "关掉讲义，重写一段你抄过的代码", "direction": ""})])
+        "action": "explore_direction", "title": "关掉讲义，重写一段你抄过的代码", "direction": ""})])
     r = dialogue.turn(uid, "我是信管大二，想走大数据")
 
     assert r["next_action"] is None
@@ -228,7 +227,7 @@ def test_task_citing_a_nonexistent_fact_is_dropped(monkeypatch):
     """based_on 里编一个不存在的 fact id，不算依据。"""
     uid = make_user()
     fake_llm(monkeypatch, [proposal(reply="做这个。", next_action={
-        "action": "micro_task", "title": "写点什么", "direction": "",
+        "action": "explore_direction", "title": "写点什么", "direction": "",
         "based_on": ["f_不存在的id"]})])
     assert dialogue.turn(uid, "你好")["next_action"] is None
 
@@ -238,7 +237,7 @@ def test_task_with_basis_is_kept_and_exposes_why(monkeypatch):
     uid = make_user()
     fid = seed_fact(uid, "base:code", "Python 只会照着教程抄")
     fake_llm(monkeypatch, [proposal(reply="你之前说只会照着教程抄，那就……", next_action={
-        "action": "micro_task", "title": "把最短的那段代码关掉教程重写一遍",
+        "action": "explore_direction", "title": "把最短的那段代码关掉教程重写一遍",
         "direction": "", "based_on": [fid]})])
     r = dialogue.turn(uid, "我不知道该干什么")
 
@@ -253,7 +252,7 @@ def test_basis_survives_reload(monkeypatch):
     uid = make_user()
     fid = seed_fact(uid, "base:code", "Python 只会照着教程抄")
     fake_llm(monkeypatch, [proposal(reply="那就……", next_action={
-        "action": "micro_task", "title": "重写一段", "direction": "", "based_on": [fid]})])
+        "action": "explore_direction", "title": "重写一段", "direction": "", "based_on": [fid]})])
     dialogue.turn(uid, "我不知道该干什么")
 
     pa = dialogue.history(uid)["pending_action"]
@@ -514,7 +513,7 @@ def test_env_packet_exposes_the_ladder(monkeypatch):
 
     seed_fact(uid, "grade", "大二")
     env = dialogue.build_env(uid, "c1", "你好")
-    assert env["ladder"]["next_layer"] == "practice"
+    assert env["ladder"]["next_layer"] == "interest"
     prompt = dialogue._env_for_prompt(env)
     assert "提问阶梯" in prompt and "next_layer" in prompt
 

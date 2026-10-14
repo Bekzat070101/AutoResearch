@@ -169,11 +169,18 @@ const ChatView = (() => {
     chat.append(scroll, actions, inputZone);
 
     const side = el("div", "panel side-panel mem-sum");
-    side.appendChild(el("p", "side-title", "它记住的我"));
-    side.appendChild(el("p", "side-sub", "这里只看摘要。改和删去「我的」页。"));
-    const sideList = el("div", "fact-list memory-board");
-    const sideEmpty = el("p", "side-empty", "还什么都没记住。聊到值得长期保留的信息时，这里会按层多一条。");
-    side.append(sideList, sideEmpty);
+    const sideHead = el("div", "rank-head");
+    sideHead.appendChild(el("p", "side-title", "按你说过的，可能适合的方向"));
+    const treeBtn = el("button", "linkish", "查看方向树");
+    treeBtn.type = "button";
+    treeBtn.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+    sideHead.appendChild(treeBtn);
+    side.appendChild(sideHead);
+    side.appendChild(el("p", "side-sub rank-badge", "规则推测"));
+    const sideList = el("div", "rank-list");
+    const sideEmpty = el("p", "side-empty", "再聊几句兴趣或目标，这里会按你说过的排方向。");
+    const sideFoot = el("p", "rank-foot", "");
+    side.append(sideList, sideEmpty, sideFoot);
     wrap.append(chat, side);
     $app.appendChild(wrap);
 
@@ -211,9 +218,18 @@ const ChatView = (() => {
     }
 
     /* --- 发送 --- */
+    try {
+      const draft = sessionStorage.getItem("rg_chat_draft_" + S.uid);
+      if (draft) { input.value = draft; autoGrow(); }
+    } catch (_) { /* ignore */ }
+    input.addEventListener("input", () => {
+      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, input.value); } catch (_) { /* ignore */ }
+    });
+
     async function send(text) {
       const msg = (text || "").trim();
       if (!msg || busy) return;
+      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, msg); } catch (_) { /* ignore */ }
       busy = true;
       input.value = ""; autoGrow();
       input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
@@ -244,6 +260,7 @@ const ChatView = (() => {
         if (result) {
           history.conversation_id = result.conversation_id;
           bubble.innerHTML = mdLite(result.reply);
+          try { sessionStorage.removeItem("rg_chat_draft_" + S.uid); } catch (_) { /* ignore */ }
           afterTurn(result);
         } else if (!acc) {
           bubble.remove();
@@ -462,7 +479,17 @@ const ChatView = (() => {
       // 以前这里是「标记完成」，点一下就把这一步算走完了——没有交付物、
       // 没有反馈、也不写回记忆。用户问过「我在对话里出现的任务是要我怎么完成」，
       // 根因就是那个按钮什么都没要求。
-      if (a.status === "offered") {
+      if (a.status === "offered" && a.action === "explore_direction") {
+        const go = el("button", "btn small", "看方向排序");
+        go.type = "button";
+        go.onclick = () => refreshFacts();
+        const tree = el("button", "btn small secondary", "去方向树");
+        tree.type = "button";
+        tree.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+        row.append(go, tree);
+      } else if (a.status === "offered" && a.action === "micro_task") {
+        /* 老卡只给「先不做」 */
+      } else if (a.status === "offered") {
         const go = el("button", "btn small", "就做这个");
         go.type = "button";
         go.onclick = async () => {
@@ -517,26 +544,43 @@ const ChatView = (() => {
        「识别为大项目的可以创建为大文件夹存储相关记忆」。 */
     async function refreshFacts() {
       try {
-        const [r, mine] = await Promise.all([
-          api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`),
+        const [rank, mem, mine] = await Promise.all([
+          api("GET", `/api/directions/ranking?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ items: [] })),
+          api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ layers: [] })),
           api("GET", `/api/me/facts?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ facts: [] })),
         ]);
-        const layers = (r.layers || []).filter((L) => (L.facts || []).length);
-        const values = [];
-        layers.forEach((L) => (L.facts || []).forEach((f) => { if (f.value) values.push(f.value); }));
+        const items = rank.items || [];
+        const layers = (mem.layers || []).filter((L) => (L.facts || []).length);
+        const nFacts = layers.reduce((n, L) => n + (L.facts || []).length, 0);
         const drafts = (mine.facts || []).filter((f) => f.status === "draft");
         sideList.innerHTML = "";
-        layers.forEach((L) => {
-          sideList.appendChild(el("p", "mem-sum-row",
-            `${esc(L.label)} · ${L.facts.length} 条`));
+        items.slice(0, 5).forEach((it) => {
+          const row = el("div", "rank-row" + (it.current ? " current" : ""));
+          const name = (window.RG_DIR && RG_DIR.displayName(it.node)) || it.node;
+          row.appendChild(el("p", "rank-name", `${esc(name)}${it.current ? " · 当前" : ""}`));
+          (it.why || []).slice(0, 2).forEach((w) => row.appendChild(el("p", "rank-why", esc(w))));
+          const acts = el("div", "rank-acts");
+          const pick = el("button", "btn small", "选这个方向");
+          pick.type = "button";
+          pick.onclick = async () => {
+            await chooseDirection(it.node);
+            refreshFacts();
+          };
+          const add = el("button", "btn small secondary", "添加到我的方向");
+          add.type = "button";
+          add.onclick = () => addMyDirection(it.node);
+          acts.append(pick, add);
+          row.appendChild(acts);
+          sideList.appendChild(row);
         });
-        values.slice(0, 3).forEach((v) => sideList.appendChild(el("p", "mem-sum-val", esc(v))));
-        const go = el("button", "linkish", drafts.length ? `去我的页面核对（${drafts.length} 条）` : "去我的页面核对");
+        sideFoot.innerHTML = "";
+        const go = el("button", "linkish",
+          drafts.length ? `它记下 ${nFacts} 条 · 去「我的」页核对（${drafts.length} 条待核对）`
+            : `它记下 ${nFacts} 条 · 去「我的」页核对`);
         go.type = "button";
         go.onclick = () => setView("me");
-        sideList.appendChild(go);
-        const empty = !layers.length && !drafts.length;
-        sideEmpty.style.display = empty ? "block" : "none";
+        sideFoot.appendChild(go);
+        sideEmpty.style.display = items.length ? "none" : "block";
       } catch (_) { /* 侧栏失败不影响对话 */ }
     }
 

@@ -76,7 +76,7 @@ knowledge/           disciplines.json 等
 ### 3.2 NBA（决策输出）
 
 ```python
-{ action: explore_direction|micro_task|read_paper(P1)|course_action|ask_clarifying|review_progress,
+{ action: explore_direction,
   title, rationale,                 # rationale 必须引用 ≥1 条事实/证据
   rationale_facts: [fact_id...],
   alternatives: [{action, title}...],
@@ -170,15 +170,20 @@ GET  /api/projects/{pid}/sample.zip ?uid → 示例成果压缩包
 POST /api/projects/{pid}/submit ?uid  body=.zip → Review                  # 同时写回 behavior 事实
 GET  /api/kits                  → {kits}                                   # 研读层（docs/READING_POSITIONING.md）
 GET  /api/kits/{kit_id}         → Kit
-GET  /api/daily                ?uid&kit? → {items, topics, unmatched, empty_reason, stale, kit?, tweak?}
+GET  /api/daily                ?uid&kit? → 今日页不带 kit；兴趣模式 {items[key,source,title_zh,keywords], direction{node,name}, topics, unmatched, empty_reason, stale, kit:null, tweak?}；kit 参数仅兼容研读/压测
 POST /api/daily/triage          {uid, kit?, arxiv_id, verdict: keep|skip, why, title} → 同上
-GET  /api/papers/{arxiv_id}     → {id, title, source: html|abstract, text, url, sections[{name,label,at}]}
+GET  /api/papers/search         ?q&uid → {items}  # 须写在 {arxiv_id} 之前；拒中文
+GET  /api/papers/mine           ?uid → {items[{pid,title,pages,created_at}]}
+POST /api/papers/upload         ?uid  body=application/pdf → {pid,title,pages}
+DELETE /api/papers/{pid}        ?uid → 只删本人 local:
+GET  /api/papers/{arxiv_id}     → {id, title, source: html|abstract|pdf, text, url, sections, lib_at, title_zh?, keywords?}
+POST /api/admin/papers/warm     ?budget → {done,failed,remaining}  # X-Admin-Token
 GET  /api/cards                ?uid&kit → {cards（每篇最新版）, fields}
 GET  /api/cards/{arxiv_id}/history ?uid&kit → {versions}
 POST /api/cards                 {uid, kit, arxiv_id, fields, dims, decision_log} → Card（含 review；首次过线写回 behavior 事实）
-GET  /api/tutor/{arxiv_id}     ?uid&kit → {session|null}
+GET  /api/tutor/{arxiv_id}     ?uid&kit → {session, can_grade, in_kit}
 POST /api/tutor/{arxiv_id}/start {uid, kit, restart?} → session
-POST /api/tutor/{arxiv_id}/turn  {uid, kit, qid, answer, skip, rev} → {verdict, session}
+POST /api/tutor/{arxiv_id}/turn  {uid, kit, qid, answer, skip, rev, regrade?} → {verdict{pass,state,hard,note,where,missing,feedback}, session}
 POST /api/tutor/{arxiv_id}/finish {uid, kit} → {prefill, from, review, missing, session}
 GET  /api/matrix               ?uid&kit → {dimensions, rows, flags{empty_cells, empty_columns, conflicts}, ready, need_more}
 GET  /api/brief                ?kit&arxiv_id → AGENTS.md（交给学生自己的 Agent）

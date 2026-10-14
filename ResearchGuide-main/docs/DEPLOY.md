@@ -41,7 +41,7 @@ python deploy_fc.py qiyan-test
 
 ## 账号与数据
 
-- 登录：用户名 + 密码。打开或刷新页面必须重新登录（会话只在这一页的内存里，不写 `localStorage` 的 `rg_uid` / `rg_token` / `rg_nick`）。页面入口只有登录 / 注册，没有「先看看」和「升级成可找回的账号」。`POST /api/auth/login` 仍是访客接口（测试还在），页面不要把它当入口。若开了公众号，网页给一个 6 位数字，学生关注后把数字发过去就能认回同一个号。会话令牌放请求头 `Authorization: Bearer`；所有接口默认要登录，公开的列在 `server/auth.py` 的 `PUBLIC`，请求里带的 `uid` 必须是登录的这个人。
+- 登录：用户名 + 密码。会话存在浏览器里（`localStorage` 的 `rg_uid` / `rg_token` / `rg_nick`），30 天不用失效；失效时提示重新登录，不静默落首页。页面入口只有登录 / 注册，没有「先看看」。`POST /api/auth/login` 仍是访客接口（测试还在），页面不要把它当入口。若开了公众号，网页给一个 6 位数字，学生关注后把数字发过去就能认回同一个号。会话令牌放请求头 `Authorization: Bearer`；所有接口默认要登录，公开的列在 `server/auth.py` 的 `PUBLIC`，请求里带的 `uid` 必须是登录的这个人。
 - 每人一把 DeepSeek：登录后在「我的 DeepSeek」上传，探测成功才写入 `user_secrets`。调用时按这个人的 key 发请求，不写 `os.environ`。管理员「连接模型」仍只改整台机器的兜底 key。生产请设 `QIYAN_SECRET` 用来封装用户密钥。
 - 为什么是公众号消息：网站扫码登录要微信开放平台企业认证 + 备案域名，公众号网页授权要认证服务号，个人都拿不到。个人订阅号能收用户消息，消息里带 openid（只对这个公众号有效），够认出是谁。不存手机号。密码只存哈希。
 - 开通（一次）：
@@ -76,6 +76,25 @@ python publish_gh_pages.py   # 提交信息带 wNN 和源 sha
 
 ## 待确认（控制台 / 钉钉 / RAM，未做完不要假装已挂盘）
 
+**本轮（request-10-14）A5 状态：待确认。NAS 未挂上，不准假装已挂盘，不准把生产发版写成已完成。没挂盘前不要为了演示去发生产（发版会清 `/tmp` 库）。**
+
+本机 / 文档能做的步骤与验收命令：
+
+```
+# 1) 看现网是不是还在 /tmp（ephemeral=true 就是没挂盘）
+curl -fsS $PUBLIC_URL/api/health
+curl -fsS $PUBLIC_URL/api/health | python -c "import json,sys; d=json.load(sys.stdin); print(d['db']); assert 'ephemeral' in d['db']"
+
+# 2) 挂盘后的验收（现在不应通过；通过才算 A5 完成）
+#    控制台：qiyan 配 VPC + NAS 挂 /mnt/nas，环境变量 QIYAN_DB=/mnt/nas/qiyan.db
+curl -fsS $PUBLIC_URL/api/health | python -c "import json,sys; d=json.load(sys.stdin); assert d['db']['ephemeral'] is False"
+#    发两次版后：
+curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" $PUBLIC_URL/api/admin/stats
+#    用户数应与发版前相同。
+```
+
+演示口径：本机 `QIYAN_DB` 指向 `server/data/demo.db`（或其它非 `/tmp` 路径）即可演示；生产仍是 ephemeral 时只标待确认，不发生产。
+
 1. 打开 `$PUBLIC_URL/api/health`，记下 `db.ephemeral`、`auth.wechat_login`、`llm.enabled`、`checks`。
 2. 控制台核对：实例数限制是否为 1；是否已挂 NAS `/mnt/nas`；环境变量有无 `QIYAN_SECRET` / `WECHAT_APP_ID` / `TRUST_PROXY` / `ADMIN_TOKEN`；日志是否投递 SLS。
 3. 持久盘（A5，待确认）：给 `qiyan` 配 VPC + NAS 挂 `/mnt/nas`，设 `QIYAN_DB=/mnt/nas/qiyan.db`。验收：`curl -fsS $PUBLIC_URL/api/health | python -c "import json,sys; d=json.load(sys.stdin); assert d['db']['ephemeral'] is False"`。发两次版后用户数不变。**没有这一步，禁止把生产发版写成已完成。**
@@ -83,7 +102,7 @@ python publish_gh_pages.py   # 提交信息带 wNN 和源 sha
 5. 钉钉/企微群机器人：GitHub `secrets.ALERT_WEBHOOK` + `secrets.QIYAN_URL`。工作时间 1 小时内响应。未建群前探活失败只在 Actions 里红。
 6. RAM 子账号：只给张效端 FC/OSS/BSS 只读发布权。未开子账号前不要用主账号 AK 当长期方案。
 7. OSS 备份桶：私有、SSE-OSS、`daily/` 前缀 7 天删除。设 `BACKUP_OSS_BUCKET` 后备份才上云；没设时只写 `BACKUP_DIR`。
-8. `/code` 是否只读：登录后 `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $TEST_URL/api/papers/2405.00001`。若 500，设 `ARXIV_CACHE_DIR=/tmp/papers`。
+8. `/code` 是否只读：登录后 `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $TEST_URL/api/papers/2405.00001`。若 500，设 `ARXIV_CACHE_DIR=/tmp/papers`。论文正文现在进 SQLite `paper_text`（不再依赖随包 JSON）；`ARXIV_CACHE_DIR` 只作本机旧缓存导入。`/tmp` 期间 `ARXIV_CACHE_MAX_BYTES=100MB`。发版后若环境有 `ADMIN_TOKEN`，`deploy_fc.py` 会循环 `POST /api/admin/papers/warm` 直到 `remaining==0` 或 5 次；没有口令则打印「请手动预热」。没有 A5 时每次发版/回收都清库，预热必须幂等。**本轮 NAS 未挂上，不准把生产发版写成已完成。**
 
 ## 恢复（B5）
 
@@ -96,7 +115,7 @@ python publish_gh_pages.py   # 提交信息带 wNN 和源 sha
 ## 人工找回 / 删号（E8）
 
 - 用户自己能在「我的」页导出或删号。
-- 登不进去：用户名 + 密码是唯一自助入口；每次打开都要重新登录，没有「记住我」。
+- 登不进去：用户名 + 密码是唯一自助入口；会话存在浏览器里，30 天不用失效。
 - 忘了密码又没绑微信：系统没有找回密码。核实口径 = 注册用户名 + 最近一次对话内容（待确认由产品负责人拍板）。核实后管理员调 `POST /api/admin/user/delete`，工单只记日期和 uid。
 - 绑了微信的用微信认回。
 

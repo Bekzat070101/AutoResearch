@@ -144,15 +144,15 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 一次回复远小于这个；卡住或�
 LLM_TOTAL_SECONDS = 150
 
 
-def _post(url: str, key: str, payload: dict, timeout: int) -> tuple[dict | None, str]:
-    """timeout 是「最多这么久没有数据」；整个请求另有 LLM_TOTAL_SECONDS 总时限。"""
+def _post(url: str, key: str, payload: dict, timeout: int, total: int | None = None) -> tuple[dict | None, str]:
+    """timeout 是「最多这么久没有数据」；整个请求另有 total 或 LLM_TOTAL_SECONDS 总时限。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
     try:
-        raw = fetch(req, timeout=max(timeout, LLM_TOTAL_SECONDS), idle=timeout, max_bytes=MAX_RESPONSE_BYTES)
+        raw = fetch(req, timeout=max(timeout, total or LLM_TOTAL_SECONDS), idle=timeout, max_bytes=MAX_RESPONSE_BYTES)
         return json.loads(raw.decode("utf-8")), ""
     except urllib.error.HTTPError as exc:
         return None, f"http {exc.code}"
@@ -173,12 +173,26 @@ def _deepseek_extras(cfg: dict, effort: str) -> dict:
 
 def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
          json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000,
-         uid: str | None = None, override: dict | None = None) -> str | None:
+         uid: str | None = None, override: dict | None = None,
+         total: int | None = None, retry: bool = True) -> str | None:
     """返回助手文本；失败或未配置返回 None。网络错误、429、5xx 重试一次。
     用户自己的 key 只当参数用，绝不写进 os.environ。"""
+    try:
+        import budget
+        who = budget.current()
+        if who and who.startswith("*") and not budget.allowed(who):
+            return None
+    except Exception:
+        who = None
     cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return None
+    if who and who.startswith("*"):
+        try:
+            import budget
+            budget.charge(who)
+        except Exception:
+            pass
     key = cfg.get("key") or ""
     payload: dict = {
         "model": cfg["model"],
@@ -198,10 +212,10 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     url = cfg["base_url"] + "/chat/completions"
     t0 = time.time()
     data, err = None, ""
-    for attempt in range(2):
-        data, err = _post(url, key, payload, timeout)
-        retry = err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504")
-        if data is not None or not retry or attempt == 1:
+    for attempt in range(1 if not retry else 2):
+        data, err = _post(url, key, payload, timeout, total)
+        can_retry = retry and (err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504"))
+        if data is not None or not can_retry or attempt == 1:
             break
         time.sleep(0.8)
     text = None
@@ -220,9 +234,11 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
 
 
 def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json",
-              uid: str | None = None, override: dict | None = None) -> dict | None:
+              uid: str | None = None, override: dict | None = None,
+              total: int | None = None, retry: bool = True) -> dict | None:
     text = chat(system + "\n只输出一个 JSON 对象，不要 Markdown 代码块。", user, temperature=0.2,
-                timeout=timeout, json_mode=True, tag=tag, uid=uid, override=override)
+                timeout=timeout, json_mode=True, tag=tag, uid=uid, override=override,
+                total=total, retry=retry)
     if not text:
         return None
     cleaned = text.strip()

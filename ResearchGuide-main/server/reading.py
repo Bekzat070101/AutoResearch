@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import arxiv
 import interests
+import osf
 import quotes
 import store
 from schemas import UserFact, new_id, now_iso
+
+OSF_KEY = re.compile(r"^(psyarxiv|socarxiv):[a-z0-9]{5,}$", re.I)
 
 ROOT = Path(__file__).resolve().parent.parent
 KITS = ROOT / "knowledge" / "kits"
@@ -45,7 +49,42 @@ def kit(kit_id: str) -> dict[str, Any]:
     k = kits().get(kit_id)
     if not k:
         raise ReadingError(f"没有这个工具包：{kit_id}")
+    ids = [p.get("arxiv_id") for p in k.get("papers") or [] if p.get("arxiv_id")]
+    lib = store.paper_lib(ids)
+    for p in k.get("papers") or []:
+        p["lib"] = lib.get(p.get("arxiv_id") or "")
+    for op in k.get("open_problems") or []:
+        op["section_label"] = arxiv.section_cn(op.get("section") or "")
     return k
+
+
+def warm_targets() -> list[tuple[str, bool, dict]]:
+    want: dict[str, tuple[bool, dict]] = {}
+    for k in kits().values():
+        for p in k.get("papers") or []:
+            aid = p.get("arxiv_id")
+            if aid:
+                want[aid] = (True, {"title": p.get("title") or "", "summary": ""})
+    with store._conn() as c:
+        for table, col in (("triage", "arxiv_id"), ("cards", "arxiv_id"), ("tutor_sessions", "arxiv_id")):
+            try:
+                rows = c.execute(f"SELECT DISTINCT {col} FROM {table}").fetchall()
+            except Exception:
+                continue
+            for r in rows:
+                aid = r[0] or ""
+                if aid and not aid.startswith("local:"):
+                    want.setdefault(aid, (False, {}))
+    out = []
+    for aid, (pinned, hint) in want.items():
+        row = store.get_paper_text(aid)
+        if row:
+            if row.get("source") == "html" and not row.get("needs_reparse"):
+                continue
+            if row.get("source") == "abstract" and time.time() < float(row.get("retry_after") or 0):
+                continue
+        out.append((aid, pinned, hint))
+    return out
 
 
 def kit_paper(k: dict[str, Any], arxiv_id: str) -> dict[str, Any] | None:
@@ -88,10 +127,14 @@ def topic_source(topic_id: str, cached_only: bool = False) -> tuple[list[dict[st
             return old["papers"], "", True
         return None
     try:
-        papers = arxiv.recent(spec.get("categories") or [], spec.get("en") or [], max_results=50) or []
+        if spec.get("source") == "osf":
+            papers = osf.recent(spec.get("provider") or "psyarxiv", spec.get("subjects") or [], max_results=25) or []
+        else:
+            papers = arxiv.recent(spec.get("categories") or [], spec.get("en") or [], max_results=50) or []
         store.put_paper_pool(topic_id, day, papers)
+        schedule_xlate(papers[:12], spec)
         return papers, "", False
-    except arxiv.ArxivError as exc:
+    except (arxiv.ArxivError, osf.OsfError) as exc:
         if old:
             return old["papers"], str(exc), True
         return [], str(exc), False
@@ -115,15 +158,41 @@ def card_kit_for(paper: dict[str, Any]) -> str | None:
         kcats = set(daily.get("categories") or [])
         if not (cats & kcats) and cats:
             continue
-        if any(_word_score(blob, kw) for kw in daily.get("keywords") or []):
-            return kid
-        if cats & kcats:
+        if (cats & kcats) and any(_word_score(blob, kw) for kw in daily.get("keywords") or []):
             return kid
     return None
 
 
+def _cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+
+
+def _attach_zh(p: dict[str, Any], spec: dict[str, Any]) -> tuple[str, list[str]]:
+    key = p.get("id") or ""
+    row = store.get_paper_zh(key) if key else None
+    title_zh = (row or {}).get("title_zh") or ""
+    kws = list((row or {}).get("keywords") or [])
+    if spec.get("source") == "osf" and not kws:
+        kws = [str(t) for t in (p.get("tags") or []) if str(t).strip()][:5]
+    return title_zh, kws[:5]
+
+
+def _item_of(row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    p = row["paper"]
+    key = row["arxiv_id"]
+    title_zh, kws = _attach_zh(p, spec)
+    src = p.get("source") or spec.get("provider") or spec.get("source") or "arxiv"
+    return {
+        "arxiv_id": key, "key": key, "title": p.get("title"), "abstract": (p.get("summary") or "")[:600],
+        "published": p.get("published"), "authors": (p.get("authors") or [])[:4],
+        "url": p.get("url"), "hits": row["hits"], "topic": row["topic"],
+        "card_kit": card_kit_for(p), "source": src, "title_zh": title_zh, "keywords": kws,
+    }
+
+
 def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None = None) -> dict[str, Any]:
     topic_ids, unmatched = interests.user_topics(uid)
+    node = interests.direction_node(uid)
     seen = {r["arxiv_id"]: r for r in store.list_triage_all(uid)}
     today = now_iso()[:10]
     done_today = [r for r in seen.values() if r["created_at"][:10] == today]
@@ -133,12 +202,14 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
         "done_today": len(done_today), "kept_total": len(keeps), "triaged_total": len(seen),
         "recent_keeps": sorted(keeps, key=lambda r: r["created_at"], reverse=True)[:5],
         "topics": topic_ids, "unmatched": unmatched, "stale": False, "channels": [],
+        "direction": {"node": node, "name": interests.direction_name(node)} if node else {"node": "", "name": ""},
     }
     if not topic_ids:
         return {**empty, "empty_reason": "no_topics"}
-    if topic_ids and all(interests.is_thin_topic(t) for t in topic_ids):
-        trail = store.get_trail(uid, store.active_portrait_id(uid) or "default")
-        return {**empty, "empty_reason": "thin", "channels": interests.channel_exits(str(trail.get("dir") or ""))}
+    dir_topics = list(interests.table()["nodes"].get(node) or [])[:2] if node else []
+    thin_ids = dir_topics or topic_ids
+    if thin_ids and all(interests.is_thin_topic(t) for t in thin_ids):
+        return {**empty, "empty_reason": "thin", "channels": interests.channel_exits(node)}
     stale = False
     error = ""
     buckets: dict[str, list[dict[str, Any]]] = {t: [] for t in topic_ids}
@@ -146,8 +217,6 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
         got = (sources or {}).get(tid)
         if got is None:
             got = topic_source(tid, cached_only=True)
-            if got is None:
-                got = topic_source(tid, cached_only=False)
         if got is None:
             continue
         papers, err, is_stale = got
@@ -171,39 +240,134 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
                 "paper": p, "score": score, "hits": hits, "topic": tid,
                 "published": p.get("published") or "", "arxiv_id": p.get("id") or "",
             })
-        buckets[tid].sort(key=lambda x: (-x["score"], x["published"], x["arxiv_id"]), reverse=False)
-        buckets[tid].sort(key=lambda x: (-x["score"], x["published"] == "", x["published"], x["arxiv_id"]))
+        buckets[tid].sort(key=lambda x: (x["score"], x["published"] or "", x["arxiv_id"]), reverse=True)
+    cutoff = _cutoff()
+    recent_buckets = {t: [r for r in buckets[t] if (r["published"] or "9999") >= cutoff] for t in topic_ids}
+    old_buckets = {t: [r for r in buckets[t] if (r["published"] or "") < cutoff] for t in topic_ids}
+
+    def take(from_ids: list[str], n: int, pool: dict[str, list]) -> list[dict[str, Any]]:
+        items, used = [], set()
+        while len(items) < n:
+            added = False
+            for tid in from_ids:
+                while pool.get(tid):
+                    row = pool[tid].pop(0)
+                    if row["arxiv_id"] in used:
+                        continue
+                    used.add(row["arxiv_id"])
+                    items.append(row)
+                    added = True
+                    break
+                if len(items) >= n:
+                    break
+            if not added:
+                break
+        return items
+
+    side = [t for t in topic_ids if t not in dir_topics]
+    primary, extra = (dir_topics or topic_ids), (side if dir_topics else [])
+    want_dir, want_side = (4, 2) if dir_topics else (6, 0)
+    picked = take(primary, want_dir, recent_buckets)
+    picked += take(extra or primary, want_side, recent_buckets)
+    if len(picked) < 3:
+        picked += take(primary + extra, 6 - len(picked), old_buckets)
+        dated = True
+    else:
+        dated = False
     items = []
-    used = set()
-    while len(items) < 6:
-        added = False
-        for tid in topic_ids:
-            while buckets[tid]:
-                row = buckets[tid].pop(0)
-                aid = row["arxiv_id"]
-                if aid in used:
-                    continue
-                used.add(aid)
-                p = row["paper"]
-                items.append({
-                    "arxiv_id": aid, "title": p.get("title"), "abstract": (p.get("summary") or "")[:600],
-                    "published": p.get("published"), "authors": (p.get("authors") or [])[:4],
-                    "url": p.get("url"), "hits": row["hits"], "topic": tid,
-                    "card_kit": card_kit_for(p),
-                })
-                added = True
-                break
-            if len(items) >= 6:
-                break
-        if not added:
-            break
+    for row in picked[:6]:
+        spec = interests.topic(row["topic"]) or {}
+        it = _item_of(row, spec)
+        if dated and (row["published"] or "") < cutoff:
+            it["old"] = True
+        items.append(it)
     reason = ""
     if not items:
         reason = "upstream" if error else "exhausted"
+    lib = store.paper_lib([it["arxiv_id"] for it in items])
+    for it in items:
+        it["lib"] = lib.get(it["arxiv_id"], "")
     return {
         **empty, "items": items, "error": error, "stale": stale,
         "empty_reason": reason, "topics": topic_ids, "unmatched": unmatched,
     }
+
+
+def schedule_xlate(papers: list[dict[str, Any]], spec: dict[str, Any] | None = None) -> None:
+    """展示请求不阻塞；缺译的后台补。没配模型就跳过。"""
+    try:
+        import llm
+        if not llm.enabled(None):
+            return
+    except Exception:
+        return
+    batch = []
+    for p in papers[:6]:
+        key = p.get("id") or ""
+        if not key:
+            continue
+        row = store.get_paper_zh(key)
+        if row and (row.get("ok") or _zh_fresh(row)):
+            continue
+        batch.append({"key": key, "title": p.get("title") or "", "abstract": (p.get("summary") or "")[:600],
+                      "tags": p.get("tags") or [], "osf": (spec or {}).get("source") == "osf"})
+    if batch:
+        try:
+            apply_xlate(batch)
+        except Exception:
+            pass
+
+
+def _zh_fresh(row: dict[str, Any]) -> bool:
+    tried = str(row.get("tried_at") or "")
+    return bool(tried) and tried[:10] >= (datetime.now(timezone.utc) - timedelta(hours=24)).date().isoformat()
+
+
+def _valid_xlate_item(it: Any, allowed: set[str], titles: dict[str, str]) -> dict[str, Any] | None:
+    if not isinstance(it, dict):
+        return None
+    key = str(it.get("key") or "")
+    zh = str(it.get("title_zh") or "").strip()
+    if key not in allowed or not (2 <= len(zh) <= 60):
+        return None
+    if zh == (titles.get(key) or "") or "\n" in zh or "<" in zh or ">" in zh:
+        return None
+    if sum(1 for c in zh if "\u4e00" <= c <= "\u9fff") < 2:
+        return None
+    kws = it.get("keywords") if isinstance(it.get("keywords"), list) else []
+    out_kw, seen = [], set()
+    for k in kws:
+        s = str(k).strip()
+        if not (1 <= len(s) <= 16) or s in seen:
+            continue
+        seen.add(s)
+        out_kw.append(s)
+        if len(out_kw) >= 5:
+            break
+    return {"key": key, "title_zh": zh, "keywords": out_kw}
+
+
+def apply_xlate(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    import llm
+    import budget
+    allowed = {b["key"] for b in batch}
+    titles = {b["key"]: b["title"] for b in batch}
+    user = json.dumps([{"key": b["key"], "title": b["title"], "abstract": b["abstract"]} for b in batch], ensure_ascii=False)
+    with budget.metered_as("*xlate"):
+        data = llm.chat_json("把论文标题译成中文，并给不超过 5 个中文关键词。", user,
+                             timeout=20, total=30, retry=False, tag="xlate", uid=None)
+    now = now_iso()
+    ok_items = []
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        for it in data["items"]:
+            got = _valid_xlate_item(it, allowed, titles)
+            if got:
+                store.put_paper_zh(got["key"], got["title_zh"], got["keywords"], model="xlate", ok=1)
+                ok_items.append(got)
+                allowed.discard(got["key"])
+    for key in allowed:
+        store.put_paper_zh(key, "", [], model="xlate", ok=0, tried_at=now)
+    return ok_items
 
 
 def daily(uid: str, kit_id: str, source: tuple[list[dict[str, Any]], str] | None = None) -> dict[str, Any]:
@@ -216,6 +380,9 @@ def daily(uid: str, kit_id: str, source: tuple[list[dict[str, Any]], str] | None
     fresh, error = source if source is not None else daily_source(kit_id)
     items = [{"arxiv_id": p["id"], "title": p["title"], "abstract": p["summary"][:600], "published": p["published"],
               "authors": p["authors"][:4], "url": p["url"]} for p in fresh if p["id"] not in seen][:6]
+    lib = store.paper_lib([it["arxiv_id"] for it in items])
+    for it in items:
+        it["lib"] = lib.get(it["arxiv_id"], "")
     keeps = [r for r in seen.values() if r["verdict"] == "keep"]
     return {"kit": {"id": k["id"], "name": k["name"]}, "items": items, "error": error,
             "goal": DAILY_GOAL, "done_today": len(done_today), "kept_total": len(keeps), "triaged_total": len(seen),
@@ -227,7 +394,8 @@ def triage(uid: str, kit_id: str, arxiv_id: str, verdict: str, why: str, title: 
     kit_id = kit_id or "*daily"
     if kit_id != "*daily":
         kit(kit_id)
-    aid = arxiv.clean_id(arxiv_id)
+    raw = (arxiv_id or "").strip()
+    aid = raw if OSF_KEY.match(raw) else arxiv.clean_id(raw)
     if verdict not in ("keep", "skip"):
         raise ReadingError("只能选「留」或「跳过」")
     why = (why or "").strip()

@@ -20,6 +20,8 @@ ONBOARD_TAGS = {
     "human_behavior", "none",
 }
 UNMATCHED: Counter[str] = Counter()
+WIDE_ZH = {"网络", "分类", "数值", "生理", "计算机", "经济"}
+L1_ROOTS = ("520", "110", "190", "790", "310")
 _TABLE: dict[str, Any] | None = None
 
 
@@ -40,10 +42,53 @@ def topic(tid: str) -> dict[str, Any] | None:
 
 
 def is_thin_topic(tid: str) -> bool:
+    spec = topic(tid) or {}
+    if spec.get("source") in ("osf", "psyarxiv", "socarxiv"):
+        return False
+    if spec.get("source") == "arxiv" and not spec.get("en"):
+        return False
     nodes = table()["nodes"]
     thin = set(table().get("thin") or [])
     homes = [nid for nid, ids in nodes.items() if tid in ids]
     return bool(homes) and all(n in thin for n in homes)
+
+
+def l1_of_node(node: str) -> str:
+    n = str(node or "")
+    for root in L1_ROOTS:
+        if n == root or n.startswith(root + "."):
+            return root
+    return n.split(".", 1)[0] if n else ""
+
+
+def l1_of_topic(tid: str) -> str:
+    for nid, ids in table()["nodes"].items():
+        if tid in ids:
+            return l1_of_node(nid)
+    spec = topic(tid) or {}
+    return str(spec.get("l1") or "")
+
+
+def direction_node(uid: str) -> str:
+    trail = store.get_trail(uid, store.active_portrait_id(uid) or "default")
+    node = str(trail.get("dir") or "")
+    if node and node in table()["nodes"]:
+        return node
+    facts = memory.active_facts(uid)
+    for f in facts:
+        if (f.key or "").startswith("direction:"):
+            code = f.key.split(":", 1)[1]
+            legacy = table()["legacy"].get(code)
+            if legacy and legacy in table()["nodes"]:
+                return legacy
+    return ""
+
+
+def direction_name(node: str) -> str:
+    tids = table()["nodes"].get(node) or []
+    if tids and topic(tids[0]):
+        return topic(tids[0]).get("name") or node
+    return node or ""
 
 
 def _norm(s: str) -> str:
@@ -51,24 +96,31 @@ def _norm(s: str) -> str:
 
 
 def _match_topic(slug: str, value: str) -> str | None:
-    slug = (slug or "").lower()
+    """中文最长命中优先；2 字宽别名只做全等；再才用 slug。"""
+    slug = (slug or "").lower().replace("_", "-")
     val = _norm(value)
-    best = None
+    best, best_len = None, -1
     for tid, spec in table()["topics"].items():
-        slugs = [s.lower() for s in spec.get("slugs") or []]
-        zh = [_norm(z) for z in spec.get("zh") or []]
-        if slug and slug in slugs:
+        for z in spec.get("zh") or []:
+            nz = _norm(z)
+            if not nz or len(nz) < 2 or not val:
+                continue
+            wide = nz in WIDE_ZH and len(nz) == 2
+            hit = (val == nz) if wide else (val == nz or nz in val or val in nz)
+            if hit and len(nz) > best_len:
+                best, best_len = tid, len(nz)
+    if best:
+        return best
+    for tid, spec in table()["topics"].items():
+        slugs = [s.lower().replace("_", "-") for s in spec.get("slugs") or []]
+        if slug and (slug in slugs or slug == tid):
             return tid
-        if val and val in zh:
-            best = tid
-        elif val and any(val in z or z in val for z in zh if len(z) >= 2):
-            best = best or tid
-    return best
+    return None
 
 
 def user_topics(uid: str) -> tuple[list[str], list[str]]:
-    """兴趣 + 方向节点 + 工具包，按上限截断。返回 (topic_ids, unmatched_terms)。"""
-    ids: list[str] = []
+    """方向话题在前，同级学科兴趣随后；prefs.kit_id 不进今日。"""
+    interests: list[str] = []
     unmatched: list[str] = []
     facts = memory.active_facts(uid)
     for f in facts:
@@ -82,50 +134,44 @@ def user_topics(uid: str) -> tuple[list[str], list[str]]:
             continue
         hit = _match_topic(tail, f.value or "")
         if hit:
-            if hit not in ids:
-                ids.append(hit)
+            if hit not in interests:
+                interests.append(hit)
         else:
             term = tail or (f.value or "")[:20]
             if term:
                 unmatched.append(term)
                 UNMATCHED[term] += 1
-    ids = ids[:3]
 
-    trail = store.get_trail(uid, store.active_portrait_id(uid) or "default")
-    node = str(trail.get("dir") or "")
-    nodes = table()["nodes"]
-    if node and node in nodes:
-        for tid in nodes[node]:
-            if tid not in ids:
-                ids.append(tid)
+    node = direction_node(uid)
+    dir_ids: list[str] = []
+    if node:
+        for tid in table()["nodes"].get(node) or []:
+            if tid not in dir_ids:
+                dir_ids.append(tid)
+        dir_ids = dir_ids[:2]
+        l1 = l1_of_node(node)
+        same: list[str] = []
+        for hit in interests:
+            if hit in dir_ids:
+                continue
+            if l1_of_topic(hit) != l1:
+                continue
+            same.append(hit)
+            if len(same) >= 2:
                 break
-    else:
-        for f in facts:
-            if (f.key or "").startswith("direction:"):
-                code = f.key.split(":", 1)[1]
-                legacy = table()["legacy"].get(code)
-                if legacy and legacy in nodes:
-                    for tid in nodes[legacy]:
-                        if tid not in ids:
-                            ids.append(tid)
-                        break
-                break
-
-    kit_id = store.get_prefs(uid).get("kit_id") or ""
-    if kit_id and kit_id in table()["topics"] and kit_id not in ids:
-        ids.append(kit_id)
-    return ids[:5], unmatched
+        return dir_ids + same, unmatched
+    return interests[:3], unmatched
 
 
 def channel_exits(node_id: str) -> list[dict[str, str]]:
     path = ROOT / "knowledge" / "channels.json"
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    want = []
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    want: list[str] = []
     if node_id.startswith("190"):
         want = ["psyarxiv"]
     elif node_id.startswith("790"):
+        want = ["nep-repec", "nber-wp"]
+    elif node_id.startswith("finance") or node_id == "finance":
         want = ["nber-wp"]
     elif node_id.startswith("310"):
         want = []
@@ -138,4 +184,11 @@ def channel_exits(node_id: str) -> list[dict[str, str]]:
             continue
         if ch.get("id") in want:
             out.append({"id": ch.get("id", ""), "name": ch.get("name", ""), "url": ch.get("url", "")})
+    if not out and want:
+        fallback = {
+            "psyarxiv": {"id": "psyarxiv", "name": "PsyArXiv", "url": "https://psyarxiv.com/"},
+            "nep-repec": {"id": "nep-repec", "name": "NEP (RePEc)", "url": "https://nep.repec.org/"},
+            "nber-wp": {"id": "nber-wp", "name": "NBER Working Papers", "url": "https://www.nber.org/papers"},
+        }
+        out = [fallback[w] for w in want if w in fallback]
     return out

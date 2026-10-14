@@ -88,6 +88,7 @@ const addBubble = (role, text) => { CFG.bubbles.push({ role, text }); };
 const toast = () => {};
 const refreshFacts = async () => { CFG.factsRefreshed++; };
 const setView = (v) => { CFG.views.push(v); };
+const enterApp = (v) => { CFG.views.push(v || "today"); };
 
 let actions, slotParent;
 const make = () => {
@@ -96,10 +97,10 @@ const make = () => {
   slotParent = el("div", "chat-foot");
   slotParent.appendChild(actions);
   return new Function(
-    "el", "esc", "api", "S", "document", "addBubble", "toast", "refreshFacts", "setView", "actions",
+    "el", "esc", "api", "S", "document", "addBubble", "toast", "refreshFacts", "setView", "enterApp", "actions",
     extract("renderAction") + "\n" + extract("finishedNote")
       + "\nreturn { renderAction, finishedNote };")(
-    el, esc, api, S, document, addBubble, toast, refreshFacts, setView, actions);
+    el, esc, api, S, document, addBubble, toast, refreshFacts, setView, enterApp, actions);
 };
 
 const CARD = {
@@ -112,23 +113,19 @@ const labels = () => btns().map((b) => b._text);
 const txt = () => actions.textContent;
 
 (async () => {
-  console.log("=== ① offered：唯一动作是「就做这个」 ===");
+  console.log("=== ① offered 老微任务：只给「先不做」 ===");
   let m = make();
   let render = m.renderAction;
   render(Object.assign({}, CARD, { status: "offered" }));
   console.log("        按钮：" + labels().join(" / "));
-  check(labels().includes("就做这个"), "有「就做这个」");
+  check(labels().includes("先不做"), "老微任务卡只给「先不做」");
+  check(!labels().includes("就做这个"), "不再接新的微任务");
   check(!labels().includes("标记完成"), "没有「标记完成」");
   check(txt().includes("KotobaAI"), "显示了依据（为什么是给你的）");
 
-  console.log("\n=== 点「就做这个」→ 真的去 accept ===");
-  btns().find((b) => b._text === "就做这个").click();
-  await new Promise((r) => setImmediate(r));
-  check(CFG.created && CFG.created.event === "accept", "发的是 accept 事件",
-    JSON.stringify(CFG.created));
-  check(CFG.created && CFG.created.action_id === "a-1", "带上了 action_id");
-  check(CFG.factsRefreshed > 0, "刷新了记忆面板");
-  console.log("        按钮变成：" + labels().join(" / "));
+  console.log("\n=== ② accepted 老卡：仍能去做这一步 ===");
+  render(Object.assign({}, CARD, { status: "accepted", task_id: "t-9" }));
+  console.log("        按钮：" + labels().join(" / "));
 
   console.log("\n=== ② accepted：唯一动作是「去任务区完成」 ===");
   check(labels().includes("去做这一步"), "有「去做这一步」");

@@ -43,7 +43,7 @@ def test_deepseek_payload_disables_thinking_and_caps_output(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
-    monkeypatch.setattr(llm, "_post", lambda url, key, payload, timeout: (sent.update(payload) or {"choices": [{"message": {"content": "ok"}}]}, ""))
+    monkeypatch.setattr(llm, "_post", lambda url, key, payload, timeout, total=None: (sent.update(payload) or {"choices": [{"message": {"content": "ok"}}]}, ""))
     assert llm.chat("s", "u") == "ok"
     assert sent["model"] == "deepseek-flash" and sent["thinking"] == {"type": "disabled"} and sent["max_tokens"] == 2000
     monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")

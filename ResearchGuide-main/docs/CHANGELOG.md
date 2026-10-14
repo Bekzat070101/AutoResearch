@@ -6,6 +6,62 @@
 
 ---
 
+## [2026-10-14] [FIX] 今日去掉「定位微调」
+
+- 变更内容：今日不再渲染定位入口。服务端 `daily_tweak` 仍回 `view:"position"`（测试不动），页面不画。界面 w80。A5 仍待确认，本轮不发生产。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 研读三栏、论文库、PDF 导入、定位待开发
+
+- 变更内容：工具包 / 已读正文进 `paper_text`，预热 `POST /api/admin/papers/warm`，发版后循环预热（无 `ADMIN_TOKEN` 打印请手动预热）。研读页一屏三栏内滚，去掉「阅读顺序」。搜索路由写在 `{arxiv_id}` 之前，拒中文。导入 PDF 仅本人可见、能带读、不交卡。论文页 16px、标题下中文行、侧栏可收起。定位栏占位「待开发」。工具包 10 篇 `title_zh`/`keywords` 按标题如实写中文并标机器待核。界面 w79。A5 仍待确认，本轮不发生产。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/DESIGN_SPEC.md、docs/DEPLOY.md
+- 影响模块：server/store.py、server/arxiv.py、server/reading.py、server/tutor.py、server/main.py、server/admin.py、server/pdf.py、server/workpool.py、web/js/app.js、web/css/styles.css、web/index.html、knowledge/kits/llm-eval.json
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 今日按当前方向推荐、标题机翻
+
+- 变更内容：今日 `GET /api/daily` 不再带 kit。候选按 `trail.dir`：方向话题保底 4/6，同级兴趣最多 2/6。心理/社会学走 PsyArXiv/SocArXiv，经济/金融走 arXiv 分类。标题下机翻 + 关键词写入 `paper_zh`，`*xlate` 记账。冷话题每请求最多现取 1 个。未知 kit_id 的 prefs 回 400。界面 w77。
+- 影响文档：docs/CHANGELOG.md、docs/ARCHITECTURE.md、docs/tasks/03-reading-today.md
+- 影响模块：server/interests.py、server/reading.py、server/osf.py、server/budget.py、server/store.py、server/main.py、server/admin.py、web/js/app.js、knowledge/arxiv_topics.json
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 带读作答框、两页签、模型按标准判卷
+
+- 变更内容：论文页「AI 带读 / 写阅读卡」。每题可见 `textarea.tutor-answer`，可手输、粘贴、填进作答框。硬判（引文逐字、局限段、字数、不抄）过了再调 `paper-quiz-grade` 按 criteria 判；形状不对或没模型记 pending，可重判，不回退规则判。没模型或非工具包则带读页签灰显。跳站按英文 heading。隐私说明改为作答会发给模型判对错，`PRIVACY_VERSION=2026-10-15`。界面 w76。当前树没有独立额度模块，上课周 `LLM_DAILY_TOTAL=5000` 未落地（w74 无 `budget.py`），本轮不另起额度方案。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/ARCHITECTURE.md、docs/tasks/04-paper-tutor.md、skills/README.md
+- 影响模块：server/tutor.py、server/llm.py、server/main.py、server/auth.py、web/js/app.js、web/css/styles.css、web/index.html、skills/paper-tutor、skills/paper-quiz-grade
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 会话持久、方向 ranking、多方向、对话不派任务
+
+- 变更内容：登录写回 localStorage 三键、30 天滑动；失效 toast 后落登录页。右上角下拉：我的 / 我的 DeepSeek / 退出 / 换账号。对话右栏改规则 ranking。`prefs.directions` + dirChip 切换走共用 `chooseDirection` 并 await PUT trail，进度进 `byDir`。对话 `next_action` 只留 `explore_direction`。画像剪枝，旧数据进「其他」。各页居中，对话页 1240px。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、docs/DIALOGUE_CONTRACT.md、docs/TASK2_DIALOGUE.md、docs/ARCHITECTURE.md
+- 影响模块：server/planner.py、server/interests.py、server/memory.py、server/dialogue.py、server/main.py、web/js/app.js、web/js/chat.js、web/css/styles.css
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [OPS] A5 持久盘本轮仍待确认
+
+- 变更内容：DEPLOY.md 写明本轮 NAS 未挂上、不准假装已挂盘、不准把生产发版写成已完成；补本机验收命令。没挂盘前不为演示发生产（发版会清 `/tmp` 库）。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：无代码
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FIX] 论文缓存止血（13.0）
+
+- 变更内容：`ARXIV_CACHE_DIR` 生效（FC 默认 `/tmp/papers`）。写盘失败打 warn 仍返回结果。抽表前的旧 HTML 缓存用户路径照常返回并带 `needs_reparse`。先取 HTML，成功则从页面取标题，失败才打元数据；调用方可给 `hint`。非法 arXiv id 回 400。摘要状态行加「重新取正文」。界面 w75。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：server/arxiv.py、server/main.py、web/js/app.js、web/index.html
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
 ## [2026-10-13] [FIX] deploy_fc 适配当前 FC SDK 的 GetFunction
 
 - 变更内容：`get_function` 必须带 `GetFunctionRequest`，否则读现有环境变量在发版时直接 TypeError。

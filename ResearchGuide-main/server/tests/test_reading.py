@@ -68,8 +68,9 @@ def test_kit_file_is_well_formed():
 def test_clean_id_accepts_common_forms():
     for raw in ["2310.17623", "2310.17623v2", "https://arxiv.org/abs/2310.17623", "https://arxiv.org/pdf/2310.17623v1.pdf"]:
         assert arxiv.clean_id(raw) == "2310.17623"
-    with pytest.raises(arxiv.ArxivError):
+    with pytest.raises(arxiv.ArxivError) as exc:
         arxiv.clean_id("not-an-id")
+    assert exc.value.status == 400
 
 
 def test_quote_must_be_verbatim():

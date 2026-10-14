@@ -110,9 +110,8 @@ def test_prompt_tells_it_to_look_the_name_up_first():
 def test_school_slot_is_presumed_pku_not_a_hole():
     uid = store.create_user("t")["uid"]
     groups = {g["group"]: g for g in memory.coverage(uid)["groups"]}
-    school = next(s for s in groups["identity"]["slots"] if s["key"] == "school")
-    assert school["filled"] is True and school["value"] == "北京大学"
-    assert school["presumed"] is True
+    keys = [s["key"] for s in groups["identity"]["slots"]]
+    assert "school" not in keys
 
 
 def test_ladder_does_not_wait_for_school_but_counts_department():
@@ -129,7 +128,7 @@ def test_ladder_does_not_wait_for_school_but_counts_department():
         ["我是信管的大二学生"])
     memory.apply_ops(uid, accepted, "我是信管的大二学生")
     st = memory.ladder_state(uid)
-    assert st["next_layer"] == "practice", "年级 + 院系已经在「你是谁」这层有数了，别再问身份"
+    assert st["next_layer"] == "interest", "年级 + 院系已经在「你是谁」这层有数了，别再问身份"
     identity = next(L for L in st["layers"] if L["layer"] == "identity")
     assert identity["known"] is True
 

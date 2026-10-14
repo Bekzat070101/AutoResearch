@@ -91,19 +91,19 @@ LAYER_BUDGET: dict[str, int] = {
 _EXACT: dict[str, KeySpec] = {
     # 身份
     "grade": KeySpec("background", "single", ("declared",), layer="identity"),
-    "school": KeySpec("background", "single", ("declared",), layer="identity"),
+    "school": KeySpec("background", "single", ("declared",), layer="identity", ask=False),
     "major": KeySpec("background", "single", ("declared",), layer="identity"),
     # 院系和专业分开存：常见「信息管理系 / 信息管理与信息系统」这种
     # 院系≠专业的组合，合成一条会丢掉其中一个（这正是 school 曾经被丢掉的老问题）。
     "department": KeySpec("background", "single", ("declared",), layer="identity"),
     # 入学年份：有了它年级可以自己算，否则「大二」每年都得重问一遍。
-    "enroll_year": KeySpec("background", "single", ("declared",), layer="identity"),
+    "enroll_year": KeySpec("background", "single", ("declared",), layer="identity", ask=False),
     # 存得下、但不主动问（见 KeySpec.ask）
     "gender": KeySpec("background", "single", ("declared",), layer="identity", ask=False),
     "age": KeySpec("background", "single", ("declared",), layer="identity", ask=False),
-    "location": KeySpec("background", "single", ("declared",), layer="identity"),
+    "location": KeySpec("background", "single", ("declared",), layer="identity", ask=False),
     # 每周可投入时间：决定任务给多大，是他最该被问清的一件事之一。
-    "pace": KeySpec("preference", "single", ("declared",), layer="interest"),
+    "pace": KeySpec("preference", "single", ("declared",), layer="interest", ask=False),
     # 正在跟的组/老师。本科想进科研，这是最直接的抓手，所以放「当前实践」而不是经历。
     "research_group": KeySpec("practice", "multi", ("declared", "inferred"),
                               layer="practice", default_ttl_days=180),
@@ -125,8 +125,8 @@ _NAMESPACED: dict[str, KeySpec] = {
     "field": KeySpec("interest", "multi", ("declared", "inferred"), layer="interest"),
     # 就业去向：方向 / 地域 / 期望薪资。放在倾向层——它和科研方向是同一种
     # 「他想去哪」的信息，只是落点不同。
-    "career": KeySpec("interest", "multi", ("declared",), layer="interest"),
-    "style": KeySpec("preference", "single", ("declared",), layer="interest"),
+    "career": KeySpec("interest", "multi", ("declared",), layer="interest", ask=False),
+    "style": KeySpec("preference", "single", ("declared",), layer="interest", ask=False),
     # 自然聊天里会出现「会一点 Python」这类能力自述；自述「已掌握」会被降级标注，
     # 见 validate_ops 的 needs_behavior_evidence。
     "capability": KeySpec("capability", "multi", ("declared", "inferred"), layer="capability"),
@@ -167,10 +167,10 @@ _NAMESPACED: dict[str, KeySpec] = {
     # 担任的角色：社团、学工、志愿服务。
     # 和 experience 分开是有意的：experience 是「做出过什么」，必须由提交事件写入；
     # role 是「担任什么」，用户自述即可。混在一起会让行为证据被自述稀释。
-    "role": KeySpec("experience", "multi", ("declared",), layer="experience"),
+    "role": KeySpec("experience", "multi", ("declared",), layer="experience", ask=False),
     # 临时约束必须带有效期，否则会变成永久设定。
     "constraint": KeySpec("preference", "multi", ("declared",),
-                          requires_valid_until=True, layer="constraint"),
+                          requires_valid_until=True, layer="constraint", ask=False),
     # 经历只能由提交事件写入，模型不能写（见 §3 规则 3）。
     "experience": KeySpec("experience", "multi", ("behavior",), layer="experience"),
 }
@@ -194,20 +194,22 @@ class Slot(NamedTuple):
                         # 只在用户自己说出别的值时被覆盖。
 
 
+PRUNED = frozenset({
+    "school", "enroll_year", "gender", "age", "location", "pace",
+    "career", "style", "role", "constraint",
+})
+
+
+def is_pruned_key(key: str) -> bool:
+    head = (key or "").split(":", 1)[0]
+    return head in PRUNED
+
+
 COVERAGE_GROUPS: tuple[tuple[str, str, str, tuple[Slot, ...]], ...] = (
     ("identity", "身份", "你是谁。这层决定我给你什么难度的东西。", (
         Slot("grade", "年级", "大一和大二能做的事不一样"),
-        # 学校：本产品只服务北大学生，默认就是北大——**不主动问**（实测模型会问
-        # 「你是哪个学校的」，用户回一句「这还用问」）。留这个格子是为了他主动
-        # 说起别的学校时存得下，那一轮代码会如实说知识库只覆盖北大培养方案。
-        Slot("school", "学校", "只在你主动提到时才记；本产品默认北京大学",
-             presumed="北京大学"),
         Slot("department", "院系", "院系决定你身边有什么资源"),
         Slot("major", "专业", "专业决定你已经有哪些基础"),
-        Slot("enroll_year", "入学年份", "用来算年级，免得每年重问你一次"),
-        Slot("location", "所在地", "决定能不能参加线下的活动和实习"),
-        Slot("gender", "性别", "存着，但我不主动问——它几乎不改变建议"),
-        Slot("age", "年龄", "存着，但我不主动问——年级一般就够了"),
     )),
     ("courses_done", "已修课程", "你学过什么。这是判断起点最硬的依据。", (
         Slot("@enroll", "成绩单", "粘贴一次，我就知道你修过哪些课、考得怎么样"),
@@ -226,17 +228,9 @@ COVERAGE_GROUPS: tuple[tuple[str, str, str, tuple[Slot, ...]], ...] = (
         Slot("field:", "细分科研领域", "越具体，我能找的论文和项目越准"),
         Slot("enroll:", "双专业 / 辅修", "决定你还缺哪些课"),
         Slot("goal:", "目标", "读研、出国、就业，路径不一样"),
-        Slot("pace", "每周可投入时间", "决定任务给多大——不然我给的任务你做不到"),
-    )),
-    ("career", "实习就业方向", "如果你在意就业，这层让建议不至于偏到纯学术。", (
-        Slot("career:", "就业方向 / 地域", "就业和科研的路径安排不一样"),
     )),
     ("social", "人际交往", "社团、学工、志愿，以及导师课题组。", (
         Slot("research_group", "导师课题组", "本科生进科研最直接的抓手就是进组"),
-        Slot("role:", "社团 / 学工 / 志愿服务", "也是你的时间去向，影响任务大小"),
-    )),
-    ("constraint", "临时约束", "这周忙不忙。会过期，过期我会重新问。", (
-        Slot("constraint:", "当前限制", "不然我会给出你现在根本做不了的事"),
     )),
     ("experience", "经验积累", "你真做出来过的东西。只有交过成果才算。", (
         Slot("experience:", "做过的项目 / 成果", "这是唯一没法自己说了算的依据，所以最值钱"),
@@ -842,8 +836,9 @@ def board(uid: str) -> dict[str, Any]:
     expired = [f for f in all_facts if is_expired(f, now)]
 
     layers = []
+    other = [f for f in alive if is_pruned_key(f.key)]
     for name, label in LAYERS:
-        items = [f for f in alive if layer_of(f.key) == name]
+        items = [f for f in alive if layer_of(f.key) == name and not is_pruned_key(f.key)]
         items.sort(key=lambda f: f.created_at or "")
         layers.append({
             "layer": name,
@@ -856,6 +851,19 @@ def board(uid: str) -> dict[str, Any]:
                 "layer_label": label,
                 "affects_label": AFFECT_LABELS.get(f.affects or "", ""),
             } for f in items],
+        })
+    if other:
+        other.sort(key=lambda f: f.created_at or "")
+        layers.append({
+            "layer": "other",
+            "label": "其他（不用于选方向）",
+            "layer_hint": "旧数据还在，可以看、可以删，不再用来选方向。",
+            "facts": [{
+                **f.to_dict(),
+                "layer": "other",
+                "layer_label": "其他（不用于选方向）",
+                "affects_label": AFFECT_LABELS.get(f.affects or "", ""),
+            } for f in other],
         })
     return {
         "layers": layers,
@@ -884,17 +892,15 @@ LAYER_HINT: dict[str, str] = {
 # 只放 allow-ask 的 key：gender/age 这类 ask=False 的不能算进「这层有数了没有」，
 # 否则阶梯会一直卡在身份层等一个我们根本不该问的字段。
 LADDER_PROBE: dict[str, tuple[str, ...]] = {
-    # school 不在这里：默认北大，不问。department 要算——「我是信管的大二学生」
-    # 已经答了「你是谁」，却因为只认 major 而被判成身份层还空着，模型就会接着
-    # 问一个用户已经答过的问题（实测问出了「你是哪个学校的」）。
-    "identity": ("grade", "department", "major", "enroll_year"),
-    # project: 也算「在做什么」——一个在做的项目本身就是最实的当前实践
+    "identity": ("grade", "department", "major"),
     "practice": ("current:", "project:", "research_group"),
     "capability": ("base:", "capability:"),
-    "experience": ("experience:", "role:"),
-    "interest": ("direction:", "goal:", "interest:", "field:", "pace"),
-    "constraint": ("constraint:",),
+    "experience": ("experience:",),
+    "interest": ("direction:", "goal:", "interest:", "field:"),
 }
+
+
+LADDER_ORDER = ("identity", "interest", "capability", "practice")
 
 
 def ladder_state(uid: str) -> dict[str, Any]:
@@ -913,9 +919,9 @@ def ladder_state(uid: str) -> dict[str, Any]:
     layers = []
     for name, label in LAYERS:
         probes = LADDER_PROBE.get(name, ())
-        # 属于这一层的全部 key（含 ask=False 的）
+        if not probes:
+            continue
         in_layer = [k for k in keys if layer_of(k) == name]
-        # 能靠「问」拿到的那部分——这些才决定阶梯走不走得下去
         hit = [k for k in in_layer
                if (spec_for(k) is None or spec_for(k).ask)
                and any(k == p or k.startswith(p) for p in probes)]
@@ -924,11 +930,12 @@ def ladder_state(uid: str) -> dict[str, Any]:
             "label": label,
             "known": bool(hit),
             "have": hit[:4],
-            # 有、但不靠问拿到的（例如用户主动说了性别）
             "stored_only": [k for k in in_layer if k not in hit][:4],
             "hint": LAYER_HINT.get(name, ""),
         })
-    nxt = next((x["layer"] for x in layers if not x["known"]), None)
+    order = {n: i for i, n in enumerate(LADDER_ORDER)}
+    nxt = next((n for n in LADDER_ORDER
+                if not next((x["known"] for x in layers if x["layer"] == n), False)), None)
     return {
         "layers": layers,
         "next_layer": nxt,

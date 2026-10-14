@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 DEST = Path(__file__).resolve().parent / "vendor_wheels"
-PKGS = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
+PKGS = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6", "cryptography>=42", "pypdf>=6.1"]
 
 
 def main() -> None:

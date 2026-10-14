@@ -91,7 +91,7 @@
 `next_action` 形状：
 
 ```json
-{ "action": "micro_task|explore_direction|review_progress|course_action",
+{ "action": "explore_direction",
   "title": "给用户看的一句话",
   "direction": "ai",
   "node_id": null,
@@ -99,10 +99,12 @@
   "based_on": ["f_ab12cd34"] }
 ```
 
-代码在写库前会校验两条：
+本轮 `next_action` 只许 `explore_direction`（去看方向排序或方向树），不派微任务。
+老的 `micro_task` 卡 `accept` 仍建任务。
 
-1. `direction` 必须属于当前画像的生效方向（§4），否则拉回到生效方向；
-   没有生效方向时 `micro_task` / `course_action` 降级为 `explore_direction`。
+代码在写库前会校验：
+
+1. `direction` 必须属于当前画像的生效方向（§4），否则拉回到生效方向。
 2. **个性化闸门**：`based_on` 里至少要有 1 个本画像**生效事实**的 id。
    一个都引不到 ⟹ 整个 `next_action` 丢掉，本轮不给落点。
 
