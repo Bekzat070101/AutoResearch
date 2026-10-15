@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import itertools
 import threading
 import time
@@ -21,6 +22,8 @@ from concurrent.futures import Future
 from typing import Any, Callable
 
 from singleflight import Overloaded
+
+PoolFull = Overloaded  # 上游 w80 的调用方按这个名字接（pdf 池）
 
 
 class BoundedPool:
@@ -34,8 +37,10 @@ class BoundedPool:
         self._closing = False
         self.running = 0
 
-    def submit(self, fn: Callable[..., Any], *args: Any) -> Future:
+    def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
         """排上队返回 Future；排队的已经有 max_queued 个、或者服务在关，抛 Overloaded，什么都不做。"""
+        if kwargs:
+            fn = functools.partial(fn, **kwargs)
         fut: Future = Future()
         ctx = contextvars.copy_context()
         with self._cv:

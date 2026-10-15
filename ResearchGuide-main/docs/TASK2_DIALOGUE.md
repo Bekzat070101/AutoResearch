@@ -60,7 +60,7 @@
 ```
 
 **关键点：模型只提建议，代码有否决权。** 模型提议的 `next_action` 必须在
-`VALID_NEXT_ACTIONS = ("micro_task", "explore_direction", "review_progress", "course_action")`
+`VALID_NEXT_ACTIONS = ("explore_direction",)`
 里，越界一律降级（`dialogue.py:517`）。
 
 **为什么限制两次调用**：一轮里每多一次调用，延迟和成本线性上升，

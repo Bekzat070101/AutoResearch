@@ -74,7 +74,7 @@
     },
     {
       "id": "action_has_landing",
-      "why": "用户明确点名要一个具体动作时，必须给出可点击的落点，不能只在正文里说",
+      "why": "用户问这周干什么时，本轮不派微任务，只引导去看方向排序",
       "turns": [
         "我大二，想试试科研，但不知道从哪开始。Python 只会照教程抄。",
         "那我这周具体该干点什么？"
@@ -82,7 +82,7 @@
       "check_last_only": true,
       "checks": {
         "reply_nonempty": true,
-        "next_action_present": true
+        "next_action_absent": true
       }
     },
     {

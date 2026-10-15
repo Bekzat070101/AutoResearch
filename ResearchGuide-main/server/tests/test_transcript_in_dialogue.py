@@ -211,7 +211,7 @@ def test_partial_parse_reports_warnings(uid):
 def test_coverage_updates_after_import(uid):
     """导入之后「已修课程」应该从空变成已填。"""
     before = memory.coverage(uid)
-    assert before["filled"] == 1, "只有学校那条默认前提（北京大学），他自己还没说过任何东西"
+    assert before["filled"] == 0, "学校已从核对格剪掉；他自己还没说过任何东西"
     dialogue.turn(uid, REAL)
     after = memory.coverage(uid)
     assert after["filled"] > before["filled"], "覆盖度应该上升"

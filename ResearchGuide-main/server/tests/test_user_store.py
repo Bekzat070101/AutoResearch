@@ -62,8 +62,8 @@ def test_draft_and_trail_and_prefs_isolated(client):
     mine = client.get(f"/api/projects/{pid}/trail", headers=_h(a["token"]))
     assert mine.json()["code"] == "ai"
 
-    client.put("/api/me/prefs", json={"kit_id": "kit-math"}, headers=_h(a["token"]))
-    assert client.get("/api/me/prefs", headers=_h(a["token"])).json()["kit_id"] == "kit-math"
+    client.put("/api/me/prefs", json={"kit_id": "llm-eval"}, headers=_h(a["token"]))
+    assert client.get("/api/me/prefs", headers=_h(a["token"])).json()["kit_id"] == "llm-eval"
     assert client.get("/api/me/prefs", headers=_h(b["token"])).json().get("kit_id") == ""
 
 

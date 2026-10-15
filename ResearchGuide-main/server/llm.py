@@ -142,15 +142,15 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 一次回复远小于这个；卡住或�
 LLM_TOTAL_SECONDS = 150
 
 
-def _post(url: str, key: str, payload: dict, timeout: int) -> tuple[dict | None, str]:
-    """timeout 是「最多这么久没有数据」；整个请求另有 LLM_TOTAL_SECONDS 总时限。"""
+def _post(url: str, key: str, payload: dict, timeout: int, total: int | None = None) -> tuple[dict | None, str]:
+    """timeout 是「最多这么久没有数据」；整个请求另有 total 或 LLM_TOTAL_SECONDS 总时限。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
     try:
-        raw = fetch(req, timeout=max(timeout, LLM_TOTAL_SECONDS), idle=timeout, max_bytes=MAX_RESPONSE_BYTES)
+        raw = fetch(req, timeout=max(timeout, total or LLM_TOTAL_SECONDS), idle=timeout, max_bytes=MAX_RESPONSE_BYTES)
         return json.loads(raw.decode("utf-8")), ""
     except urllib.error.HTTPError as exc:
         return None, f"http {exc.code}"
@@ -173,10 +173,11 @@ def _deepseek_extras(cfg: dict, effort: str) -> dict:
 
 def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
          json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000,
-         uid: str | None = None, override: dict | None = None) -> str | None:
-    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次。
+         uid: str | None = None, override: dict | None = None,
+         total: int | None = None, retry: bool = True) -> str | None:
+    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次（retry=False 则不重试）；total 是整次请求的总时限。
     用服务器密钥时每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。
-    用户自己的 key 只当参数用，绝不写进 os.environ，也不扣团队预算。"""
+    用户自己的 key 只当参数用，绝不写进 os.environ，也不扣团队预算。标题机翻在 budget.metered_as("*xlate") 里调，算在伪账号头上。"""
     cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return None
@@ -203,13 +204,13 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     url = cfg["base_url"] + "/chat/completions"
     t0 = time.time()
     data, err = None, ""
-    for attempt in range(2):
+    for attempt in range(2 if retry else 1):
         if attempt and metered and not budget.charge():
             err += "; no budget to retry"
             break
-        data, err = _post(url, key, payload, timeout)
-        retry = err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504")
-        if data is not None or not retry or attempt == 1:
+        data, err = _post(url, key, payload, timeout, total) if total else _post(url, key, payload, timeout)
+        can_retry = retry and (err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504"))
+        if data is not None or not can_retry or attempt == 1:
             break
         time.sleep(0.8)
     text = None
@@ -253,9 +254,11 @@ def _clean(obj: Any) -> Any:
 
 
 def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json",
-              uid: str | None = None, override: dict | None = None) -> dict | None:
+              uid: str | None = None, override: dict | None = None,
+              total: int | None = None, retry: bool = True) -> dict | None:
     text = chat(system + "\n只输出一个 JSON 对象，不要 Markdown 代码块。", user, temperature=0.2,
-                timeout=timeout, json_mode=True, tag=tag, uid=uid, override=override)
+                timeout=timeout, json_mode=True, tag=tag, uid=uid, override=override,
+                total=total, retry=retry)
     if not text:
         return None
     cleaned = text.strip()

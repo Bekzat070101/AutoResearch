@@ -27,7 +27,9 @@ from singleflight import SingleFlight
 API = "https://export.arxiv.org/api/query"
 ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 UA = "QiyanResearchMentor/0.3 (education; contact via repo)"
-CACHE_DIR = Path(__file__).resolve().parent / "data" / "papers"
+_DEFAULT_CACHE = Path(__file__).resolve().parent / "data" / "papers"
+CACHE_DIR = Path(os.environ.get("ARXIV_CACHE_DIR") or (
+    "/tmp/papers" if os.environ.get("FC_FUNCTION_NAME") else _DEFAULT_CACHE))
 META_TTL = 6 * 3600
 _LOCK = threading.Lock()
 _LAST_CALL = [0.0]
@@ -36,12 +38,20 @@ MAX_ATOM_BYTES = 5 * 1024 * 1024
 MAX_HTML_BYTES = 40 * 1024 * 1024  # 最长的 HTML 版论文（如 HELM）也在这个量级以内
 _FLIGHT = SingleFlight()  # 同一 URL / 同一篇论文并发只取一次（限速锁下，重复请求每个都要排 3 秒）
 ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
+LOCAL_RE = re.compile(r"^local:[0-9a-f]{12}$")
+_SEARCH = TTLCache(3600, 256)
+_SEARCH_FAIL = TTLCache(30, 64)
+ZH_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
 class ArxivError(Exception):
     def __init__(self, msg: str, status: int = 0) -> None:
         super().__init__(msg)
         self.status = status  # HTTP 状态码；网络错误、超时为 0
+
+
+def is_local(raw: str) -> bool:
+    return bool(LOCAL_RE.match((raw or "").strip()))
 
 
 def clean_id(raw: str) -> str:
@@ -51,7 +61,7 @@ def clean_id(raw: str) -> str:
     s = re.sub(r"\.pdf$", "", s)
     s = re.sub(r"v\d+$", "", s)
     if not ID_RE.match(s):
-        raise ArxivError("不是有效的 arXiv 编号（形如 2310.17623）")
+        raise ArxivError("不是有效的 arXiv 编号（形如 2310.17623）", 400)
     return s
 
 
@@ -256,6 +266,39 @@ _QUOTA_LOCK = threading.Lock()
 _QUOTA: dict[str, Any] = {"dir": None, "sizes": {}, "bytes": 0}  # 本进程记的缓存目录文件数、总字节；换目录或首次用时扫一遍
 
 
+def search(q: str, max_results: int = 20) -> list[dict[str, Any]]:
+    raw = (q or "").strip()
+    if ZH_RE.search(raw):
+        raise ArxivError("arXiv 只认英文关键词", 400)
+    try:
+        aid = clean_id(raw)
+        return papers([aid])
+    except ArxivError:
+        pass
+    toks = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,30}", raw) if t.lower() not in {"and", "or", "andnot"}][:6]
+    if not toks or not any(len(t) >= 2 for t in toks):
+        raise ArxivError("arXiv 只认英文关键词", 400)
+    key = tuple(t.lower() for t in toks)
+    hit, data = _SEARCH.lookup(key)
+    if hit:
+        return data
+    fail, ferr = _SEARCH_FAIL.lookup(key)
+    if fail:
+        raise ArxivError(str(ferr or "搜索暂时失败"))
+    params = {
+        "search_query": " AND ".join(f"all:{t}" for t in toks),
+        "start": 0, "max_results": max_results,
+        "sortBy": "relevance", "sortOrder": "descending",
+    }
+    try:
+        data = query(params) or []
+    except ArxivError as exc:
+        _SEARCH_FAIL.set(key, str(exc))
+        raise
+    _SEARCH.set(key, data)
+    return data
+
+
 def _on_disk(aid: str) -> dict[str, Any] | None:
     path = CACHE_DIR / f"{aid}.json"
     hit, got = _RECENT.lookup(str(path))  # 按文件路径记，换了缓存目录（测试里常换）就不会串
@@ -271,13 +314,58 @@ def _on_disk(aid: str) -> dict[str, Any] | None:
     return got
 
 
+def _from_store(aid: str) -> dict[str, Any] | None:
+    try:
+        import store
+        row = store.get_paper_text(aid)
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {k: row[k] for k in row if k in ("id", "title", "source", "text", "url", "tables", "retry_after")}
+
+
+def _load(aid: str) -> dict[str, Any] | None:
+    # 路径键优先：换 CACHE_DIR 的测试不会和 aid 内存命中串；
+    # 刚写入的同一对象也从这里回来，corrupt 缓存测试靠 identity。
+    disk = _on_disk(aid)
+    if disk:
+        try:
+            import store
+            if not store.get_paper_text(aid):
+                store.put_paper_text(aid, disk)
+        except Exception:
+            pass
+        return disk
+    return _from_store(aid)
+
+
 def _save(aid: str, result: dict[str, Any]) -> None:
+    try:
+        import store
+        store.put_paper_text(aid, result)
+    except Exception:
+        pass
+    _save_disk(aid, result)
+
+
+def _save_disk(aid: str, result: dict[str, Any]) -> None:
     """先写临时文件再原子替换：别的请求读到的要么是旧版、要么是新版，不会是写了一半的。"""
     path = CACHE_DIR / f"{aid}.json"
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     body = json.dumps(result, ensure_ascii=False)
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        print(json.dumps({"warn": "paper_cache_write", "aid": aid}, ensure_ascii=False))
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _RECENT.set(str(path), result)
+        return
     _RECENT.set(str(path), result)
     _enforce_quota(path, len(body.encode("utf-8")))
 
@@ -330,14 +418,14 @@ def _needs_reparse(got: dict[str, Any]) -> bool:
 
 def _cached(aid: str) -> dict[str, Any] | None:
     """磁盘缓存：正文版一直有效；只有摘要的到了重试时间就当没有（旧缓存没有重试时间，也当到期）。
-    抽表之前的正文缓存也当没有，让 fulltext 重取一遍。"""
-    got = _on_disk(aid)
+    抽表之前的正文在用户路径照常返回，带 needs_reparse，重取交给预热。"""
+    got = _load(aid)
     if not got:
         return None
     if got.get("source") == "abstract" and time.time() >= got.get("retry_after", 0):
         return None
-    if _needs_reparse(got) and time.time() >= got.get("retry_after", 0):
-        return None
+    if _needs_reparse(got):
+        return {**got, "needs_reparse": True}
     return got
 
 
@@ -346,62 +434,98 @@ def cached(arxiv_id: str) -> dict[str, Any] | None:
     return _cached(clean_id(arxiv_id))
 
 
-def fulltext(arxiv_id: str) -> dict[str, Any]:
-    """{id, source: 'html' | 'abstract', text, title}；全文落盘缓存。"""
+def _title_from_html(page: str) -> str:
+    block = re.search(r'class="ltx_title_document"[^>]*>(.*?)</(?:h1|div|p)>', page, re.S | re.I)
+    raw = block.group(1) if block else ""
+    if not raw:
+        cap = re.search(r"<title>(.*?)</title>", page, re.S | re.I)
+        raw = cap.group(1) if cap else ""
+    text = html.unescape(_TAG.sub(" ", raw))
+    return re.sub(r"\s+", " ", text).strip()[:300]
+
+
+def fulltext(arxiv_id: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
+    """{id, source: 'html' | 'abstract', text, title}；全文落盘缓存。hint 有标题/摘要时省元数据。"""
     aid = clean_id(arxiv_id)
     got = _cached(aid)
     if got is not None:
         return got
-    return _FLIGHT.do(("fulltext", aid), lambda: _fetch_fulltext(aid))
+    return _FLIGHT.do(("fulltext", aid), lambda: _fetch_fulltext(aid, hint))
 
 
-def _fetch_fulltext(aid: str) -> dict[str, Any]:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+def _fetch_fulltext(aid: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        print(json.dumps({"warn": "paper_cache_write", "msg": "mkdir"}, ensure_ascii=False))
     got = _cached(aid)
-    if got is not None:  # 排在前面的那一个刚写好
+    if got is not None:
         return got
-    stale = _on_disk(aid)  # 到期的摘要版：标题、摘要已经有了，只重试正文，不再去取元数据
+    stale = _on_disk(aid)
     if stale:
         result = {k: stale[k] for k in ("id", "title", "source", "text", "url") if k in stale}
         if stale.get("tables"):
             result["tables"] = stale["tables"]
+    elif hint and (hint.get("title") or hint.get("summary")):
+        result = {"id": aid, "title": hint.get("title") or aid, "source": "abstract",
+                  "text": hint.get("summary") or "", "url": f"https://arxiv.org/abs/{aid}", "tables": []}
     else:
+        result = {"id": aid, "title": aid, "source": "abstract", "text": "",
+                  "url": f"https://arxiv.org/abs/{aid}", "tables": []}
+    retry = RETRY_NO_HTML
+    html_ok = False
+    try:
+        page = _get(f"https://arxiv.org/html/{aid}", timeout=30, max_bytes=MAX_HTML_BYTES).decode("utf-8", errors="replace")
+        if "</html>" not in page[-4096:].lower():
+            raise ArxivError("arXiv 正文页不完整")
+        parsed = parse_html(page)
+        text = parsed["text"]
+        if len(text) > 2000:
+            result.update(source="html", text=text, tables=parsed.get("tables") or [],
+                          title=_title_from_html(page) or result.get("title") or aid)
+            result.pop("retry_after", None)
+            html_ok = True
+    except ArxivError as exc:
+        if exc.status != 404:
+            retry = RETRY_TRANSIENT
+    if not html_ok and not (result.get("text") or "").strip() and not (hint and hint.get("summary")):
         meta = papers([aid])
         if not meta:
             raise ArxivError(f"arXiv 上没有 {aid}")
         m = meta[0]
-        result = {"id": aid, "title": m["title"], "source": "abstract", "text": m["summary"], "url": m["url"], "tables": []}
-    retry = RETRY_NO_HTML
-    try:
-        page = _get(f"https://arxiv.org/html/{aid}", timeout=30, max_bytes=MAX_HTML_BYTES).decode("utf-8", errors="replace")
-        if "</html>" not in page[-4096:].lower():
-            raise ArxivError("arXiv 正文页不完整")  # 没有声明长度的响应提前断开时，只能从页尾看出来；当临时失败处理
-        parsed = parse_html(page)
-        text = parsed["text"]
-        if len(text) > 2000:
-            result.update(source="html", text=text, tables=parsed.get("tables") or [])
-            result.pop("retry_after", None)
-    except ArxivError as exc:
-        # 没有 HTML 版（404）就只用摘要；临时失败（超时、断网、5xx）也先给摘要，但很快再试，不把半份论文永久缓存
-        if exc.status != 404:
-            retry = RETRY_TRANSIENT
-    if result["source"] == "abstract" or _needs_reparse(result):
+        result.update(title=m["title"], text=m["summary"], url=m["url"], source="abstract", tables=[])
+    if result["source"] == "abstract":
         result["retry_after"] = time.time() + retry
     _save(aid, result)
     return result
 
 
-def sections(text: str) -> list[tuple[str, int]]:
-    """粗分节：返回 [(标题, 起始位置)]。用来判断一句引文在不在 Limitations / Future work 里。"""
-    return list(_sections(text))
+_SEC_NAMES = (
+    r"Abstract|Introduction|Related Work|Background|Method[s]?|Approach|"
+    r"Experiments?|Results?|Discussion|Analysis|Limitations?|Future Work|"
+    r"Conclusions?|Broader Impact|Ethics Statement|Acknowledg(?:e)?ments?|"
+    r"References|Appendix"
+)
+_SEC_LOOSE = re.compile(rf"^(?:\d+(?:\.\d+)*\s+)?({_SEC_NAMES})\b.*$", re.M | re.I)
+_SEC_STRICT = re.compile(
+    rf"^(\d+(?:\.\d+)*)\.?\s+({_SEC_NAMES})\b.{{0,40}}$", re.M | re.I)
 
 
-@lru_cache(maxsize=8)
-def _sections(text: str) -> tuple[tuple[str, int], ...]:
+def sections(text: str, strict: bool = False) -> list[tuple[str, int]]:
+    """粗分节：返回 [(标题, 起始位置)]。PDF 用 strict：编号 + 首字母大写关键词 + 行长 ≤60。"""
+    return list(_sections(text, strict))
+
+
+@lru_cache(maxsize=16)
+def _sections(text: str, strict: bool = False) -> tuple[tuple[str, int], ...]:
     """同一篇全文每张卡要分好几次节（每句引文一次），只算一次。"""
     out = []
-    for m in re.finditer(r"^(?:\d+(?:\.\d+)*\s+)?(Abstract|Introduction|Related Work|Background|Method[s]?|Approach|Experiments?|Results?|Discussion|Analysis|Limitations?|Future Work|Conclusions?|Broader Impact|Ethics Statement|Acknowledg(?:e)?ments?|References|Appendix)\b.*$", text, re.M | re.I):
-        out.append((m.group(1).lower(), m.start()))
+    pat = _SEC_STRICT if strict else _SEC_LOOSE
+    for m in pat.finditer(text):
+        name = m.group(2 if strict else 1).lower()
+        if strict and (m.end() - m.start()) > 60:
+            continue
+        out.append((name, m.start()))
     return tuple(out)
 
 

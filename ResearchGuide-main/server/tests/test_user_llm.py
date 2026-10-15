@@ -102,7 +102,7 @@ def test_two_users_chat_use_own_keys_without_touching_environ(client, monkeypatc
     store.save_llm_secret(b["uid"], "sk-bbb-bbbb", "https://api.deepseek.com/v1", "deepseek-flash")
     seen: list[str] = []
 
-    def fake_post(url, key, payload, timeout):
+    def fake_post(url, key, payload, timeout, total=None):
         seen.append(key)
         return {"choices": [{"message": {"content": "ok"}}], "usage": {}}, ""
 

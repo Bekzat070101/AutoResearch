@@ -159,8 +159,9 @@ def check_one(turn: dict, all_turns: list[dict], checks: dict, uid: str) -> list
                 continue
             if re.search(r"你[^，。]{0,12}(可以|不妨|试着|先|需要|建议)", s) and \
                re.search(r"(做|写|读|跑|试|完成|改|看|练|复现|装|提交|算|查)", s):
-                if not turn.get("next_action"):
-                    bad.append(f"回复布置了动作「{s[:30]}…」但 next_action 为空")
+                act = (turn.get("next_action") or {}).get("action")
+                if act and act != "explore_direction":
+                    bad.append(f"本轮不派任务，却给了 {act}：「{s[:30]}…」")
                 break
 
     if checks.get("supersede_or_retract"):

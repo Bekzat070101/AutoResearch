@@ -35,7 +35,7 @@ CASES = [
     ("verify_action_card.js", "行动卡的去向按钮"),
     ("verify_receipt_render.js", "结果区的信息组织（分组、顺序、空则不留壳）"),
     ("verify_chat_layout.js", "对话页整体布局（页头一块 + 三个区，输入永远在最下）"),
-    ("verify_tutor_render.js", "带读面板显示题与规则版、预填只填空栏"),
+    ("verify_tutor_render.js", "带读面板作答框、页签模式、预填只填空栏"),
 ]
 
 

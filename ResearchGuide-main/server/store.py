@@ -356,6 +356,45 @@ CREATE TABLE IF NOT EXISTS tutor_questions (
   created_at TEXT NOT NULL,
   PRIMARY KEY (arxiv_id, station, paper_sha, plan_version, skill_sha)
 );
+CREATE TABLE IF NOT EXISTS paper_zh (
+  key TEXT PRIMARY KEY,
+  title_zh TEXT NOT NULL DEFAULT '',
+  keywords TEXT NOT NULL DEFAULT '[]',
+  model TEXT NOT NULL DEFAULT '',
+  ok INTEGER NOT NULL DEFAULT 0,
+  tried_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS llm_usage (
+  user_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, day)
+);
+CREATE TABLE IF NOT EXISTS paper_text (
+  arxiv_id TEXT PRIMARY KEY,
+  sha TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  tables TEXT NOT NULL DEFAULT '[]',
+  retry_after REAL NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paper_text_fetched ON paper_text(pinned, fetched_at);
+CREATE TABLE IF NOT EXISTS user_papers (
+  user_id TEXT NOT NULL,
+  pid TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  title TEXT,
+  filename TEXT,
+  text TEXT NOT NULL,
+  pages INTEGER,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, pid)
+);
 """
 
 # 老库补列：SQLite 的 ADD COLUMN 是安全操作，已存在就跳过。
@@ -1482,6 +1521,145 @@ def latest_paper_pool(key: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return {"day": row["day"], "papers": papers if isinstance(papers, list) else [], "fetched_at": row["fetched_at"]}
+
+
+def get_paper_zh(key: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT key, title_zh, keywords, model, ok, tried_at FROM paper_zh WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        kws = json.loads(row["keywords"] or "[]")
+    except json.JSONDecodeError:
+        kws = []
+    return {"key": row["key"], "title_zh": row["title_zh"] or "", "keywords": kws if isinstance(kws, list) else [],
+            "model": row["model"] or "", "ok": int(row["ok"] or 0), "tried_at": row["tried_at"] or ""}
+
+
+def put_paper_zh(key: str, title_zh: str, keywords: list[str], model: str = "", ok: int = 1,
+                 tried_at: str | None = None) -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO paper_zh(key, title_zh, keywords, model, ok, tried_at) VALUES(?,?,?,?,?,?)",
+            (key, title_zh or "", json.dumps(keywords or [], ensure_ascii=False), model or "", int(ok),
+             tried_at or now_iso()),
+        )
+
+
+def get_paper_text(aid: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM paper_text WHERE arxiv_id=?", (aid,)).fetchone()
+    if not row:
+        return None
+    try:
+        tables = json.loads(row["tables"] or "[]")
+    except json.JSONDecodeError:
+        tables = []
+    return {
+        "id": row["arxiv_id"], "title": row["title"], "source": row["source"], "text": row["text"],
+        "url": row["url"], "tables": tables, "retry_after": row["retry_after"],
+        "sha": row["sha"], "pinned": row["pinned"], "fetched_at": row["fetched_at"],
+    }
+
+
+def put_paper_text(aid: str, result: dict[str, Any], pinned: bool = False) -> None:
+    blob = json.dumps(result.get("tables") or [], ensure_ascii=False)
+    text = result.get("text") or ""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO paper_text(arxiv_id, sha, source, title, url, text, tables, retry_after, bytes, pinned, fetched_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (aid, result.get("sha") or hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+             result.get("source") or "abstract", result.get("title") or "",
+             result.get("url") or "", text, blob, float(result.get("retry_after") or 0),
+             len(text.encode("utf-8")), 1 if pinned else 0, now_iso()),
+        )
+        cap = int(os.environ.get("ARXIV_CACHE_MAX_BYTES") or (100 * 1024 * 1024))
+        max_files = int(os.environ.get("ARXIV_CACHE_MAX_FILES") or 2000)
+        total = c.execute("SELECT COALESCE(SUM(bytes),0) FROM paper_text").fetchone()[0]
+        n = c.execute("SELECT COUNT(*) FROM paper_text").fetchone()[0]
+        while total > cap or n > max_files:
+            old = c.execute("SELECT arxiv_id, bytes FROM paper_text WHERE pinned=0 ORDER BY fetched_at LIMIT 1").fetchone()
+            if not old:
+                break
+            c.execute("DELETE FROM paper_text WHERE arxiv_id=?", (old["arxiv_id"],))
+            total -= old["bytes"]
+            n -= 1
+
+
+def pin_papers(ids: list[str]) -> None:
+    if not ids:
+        return
+    with _LOCK, _conn() as c:
+        for aid in ids:
+            c.execute("UPDATE paper_text SET pinned=1 WHERE arxiv_id=?", (aid,))
+
+
+def paper_lib(ids: list[str]) -> dict[str, str]:
+    if not ids:
+        return {}
+    q = ",".join("?" * len(ids))
+    with _conn() as c:
+        rows = c.execute(f"SELECT arxiv_id, source FROM paper_text WHERE arxiv_id IN ({q})", ids).fetchall()
+    return {r["arxiv_id"]: r["source"] for r in rows}
+
+
+def get_user_paper(uid: str, pid: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM user_papers WHERE user_id=? AND pid=?", (uid, pid)).fetchone()
+    if not row:
+        return None
+    return {"id": row["pid"], "title": row["title"] or row["filename"] or pid, "text": row["text"],
+            "source": "pdf", "url": "", "pages": row["pages"], "filename": row["filename"]}
+
+
+def list_user_papers(uid: str) -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT pid, title, filename, pages, created_at FROM user_papers WHERE user_id=? ORDER BY created_at DESC",
+            (uid,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def put_user_paper(uid: str, pid: str, sha: str, title: str, filename: str, text: str, pages: int) -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO user_papers(user_id, pid, sha, title, filename, text, pages, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (uid, pid, sha, title, filename, text, pages, now_iso()),
+        )
+        extras = c.execute(
+            "SELECT pid FROM user_papers WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+        for row in extras[20:]:
+            c.execute("DELETE FROM user_papers WHERE user_id=? AND pid=?", (uid, row["pid"]))
+
+
+def delete_user_paper(uid: str, pid: str) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("DELETE FROM user_papers WHERE user_id=? AND pid=?", (uid, pid))
+        c.execute("DELETE FROM tutor_sessions WHERE user_id=? AND arxiv_id=?", (uid, pid))
+
+
+def bump_llm_usage(user_id: str, n: int = 1, day: str | None = None) -> int:
+    d = day or now_iso()[:10]
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO llm_usage(user_id, day, calls) VALUES(?,?,?) "
+            "ON CONFLICT(user_id, day) DO UPDATE SET calls=calls+excluded.calls",
+            (user_id, d, n),
+        )
+        row = c.execute("SELECT calls FROM llm_usage WHERE user_id=? AND day=?", (user_id, d)).fetchone()
+    return int(row["calls"] if row else n)
+
+
+def llm_usage_today(user_id: str | None = None) -> int:
+    d = now_iso()[:10]
+    with _conn() as c:
+        if user_id is None:
+            row = c.execute("SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE day=?", (d,)).fetchone()
+        else:
+            row = c.execute("SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE user_id=? AND day=?", (user_id, d)).fetchone()
+    return int(row[0] if row else 0)
 
 
 def put_paper_pool(key: str, day: str, papers: list[dict[str, Any]]) -> None:

@@ -2,10 +2,10 @@
 
 > 设计依据：`docs/DESIGN_PROPOSAL.md` §1C（研究思维层）、§1D（定位与博弈层）、§5.3（每日 ≤10 分钟）、§7.1–7.3。代码：`server/reading.py`、`server/positioning.py`、`server/arxiv.py`、`server/quotes.py`；工具包：`knowledge/kits/*.json`。
 
-## 1. 分工：规则判，模型不判
+## 1. 分工：规则钉硬事实，模型按标准判作答
 
 - 引文是否逐字出自原文、出自哪一节、矩阵的空格 / 空列 / 冲突、竞争地图的一切数值、定位陈述检查、下注组合检查：全部由规则算，没有模型参与。
-- 带读：题由模型出、判题全规则、学生作答不发给模型。
+- 带读：题由模型出（paper-tutor）。硬判在前：引文逐字与出处、局限段、字数、不抄原文不抄题面；过了再由 paper-quiz-grade 按出题时的 criteria 判 pass/fail。模型判不了记 pending，可重判，不回退规则判。作答会和论文节选一起发给大模型。
 - 只能学生写的栏：阅读卡的「主张」「假设」「我会改什么」，定位陈述的 X 和 Y。和原文一字不差（≥24 字）就不算学生自己写的。
 - 学生自己的 Agent：通过 `GET /api/brief` 下载 AGENTS.md，只许挑错、解释、指原文位置；它的每条建议要在决策日志里逐条「采纳 / 修改 / 拒绝」，拒绝要写理由（≥6 字）。
 
@@ -15,10 +15,10 @@
 | --- | --- | --- |
 | 每日分拣 | 工具包的 arXiv 分类 × 关键词，取最近的、没分拣过的 ≤6 篇；只给标题和摘要前两句；留 / 过都要写一句为什么 | `DAILY_GOAL = 3`；理由 4–80 字 |
 | 阅读卡 | 7 栏；主张原句、证据要能逐字定位；局限原句必须在局限 / 讨论 / 结论段（论文有这类段时）；矩阵维度至少填 `max(3, n-2)` 个 | 自己的话 10–160 字；引文 ≥12 字符 |
-| 带读 | 论文页按摘要/引言/方法/实验/局限/结论出 8 题（七栏各一 + 引言理解题）；模型只选题面，代码按 `quotes.locate` / `check_limitation` / `_check_own` 判；只允许工具包论文 | 每题 ≤3 次、整篇 ≤40 次；节选 ≤3500 字；站长 <200 字并入下一站 |
+| 带读 | 论文页「AI 带读 / 写阅读卡」两页签；8 题（七栏各一 + 引言理解题）。硬判：`quotes.locate` / `check_limitation` / `_check_own` + 滑窗查抄；过了再模型按 criteria 判。pending 可重判。任何有效 arXiv id 和本人导入的 PDF 都能带读；没模型则带读灰显。本地 PDF 不交卡、题目不进共享缓存 | 每题 ≤3 次、整篇 ≤40 次；判卷 ≤15 次；节选 ≤3500 字；站长 <200 字并入下一站 |
 | 版本 | 每交一次记一版，返回比上一版多过几条；首次过线写一条 `behavior` 能力事实进账本 | — |
 | 矩阵 | 只用学生自己过线卡的最新版；同一指标方向相反（up vs down）标冲突；一列一半以上空着标空列 | 至少 3 张过线卡 |
-| 原文 | arxiv.org/html 的 `<article>` 正文，公式保留 TeX；没有 HTML 版退回摘要并如实标注 | 请求串行、间隔 ≥3 秒；正文缓存在 `server/data/papers/` |
+| 原文 | arxiv.org/html 的 `<article>` 正文，公式保留 TeX；没有 HTML 版退回摘要并如实标注。正文进 SQLite `paper_text`，发版后预热；导入 PDF 进 `user_papers`，只本人可见 | 请求串行、间隔 ≥3 秒；`ARXIV_CACHE_MAX_BYTES` 在 /tmp 期间 100MB |
 
 ## 3. 定位层
 
@@ -40,9 +40,9 @@
 
 - `id`、`name`、`version`、`direction`（对应方向树代码）、`path_steps`（任务 4 主干步骤）、`status`（谁核对过什么）、`verified_at`、`reviewed_by`、`goal`。
 - `daily`：`categories`（arXiv 分类）、`keywords`（摘要短语）。
-- `papers[]`：`arxiv_id`、`title`、`url`、`published`、`order`、`why`（为什么按这个顺序读）。
+- `papers[]`：`arxiv_id`、`title`、`title_zh`、`keywords[{zh,en}]`、`url`、`published`、`order`、`why`（为什么读这篇）。研读页左栏叫「经典文献推荐」，不再写「阅读顺序」。
 - `datasets[]`：`name`、`url`（GitHub）、`note`。
 - `open_problems[]`：`id`、`niche`（位置的短名）、`arxiv_id`、`paper`、`quote`（**必须逐字出自原文**）、`section`、`note`、`keywords`（算势头用）、`edge_keywords`（什么样的边和它相关）、`momentum`（脚本写入）。
 - `dimensions[]`：`key`、`label`、`hint`；一个 `role: metric`、一个 `role: direction`（`options: up/down/mixed/none`），矩阵冲突靠这两列。
 
-加一个工具包：写好 JSON → 用 `quotes.locate` 逐条核对 `open_problems[].quote` 的出处和节 → `uv run --no-project python server/kit_momentum.py <id>` → 请做这个方向的学长学姐核对阅读顺序，把名字写进 `reviewed_by`。
+加一个工具包：写好 JSON → 用 `quotes.locate` 逐条核对 `open_problems[].quote` 的出处和节 → `uv run --no-project python server/kit_momentum.py <id>` → 请做这个方向的学长学姐核对经典文献推荐，把名字写进 `reviewed_by`。

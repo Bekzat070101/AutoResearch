@@ -6,6 +6,70 @@
 
 ---
 
+## [2026-10-15] [FIX] 并入 main（w75–w80：论文缓存止血、会话与方向、今日按方向、研读三栏与论文库、带读判卷）
+
+- 变更内容：把上游 372e767 并进本分支（它按 docs/tasks 的 11–14 实现了 w75–w80）。对接本分支：预算仍是 budget.py 这一份（按人按天、同意隐私才调、bind/unmetered），补上上游要的 `metered_as("*xlate")`、`current()`、`LLM_DAILY_XLATE`，`*` 开头的伪账号只查自己和全站的上限；`llm.chat/chat_json` 用本分支的扣额逻辑，加上游的 `total`/`retry`；线程池仍是本分支的 workpool（取消即出队、带上下文变量、能 drain），加 `PoolFull = Overloaded` 别名和 kwargs，上游的 pdf 池直接用它；`_FLIGHTS` 全部用 BoundedPool（新增 xlate 1 线程 8 排队）；带读 start/turn 走 `_paper_ref`（本地 PDF 不取 arXiv）但仍进模型池、挂用户锁；`_review_full` 保留；论文原文仍要登录（不按 arXiv 编号放行）；缓存写盘失败照上游打 warn 不 500。前端：会话仍用本分支那套（localStorage 三键、停着的号、换人整页重载），接上上游的 `sessionGoneMsg`（401 落登录页并提示）、`confirmLeave`/`clearChatDraft`、`logout(next)`（退出 / 换账号）、用户菜单四项、`chooseDirection`、`renderPositionSoon`、今日按方向文案、分拣不带 kit；隐私说明用上游 w80 那份（PDF、作答发给模型），版本 2026-10-15。界面 w81。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/budget.py、server/workpool.py、server/llm.py、server/main.py、server/arxiv.py、server/auth.py、server/dialogue.py、server/tests/test_auth.py、tools/deploy/bootstrap、tools/deploy/download_wheels.py、web/js/app.js、web/js/chat.js、web/index.html
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
+## [2026-10-14] [FIX] 今日去掉「定位微调」
+
+- 变更内容：今日不再渲染定位入口。服务端 `daily_tweak` 仍回 `view:"position"`（测试不动），页面不画。界面 w80。A5 仍待确认，本轮不发生产。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、web/index.html
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 研读三栏、论文库、PDF 导入、定位待开发
+
+- 变更内容：工具包 / 已读正文进 `paper_text`，预热 `POST /api/admin/papers/warm`，发版后循环预热（无 `ADMIN_TOKEN` 打印请手动预热）。研读页一屏三栏内滚，去掉「阅读顺序」。搜索路由写在 `{arxiv_id}` 之前，拒中文。导入 PDF 仅本人可见、能带读、不交卡。论文页 16px、标题下中文行、侧栏可收起。定位栏占位「待开发」。工具包 10 篇 `title_zh`/`keywords` 按标题如实写中文并标机器待核。界面 w79。A5 仍待确认，本轮不发生产。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/DESIGN_SPEC.md、docs/DEPLOY.md
+- 影响模块：server/store.py、server/arxiv.py、server/reading.py、server/tutor.py、server/main.py、server/admin.py、server/pdf.py、server/workpool.py、web/js/app.js、web/css/styles.css、web/index.html、knowledge/kits/llm-eval.json
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 今日按当前方向推荐、标题机翻
+
+- 变更内容：今日 `GET /api/daily` 不再带 kit。候选按 `trail.dir`：方向话题保底 4/6，同级兴趣最多 2/6。心理/社会学走 PsyArXiv/SocArXiv，经济/金融走 arXiv 分类。标题下机翻 + 关键词写入 `paper_zh`，`*xlate` 记账。冷话题每请求最多现取 1 个。未知 kit_id 的 prefs 回 400。界面 w77。
+- 影响文档：docs/CHANGELOG.md、docs/ARCHITECTURE.md、docs/tasks/03-reading-today.md
+- 影响模块：server/interests.py、server/reading.py、server/osf.py、server/budget.py、server/store.py、server/main.py、server/admin.py、web/js/app.js、knowledge/arxiv_topics.json
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 带读作答框、两页签、模型按标准判卷
+
+- 变更内容：论文页「AI 带读 / 写阅读卡」。每题可见 `textarea.tutor-answer`，可手输、粘贴、填进作答框。硬判（引文逐字、局限段、字数、不抄）过了再调 `paper-quiz-grade` 按 criteria 判；形状不对或没模型记 pending，可重判，不回退规则判。没模型或非工具包则带读页签灰显。跳站按英文 heading。隐私说明改为作答会发给模型判对错，`PRIVACY_VERSION=2026-10-15`。界面 w76。当前树没有独立额度模块，上课周 `LLM_DAILY_TOTAL=5000` 未落地（w74 无 `budget.py`），本轮不另起额度方案。
+- 影响文档：docs/CHANGELOG.md、docs/READING_POSITIONING.md、docs/ARCHITECTURE.md、docs/tasks/04-paper-tutor.md、skills/README.md
+- 影响模块：server/tutor.py、server/llm.py、server/main.py、server/auth.py、web/js/app.js、web/css/styles.css、web/index.html、skills/paper-tutor、skills/paper-quiz-grade
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FEAT] 会话持久、方向 ranking、多方向、对话不派任务
+
+- 变更内容：登录写回 localStorage 三键、30 天滑动；失效 toast 后落登录页。右上角下拉：我的 / 我的 DeepSeek / 退出 / 换账号。对话右栏改规则 ranking。`prefs.directions` + dirChip 切换走共用 `chooseDirection` 并 await PUT trail，进度进 `byDir`。对话 `next_action` 只留 `explore_direction`。画像剪枝，旧数据进「其他」。各页居中，对话页 1240px。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、docs/DIALOGUE_CONTRACT.md、docs/TASK2_DIALOGUE.md、docs/ARCHITECTURE.md
+- 影响模块：server/planner.py、server/interests.py、server/memory.py、server/dialogue.py、server/main.py、web/js/app.js、web/js/chat.js、web/css/styles.css
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [OPS] A5 持久盘本轮仍待确认
+
+- 变更内容：DEPLOY.md 写明本轮 NAS 未挂上、不准假装已挂盘、不准把生产发版写成已完成；补本机验收命令。没挂盘前不为演示发生产（发版会清 `/tmp` 库）。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：无代码
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
+## [2026-10-14] [FIX] 论文缓存止血（13.0）
+
+- 变更内容：`ARXIV_CACHE_DIR` 生效（FC 默认 `/tmp/papers`）。写盘失败打 warn 仍返回结果。抽表前的旧 HTML 缓存用户路径照常返回并带 `needs_reparse`。先取 HTML，成功则从页面取标题，失败才打元数据；调用方可给 `hint`。非法 arXiv id 回 400。摘要状态行加「重新取正文」。界面 w75。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：server/arxiv.py、server/main.py、web/js/app.js、web/index.html
+- 决策来源：邬程灿（request-10-14）
+- 登记人：助手
+
 ## [2026-10-14] [FIX] 并入 main（w71–w74：壳与栏目、开场全屏对话与「我的」、按兴趣每日论文、服务端带读、运维止血）
 
 - 变更内容：把上游 d874523 并进本分支（它按 docs/tasks 的五份任务书实现了 w71–w74）。和本分支对接：模型池与限流照旧——带读的 start/turn 进 `_MODEL` 池（`_in_model_pool`，从 `_model_work` 抽出）并挂用户锁，`/api/cards` 仍挂 SERIAL，每日取数用 `workpool.BoundedPool(1, 16)` 的独立小池而不是 `ThreadPoolExecutor`；`/api/health` 同时给 `model_pool` 的真实计数和上游的 `checks`；`quotes.locate` 同时支持 `prefer`（多处出现时挑局限段那一处）和带读的 `within`/`at`，`check_limitation` 仍传 `prefer=LIMIT_SECTIONS`；`store.init_db` 先建墓碑触发器再迁移旧的 XOR 封装；deploy_fc 用上游的 merge_env/refuse_unsafe、删掉本分支那份吞异常的 `existing_env`，更新与创建都保持单实例 200 并发。前端：保留本分支的会话持久化（localStorage、停着的号、换人整页重载）、微信 / 账号 / 注册三栏登录页和「设用户名密码」，接上上游的 `entered`（`setSession` 读 `r.entered`、`firstView`/`enterApp`、登录后统一走 `afterEnter`）、`confirm` 转「我的」页、项目占位页、今日论文区、对话右栏只读；`/api/nba` 随上游删去。隐私说明合成一份（带读作答一条照上游），指纹重算。界面 w75。

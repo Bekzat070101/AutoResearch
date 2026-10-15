@@ -43,7 +43,7 @@ PER_IP_HOUR = int(os.environ.get("AUTH_PER_IP_HOUR") or 600)
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
-PRIVACY_VERSION = "2026-10-14"
+PRIVACY_VERSION = "2026-10-15"
 
 # 不登录也能用的接口（按路由模板写）。新加的接口默认要登录：要么带 uid，要么加到这里并说明为什么可以公开。
 PUBLIC = frozenset({
@@ -59,7 +59,14 @@ PUBLIC = frozenset({
     "/api/llm/connect",  # 自己核对管理员口令
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
     "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
+    "/api/admin/papers/warm",
 })
+
+_ARXIV_PAPER_PATH = re.compile(r"^/api/papers/\d{4}\.\d{4,5}$")
+
+
+def _public_arxiv_paper(path: str) -> bool:
+    return bool(_ARXIV_PAPER_PATH.match(path or ""))
 
 router = APIRouter()
 

@@ -51,6 +51,7 @@ def guests_cap() -> int:
 
 
 GUESTS = "*guest"  # llm_usage 里全体访客合计的那一行
+LLM_DAILY_XLATE = int(os.environ.get("LLM_DAILY_XLATE") or 300)  # 标题机翻（*xlate 伪账号）每天上限，计入全站
 
 
 def bind(uid: str | None) -> None:
@@ -73,7 +74,10 @@ def _today() -> str:
 
 
 def _caps(uid: str) -> dict[str, int]:
-    """这一笔要过的每道上限：这个人、全站，访客再加全体访客。没同意隐私说明、账号不存在，这个人的上限是 0。"""
+    """这一笔要过的每道上限：这个人、全站，访客再加全体访客。没同意隐私说明、账号不存在，这个人的上限是 0。
+    `*` 开头的是全站伪账号（标题机翻 *xlate）：只有自己的上限和全站上限，不查用户表。"""
+    if uid.startswith("*"):
+        return {uid: (LLM_DAILY_XLATE if uid == "*xlate" else 0), "*": total_cap()}
     import auth  # auth 也 import 本模块，放到函数里避免循环
     u = store.get_user(uid)
     if not u or u.get("consent_version") != auth.PRIVACY_VERSION:
@@ -93,19 +97,33 @@ def left(uid: str) -> int:
     return max(0, min(cap - store.llm_calls(day, k) for k, cap in _caps(uid).items()))
 
 
-def allowed() -> bool:
+def allowed(who: str | None = None) -> bool:
     """只查不扣：这个请求现在还能不能调模型。"""
-    who = _WHO.get()
+    who = who if who is not None else _WHO.get()
     if who is None:
         return True
     return bool(who) and left(who) > 0
 
 
-def charge() -> bool:
+def charge(who: str | None = None) -> bool:
     """真正调用之前扣一笔；没额度返回 False，调用方当作模型不可用。"""
-    who = _WHO.get()
+    who = who if who is not None else _WHO.get()
     if who is None:
         return True
     if not who:
         return False
     return store.llm_charge(_today(), _caps(who))
+
+
+@contextmanager
+def metered_as(who: str) -> Iterator[str]:
+    """在这段里的模型调用算在伪账号头上（标题机翻 *xlate）：后台线程里也有上限，不记在任何学生头上。"""
+    token = _WHO.set(who)
+    try:
+        yield who
+    finally:
+        _WHO.reset(token)
+
+
+def current() -> str | None:
+    return _WHO.get()

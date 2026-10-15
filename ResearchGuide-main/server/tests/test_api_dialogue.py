@@ -88,19 +88,25 @@ def test_dialogue_history_is_portrait_scoped(client):
 
 
 def test_dialogue_action_flow(client):
+    import store
+    import dialogue
     uid = login(client)
     client.post("/api/directions/choose", json={"uid": uid, "code": "ai"})
 
     r = client.post("/api/dialogue/turn", json={"uid": uid, "message": "开始吧"}).json()
-    aid = (r.get("next_action") or {}).get("action_id")
-    assert aid, "已有方向时降级路径应给出下一步"
+    assert r.get("next_action") is None, "降级路径本轮不派任务"
 
-    assert client.post("/api/dialogue/action",
-                       json={"uid": uid, "action_id": aid, "event": "accept"}
-                       ).json()["action"]["status"] == "accepted"
-    assert client.post("/api/dialogue/action",
-                       json={"uid": uid, "action_id": aid, "event": "complete"}
-                       ).json()["action"]["status"] == "completed"
+    old = store.save_action(uid, conversation_id="c1", action="micro_task",
+                            title="老微任务", direction="ai")
+    acc = dialogue.action_event(uid, old["id"], "accept")
+    assert acc["status"] == "accepted"
+    assert acc.get("task_id")
+
+    explore = store.save_action(uid, conversation_id="c1", action="explore_direction",
+                                title="去看方向")
+    ev = dialogue.action_event(uid, explore["id"], "accept")
+    assert ev["status"] == "accepted"
+    assert not ev.get("task_id")
 
 
 def test_dialogue_action_rejects_bad_input(client):

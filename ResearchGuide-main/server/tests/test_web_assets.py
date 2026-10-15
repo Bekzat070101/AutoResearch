@@ -316,11 +316,17 @@ def test_new_class_names_all_have_rules():
                 "paper-table", "sec-jump", "pos-lead", "map-card", "pos-tab",
                 "login-tabs", "login-tab", "login-body",
                 "nav-soon", "tex", "paper-front",
-                "enter-bar", "enter-card", "mem-sum-row",
-                "today-papers", "triage-hit", "today-next",
+                "enter-bar", "enter-card",
+                "rank-row", "rank-why", "rank-acts", "my-dirs", "dir-menu",
+                "today-papers", "triage-hit", "today-next", "triage-zh", "triage-kw",
                 "tutor-panel", "tutor-head", "tutor-voice", "tutor-prog",
                 "tutor-notice", "tutor-q", "tutor-hint", "tutor-acts",
-                "tutor-hit", "tutor-alt", "tutor-miss", "tutor-launch", "tutor-minor"):
+                "tutor-hit", "tutor-alt", "tutor-miss", "tutor-launch", "tutor-minor",
+                "bench-modes", "tutor-answer", "tutor-verdict", "tutor-pending",
+                "tutor-ok", "tutor-bad",
+                "read-grid", "read-side", "read-pane", "read-pane-head", "read-pane-body",
+                "kp-zh", "kp-kw", "kp-lib", "read-search",
+                "paper-zh", "paper-kw", "card-head", "nav-toggle", "nav-expand"):
         # 用 (?![\w-]) 而不是 \b：类名里允许 `-`，所以 `\b` 会把
         # `.chat-next-nonexistent` 也当成 `.chat-next` 存在——那样把规则改名
         # 测试照样绿。（这个弱点是我回滚验证时发现的。）
@@ -383,3 +389,17 @@ def test_projects_view_is_placeholder():
 def test_nav_soon_rule_exists():
     css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
     assert re.search(r"\.nav-soon(?![\w-])", css)
+
+
+def test_position_view_is_placeholder():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "function renderPositionSoon" in js
+    block = re.search(r"switch \(S\.view\) \{(.*?)default:", js, re.S)
+    assert block, "找不到 render() 的 switch"
+    assert "renderPositionSoon()" in block.group(1)
+    assert re.search(r'case "position":\s*renderPositionSoon\(\)', block.group(1))
+    assert "阅读顺序" not in js
+    assert "定位微调" not in js
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    pos = re.search(r'data-view="position".*?</button>', html, re.S)
+    assert pos and "待开发" in pos.group(0)

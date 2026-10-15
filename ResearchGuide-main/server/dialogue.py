@@ -37,7 +37,7 @@ RECENT_TURNS = 12          # 进环境包的最近消息条数
 RECALL_HARD_CAP = 40
 
 VALID_MOVES = ("answer", "clarify", "propose_action", "execute_action", "correct", "acknowledge_stop")
-VALID_NEXT_ACTIONS = ("micro_task", "explore_direction", "review_progress", "course_action")
+VALID_NEXT_ACTIONS = ("explore_direction",)
 
 
 # ---------- §4 环境包 ----------
@@ -54,6 +54,9 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
     direction_fact = next((f for f in facts if f.key.startswith("direction:")), None)
     pending = store.pending_action(uid)
     ctx = projects_context(uid)
+    pid = store.active_portrait_id(uid) or "default"
+    trail = store.get_trail(uid, pid) or {}
+    trail_dir = str(trail.get("dir") or "")
     # 用户这句话里出现的院系/专业（多半是简称：「信管」「数院」），代码先把库里的
     # 原文事实查好放进环境包。这样他一句「我是信管的大二」之后，模型手上就有名单，
     # 不用等他再说「帮我查一下」，也不会去反问「你是哪个学校」。
@@ -67,7 +70,8 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
         "current_message": message,
         "recent_context": [{"role": m["role"], "text": m["text"]} for m in recent],
         "active_plan": {
-            "direction": (direction_fact.key.split(":", 1)[1] if direction_fact else ""),
+            "direction": trail_dir or (direction_fact.key.split(":", 1)[1] if direction_fact else ""),
+            "trail_dir": trail_dir,
             "direction_source": (direction_fact.key if direction_fact else ""),
             "practice_stage": ctx.get("stage"),
             "practice_stage_label": ctx.get("stage_label"),
@@ -200,8 +204,8 @@ _SYSTEM_BASE = """你是「启研」，面向北大本科一二年级学生的�
 不要问下面「本轮环境」里已经知道的事。一次只问一个最值得问的问题。
 
 【怎么问才算自然：按「提问阶梯」走，别跳级】
-「本轮环境」里有 `提问阶梯`，告诉你六层里哪些已经有数、最早的空白层是哪一层。
-顺序是：身份 → 当前实践 → 能力起点 → 经历积累 → 倾向 → 临时约束。
+「本轮环境」里有 `提问阶梯`，告诉你哪些已经有数、最早的空白层是哪一层。
+顺序是：身份 → 倾向 → 能力起点 → 当前实践。经历和约束不进阶梯。
 
 跳级就是不自然。真实反馈：用户只说了「大二」，系统却跳过「在哪个院系」直接问「上过哪些课」——
 它还没弄清他是谁，就开始问他的能力细节了。
@@ -261,14 +265,11 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 
 【这些该写，别漏】
 「默认不写」不等于「尽量不写」。下面这几类只要出现就写：
-- **临时约束**：时间、精力、阶段性的限制（「这周只有十分钟」「下周考试」）→
-  `constraint:<slug>`，**必须带 valid_until**，affects=pace。
-  这类漏了最伤：十分钟会被当成永久设定，之后每次建议都按「他很闲」来给。
 - **改口**：他推翻自己说过的（「其实我不是…」「我刚才说错了」）→
   `replace` 或 `retract`，把旧的撤掉。只删不写会留下两条互相矛盾的记忆。
 - **身份**：年级、院系、专业 → `grade`（写成 {stage, year}）/ `department` / `major`，affects=task_difficulty。
   他自报的是简称（「信管」「数院」）就按环境包里库内认出的规范名称写（`department`=信息管理系）。
-  `school` **只有在他说出北大以外的学校时才写**（默认北大，不用记也不用问）。
+  不要问学校、入学年份、性别、年龄、所在地。
 - **当前实践**：在上的课、在做的项目、卡在哪 → `current:<slug>`。
   这是他此刻最真实的处境，affects=task_kind。
 - **明确的兴趣或目标**：→ `goal:<slug>` / `interest:<slug>` / `direction:<slug>`，
@@ -289,29 +290,18 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 只写**会改变以后怎么判断他**的东西。一轮里一条都不写是完全正常的。
 - tool_intent：需要看外部信息时才填。不需要就填 null。
   填了工具就必须把 dialogue.reply 留成 null——你要等工具结果回来再写回复。
-- next_action：**这是一个很重的字段，默认应该是 null。** 只有在你能说清
-  「这件事为什么是给这个人的」时才填。
+- next_action：**默认 null。本轮不派任务。** 只有在他需要去定方向时才填
+  `explore_direction`，让他看右边的方向排序或方向树，不要派微任务。
 
   【个性化闸门 —— 填之前必须过】
-  1. 把这句话里的用户信息全部划掉，换成任何一个北大大二学生，它还照样成立吗？
-     如果成立，它就不是任务，是套话。「关掉教程重写一段你抄过的代码」
-     「多读文献」「打好数学基础」——这些对谁都成立，**一律不要填**。
+  1. 不要给 micro_task / review_progress / course_action。那些不再出。
   2. 你必须能说出它依据了「我记住的」里的哪些事实，并把它们的 id 放进 `based_on`。
      **填不出 based_on 就不许填 next_action**（代码会直接丢掉它）。
-  3. 用户还没被了解够的时候（只知道年级、只知道一句自述），你没有依据可用，
-     正确答案就是 next_action = null，这一轮只问、只讲。
+  3. 用户还没被了解够的时候，正确答案就是 next_action = null，这一轮只问、只讲。
 
   【什么时候才真的该给】
-  - 他明确要一个动作，而且你手上**至少有一条跟他有关的事实**（他说过的基础、目标、
-    专业、卡点）→ 就该给，并把那条事实放进 based_on。
-    「他问了我却什么都不给」也是一种失败——他要的是落点，不是又一轮提问。
-  - 你已经知道他的方向 / 学过什么 / 卡在哪，能指到一件**只有他会做**的事。
-  - 他刚做完上一步，你有依据给下一步。
-
-  【关于「方向还没定」】
-  方向没定**不等于**不能给任务。只要那条任务锚在他已知的事实上就成立，
-  例如他说过「Python 只会照着教程抄」——「把那门课最短的一段代码关掉教程重写一遍」
-  就是有依据的，哪怕方向还没选。不要因为方向空着就一直换个说法问同一个问题。
+  - 方向还没定、他需要去看排序或方向树 → explore_direction。
+  - 其它时候 next_action = null。对话不再布置微任务。
 
   【最多问两轮】
   同一个问题（或换个说法问同一件事）**最多连续两轮**。第三轮必须换策略：
@@ -338,8 +328,7 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
   `offered_actions` 是给用户省力的：当他在两个选项之间犹豫、或者连续没回答你的开放问题时，
   给 2–3 个可点的短句（每个 ≤20 字）比再问一遍有效。它和 next_action 不冲突，可以同时给。
 
-  action 取值：micro_task（做一件小事）｜explore_direction（先定方向）｜
-  review_progress（回顾进展）｜course_action（去上一门课）。
+  action 取值：只许 explore_direction（去看右边的方向排序或方向树）。不派任务。
   `based_on` 是事实 id 数组，例如 ["f_ab12","f_cd34"]，最多 3 个。
   **move 和 next_action 是两件独立的事**：move=clarify 表示「我这轮在问一个问题」，
   不代表「这轮必须给落点」——恰恰相反，还在问的时候通常就不该给。
@@ -428,7 +417,7 @@ def _proposal_system() -> str:
   "next_action": null
 }}
 next_action 非 null 时形如：
-  {{"action": "micro_task", "title": "给用户看的一句话", "direction": "ai",
+  {{"action": "explore_direction", "title": "给用户看的一句话", "direction": "ai",
     "node_id": null, "payload": {{}}, "based_on": ["f_ab12cd34"]}}
 tool_intent 非 null 时形如：
   {{"tool": "major_lookup", "args": {{"query": "信管"}}}}
@@ -551,7 +540,7 @@ def _reply_with_tools(env: dict[str, Any], tool_results: list[dict[str, Any]],
         f"【你的判断】{json.dumps(proposal.get('dialogue', {}), ensure_ascii=False)}\n\n"
         f"【工具结果】\n{json.dumps(tool_results, ensure_ascii=False, indent=2)}\n\n"
         "只输出 JSON：{\"reply\": \"给用户的回复\", \"next_action\": null 或 "
-        "{\"action\": \"micro_task|explore_direction|review_progress|course_action\", "
+        "{\"action\": \"explore_direction\", "
         "\"title\": \"给用户看的一句话\", \"direction\": \"方向代码\", \"node_id\": null, \"payload\": {}, "
         "\"based_on\": [\"f_xxx\"]}}。"
         "next_action 默认应该是 null：只有能说清「为什么是给他的」时才填，"
@@ -671,7 +660,7 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
     """没配模型或模型不可用时的规则版。
 
     保底行为：把用户这条消息交给现有的 onboarding 规则抽取（选项命中 → 预设事实），
-    然后按「还没方向就给方向、有方向没事做就给任务」给出下一步。这样不配 key 也能跑通全链路。
+    然后按「还没方向就请他看右边排序」给出下一步。规则版不派任务。这样不配 key 也能跑通全链路。
     """
     ops: list[dict[str, Any]] = []
     plan = env.get("active_plan") or {}
@@ -714,10 +703,8 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
                                   "选好之后我按规则给你排第一件二十分钟的小事。")
         next_action = None
     elif not plan.get("pending_action") and dir_id:
-        move, reply = "propose_action", "先做一件二十分钟能收尾的小事，比继续看介绍有用。"
-        next_action = {"action": "micro_task", "title": "开始你的第一个 20 分钟微任务",
-                       "direction": plan.get("direction") or "", "node_id": None, "payload": {},
-                       "based_on": [dir_id]}
+        move, reply = "clarify", "可以看看右边按你说过的排的方向，或去今日读一篇。"
+        next_action = None
     else:
         move, reply = "clarify", "接着上次那件事说：现在卡在哪一步？"
         next_action = None
@@ -1065,19 +1052,20 @@ def _validate_next_action(uid: str, next_action: dict[str, Any] | None) -> dict[
     if directions:
         if direction not in directions:
             next_action["direction"] = sorted(directions)[0]
-    elif next_action["action"] in ("micro_task", "course_action"):
-        # 还没选方向就想派具体任务：改成先探索方向
-        next_action = {"action": "explore_direction",
-                       "title": next_action["title"], "direction": "",
-                       "node_id": None, "payload": next_action.get("payload") or {},
-                       "based_on": valid_ids}
     return next_action
 
 
 def onboard_done(uid: str) -> bool:
-    """开场聊完：phase 到 done，或已经出过行动（有模型时 phase 常常停在 background）。"""
+    """开场聊完：phase 到 done，或已有方向，或身份层与倾向层都有数。"""
     state = store.get_onboard_state(uid)
-    return state.get("phase") == "done" or bool(store.last_action(uid))
+    if state.get("phase") == "done":
+        return True
+    facts = memory.active_facts(uid)
+    if any(f.key.startswith("direction:") for f in facts):
+        return True
+    ladder = memory.ladder_state(uid)
+    known = {x["layer"]: x["known"] for x in ladder.get("layers") or []}
+    return bool(known.get("identity") and known.get("interest"))
 
 
 def _sync_onboard_state(uid: str, env: dict[str, Any]) -> None:
@@ -1114,7 +1102,10 @@ def action_event(uid: str, action_id: str, event: str) -> dict[str, Any] | None:
         return None
     # 先建任务、再记「已接受」：原来反过来，建任务出错时行动已经是「已接受」、却没有任务，
     # 刷新后只剩「去任务区完成」，任务区什么都没有（Codex 复现）。建任务是幂等的：同一张卡重复 accept 不会造出第二个。
-    task = workbench.task_from_action(uid, a) if target == "accepted" else None
+    # explore_direction 只导航，不建任务；老的 micro_task 卡仍建。
+    task = None
+    if target == "accepted" and a.get("action") != "explore_direction":
+        task = workbench.task_from_action(uid, a)
     store.update_action(uid, action_id, target)
     store.add_event(uid, f"action_{target}", source_id=action_id, payload={"action": a["action"]})
 

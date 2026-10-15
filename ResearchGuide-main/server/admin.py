@@ -145,6 +145,29 @@ def restore(request: Request, object: str = "", req: RestoreReq | None = None):
     return {"ok": True, "object": name}
 
 
+@router.post("/api/admin/papers/warm")
+def papers_warm(request: Request, budget: int = 240):
+    _admin(request)
+    import reading
+    t0 = time.time()
+    done, failed = 0, 0
+    targets = reading.warm_targets()
+    for aid, pinned, hint in targets:
+        if time.time() - t0 > budget:
+            break
+        try:
+            reading.arxiv.fulltext(aid, hint=hint or None)
+            if pinned:
+                row = store.get_paper_text(aid)
+                if row:
+                    store.put_paper_text(aid, row, pinned=True)
+            done += 1
+        except Exception:
+            failed += 1
+    remaining = max(0, len(targets) - done - failed)
+    return {"done": done, "failed": failed, "remaining": remaining}
+
+
 @router.get("/api/admin/stats")
 def stats(request: Request):
     _admin(request)
@@ -152,6 +175,14 @@ def stats(request: Request):
     wal = Path(str(db) + "-wal")
     papers = Path(__file__).resolve().parent / "data" / "papers"
     cache_files = list(papers.glob("*")) if papers.exists() else []
+    try:
+        with store._conn() as c:
+            cache_n = c.execute("SELECT COUNT(*) FROM paper_text").fetchone()[0]
+            cache_b = c.execute("SELECT COALESCE(SUM(bytes),0) FROM paper_text").fetchone()[0]
+            user_n = c.execute("SELECT COUNT(*) FROM user_papers").fetchone()[0]
+        cache_files_n, cache_bytes = cache_n, cache_b
+    except Exception:
+        cache_files_n, cache_bytes, user_n = len(cache_files), sum(f.stat().st_size for f in cache_files if f.is_file()), 0
     with store._conn() as c:
         users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         sessions = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
@@ -162,13 +193,18 @@ def stats(request: Request):
         usage = []
         try:
             usage = [dict(r) for r in c.execute(
-                "SELECT uid, SUM(n) n FROM llm_usage WHERE day=date('now','+8 hours') GROUP BY uid ORDER BY n DESC LIMIT 10")]
+                "SELECT user_id, SUM(calls) calls FROM llm_usage WHERE day=date('now','+8 hours') "
+                "AND user_id NOT LIKE '*%' GROUP BY user_id ORDER BY calls DESC LIMIT 10")]
         except sqlite3.OperationalError:
             usage = []
-        star, guest = 0, 0
+        star, guest, xlate = 0, 0, 0
         try:
-            star = c.execute("SELECT COALESCE(SUM(n),0) FROM llm_usage WHERE day=date('now','+8 hours') AND uid!='*guest'").fetchone()[0]
-            guest = c.execute("SELECT COALESCE(SUM(n),0) FROM llm_usage WHERE day=date('now','+8 hours') AND uid='*guest'").fetchone()[0]
+            star = c.execute(
+                "SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE day=date('now','+8 hours') AND user_id='*'").fetchone()[0]
+            guest = c.execute(
+                "SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE day=date('now','+8 hours') AND user_id='*guest'").fetchone()[0]
+            xlate = c.execute(
+                "SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE day=date('now','+8 hours') AND user_id='*xlate'").fetchone()[0]
         except sqlite3.OperationalError:
             pass
     tmp = Path("/tmp")
@@ -186,8 +222,8 @@ def stats(request: Request):
         "users": users, "sessions": sessions, "expired_sessions": expired,
         "user_secrets": secrets_n, "db_bytes": db.stat().st_size if db.exists() else 0,
         "wal_bytes": wal.stat().st_size if wal.exists() else 0, "freelist_count": freelist,
-        "arxiv_files": len(cache_files), "arxiv_bytes": sum(f.stat().st_size for f in cache_files if f.is_file()),
-        "tmp_free": tmp_free, "today_star": star, "today_guest": guest, "top_uids": usage,
+        "arxiv_files": cache_files_n, "arxiv_bytes": cache_bytes, "user_papers": user_n,
+        "tmp_free": tmp_free, "today_star": star, "today_guest": guest, "xlate_today": xlate, "top_uids": usage,
         "build": build, "ephemeral": store.ephemeral(),
         "pools": {"threads": int(os.environ.get("QIYAN_THREADS") or 128)},
     }

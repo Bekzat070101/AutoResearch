@@ -195,31 +195,101 @@
     },
     "psy": {
       "name": "心理学",
-      "zh": ["心理", "认知"],
+      "zh": ["心理学", "认知心理"],
       "slugs": ["psy", "cognitive"],
       "en": ["cognitive psychology"],
-      "categories": ["q-bio.NC"]
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7427c6983001430b6c8c"]
     },
     "psy-cns": {
       "name": "认知神经",
       "zh": ["认知神经"],
       "slugs": ["cns"],
-      "en": ["cognitive neuroscience", "fMRI", "EEG"],
-      "categories": ["q-bio.NC"]
+      "en": ["cognitive neuroscience"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7425c6983001430b6c23"]
     },
-    "psy-soc": {"name": "社会心理", "zh": ["社会心理"], "slugs": ["socpsy"], "en": ["social psychology"], "categories": ["q-bio.NC"]},
-    "psy-exp": {"name": "实验心理", "zh": ["实验心理"], "slugs": ["exppsy"], "en": ["experimental psychology"], "categories": ["q-bio.NC"]},
-    "psy-dev": {"name": "发展心理", "zh": ["发展心理"], "slugs": ["devpsy"], "en": ["developmental psychology"], "categories": ["q-bio.NC"]},
-    "psy-clin": {"name": "临床心理", "zh": ["临床心理"], "slugs": ["clinpsy"], "en": ["clinical psychology"], "categories": ["q-bio.NC"]},
-    "psy-physio": {"name": "生理心理", "zh": ["生理心理"], "slugs": ["physiopsych"], "en": ["physiological psychology"], "categories": ["q-bio.NC"]},
-    "econ": {"name": "经济学", "zh": ["经济"], "slugs": ["econ"], "en": ["economic theory"], "categories": ["econ.TH"]},
-    "econ-macro": {"name": "宏观", "zh": ["宏观"], "slugs": ["macro"], "en": ["macroeconomics"], "categories": ["econ.GN"]},
-    "econ-quant": {"name": "数量经济", "zh": ["计量"], "slugs": ["quant"], "en": ["econometrics"], "categories": ["econ.EM"]},
-    "econ-em": {"name": "经济计量", "zh": ["计量经济"], "slugs": ["em"], "en": ["econometrics", "causal inference"], "categories": ["econ.EM"]},
-    "econ-dev": {"name": "发展经济", "zh": ["发展经济"], "slugs": ["dev"], "en": ["development economics"], "categories": ["econ.GN"]},
-    "econ-intl": {"name": "国际经济", "zh": ["国际经济"], "slugs": ["intl"], "en": ["international trade"], "categories": ["econ.GN"]},
-    "econ-labor": {"name": "劳动经济", "zh": ["劳动经济"], "slugs": ["labor"], "en": ["labor economics"], "categories": ["econ.GN"]},
-    "econ-env": {"name": "环境经济", "zh": ["环境经济"], "slugs": ["env"], "en": ["environmental economics"], "categories": ["econ.GN"]},
+    "psy-soc": {
+      "name": "社会心理",
+      "zh": ["社会心理", "社会心理学"],
+      "slugs": ["socpsy"],
+      "en": ["social psychology"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7425c6983001430b6c34"]
+    },
+    "psy-exp": {
+      "name": "实验心理",
+      "zh": ["实验心理"],
+      "slugs": ["exppsy"],
+      "en": ["experimental psychology"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7426c6983001430b6c41"]
+    },
+    "psy-dev": {
+      "name": "发展心理",
+      "zh": ["发展心理"],
+      "slugs": ["devpsy"],
+      "en": ["developmental psychology"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7425c6983001430b6c2d"]
+    },
+    "psy-clin": {
+      "name": "临床心理",
+      "zh": ["临床心理"],
+      "slugs": ["clinpsy"],
+      "en": ["clinical psychology"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7425c6983001430b6c1f"]
+    },
+    "psy-physio": {
+      "name": "生理心理",
+      "zh": ["生理心理"],
+      "slugs": ["physiopsych"],
+      "en": ["physiological psychology"],
+      "categories": [],
+      "source": "osf",
+      "provider": "psyarxiv",
+      "subjects": ["5b4e7427c6983001430b6c77"]
+    },
+    "finance": {
+      "name": "金融学",
+      "zh": ["金融", "金融学", "资产定价"],
+      "slugs": ["finance", "q-fin"],
+      "en": [],
+      "categories": ["q-fin.GN", "q-fin.PR", "q-fin.ST", "q-fin.TR"],
+      "l1": "790"
+    },
+    "sociology": {
+      "name": "社会学",
+      "zh": ["社会学"],
+      "slugs": ["sociology", "soc"],
+      "en": [],
+      "categories": [],
+      "source": "osf",
+      "provider": "socarxiv",
+      "subjects": [],
+      "l1": "190"
+    },
+    "econ": {"name": "经济学", "zh": ["经济学"], "slugs": ["econ"], "en": [], "categories": ["econ.TH", "econ.GN", "econ.EM"]},
+    "econ-macro": {"name": "宏观", "zh": ["宏观"], "slugs": ["macro"], "en": [], "categories": ["econ.GN"]},
+    "econ-quant": {"name": "数量经济", "zh": ["计量"], "slugs": ["quant"], "en": [], "categories": ["econ.EM"]},
+    "econ-em": {"name": "经济计量", "zh": ["计量经济"], "slugs": ["em"], "en": [], "categories": ["econ.EM"]},
+    "econ-dev": {"name": "发展经济", "zh": ["发展经济"], "slugs": ["dev"], "en": [], "categories": ["econ.GN"]},
+    "econ-intl": {"name": "国际经济", "zh": ["国际经济"], "slugs": ["intl"], "en": [], "categories": ["econ.GN"]},
+    "econ-labor": {"name": "劳动经济", "zh": ["劳动经济"], "slugs": ["labor"], "en": [], "categories": ["econ.GN"]},
+    "econ-env": {"name": "环境经济", "zh": ["环境经济"], "slugs": ["env"], "en": [], "categories": ["econ.GN"]},
     "med": {"name": "基础医学", "zh": ["基础医学"], "slugs": ["med"], "en": ["molecular medicine"], "categories": ["q-bio.MN"]},
     "med-biochem": {"name": "医学生化", "zh": ["生物化学"], "slugs": ["biochem"], "en": ["biochemistry"], "categories": ["q-bio.BM"]},
     "med-anat": {"name": "人体解剖", "zh": ["解剖"], "slugs": ["anat"], "en": ["human anatomy"], "categories": ["q-bio.TO"]},
@@ -294,5 +364,5 @@
     "se": "520.40",
     "med": "310"
   },
-  "thin": ["190", "190.15", "190.15.cns", "190.20", "190.25", "190.30", "190.42", "190.50", "790", "790.15", "790.13", "790.35", "790.35.em", "790.21", "790.29", "790.45", "790.51", "310", "310.11", "310.14", "310.21", "310.34", "310.41", "310.44", "310.47", "310.27"]
+  "thin": ["310", "310.11", "310.14", "310.21", "310.34", "310.41", "310.44", "310.47", "310.27"]
 }

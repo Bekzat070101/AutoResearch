@@ -272,10 +272,8 @@ def test_coverage_lists_every_group_with_empty_slots():
     labels = [g["label"] for g in cov["groups"]]
     assert labels[0] == "身份"
     assert "已修课程" in labels and "人际交往" in labels
-    # 默认前提（学校=北京大学）算已填，不计入「他还欠哪些空」。
-    # 详见 test_dialogue_libfacts.py::test_school_slot_is_presumed_pku_not_a_hole
-    assert [s["key"] for g in cov["groups"] for s in g["slots"] if s["filled"]] == ["school"]
-    assert cov["filled"] == 1 and cov["missing"] == cov["total"] - 1 and cov["total"] > 1
+    assert [s["key"] for g in cov["groups"] for s in g["slots"] if s["filled"]] == []
+    assert cov["filled"] == 0 and cov["missing"] == cov["total"] and cov["total"] > 1
     assert all(s["why"] for g in cov["groups"] for s in g["slots"]), "每个空格都要说清填了有什么用"
 
 
@@ -289,7 +287,7 @@ def test_coverage_marks_filled_slots_with_their_value():
     ident = cov["groups"][0]
     slot = next(s for s in ident["slots"] if s["key"] == "grade")
     assert slot["filled"] is True and slot["value"] == "大二"
-    assert cov["filled"] == 2, "他自己说的一条 + 学校的默认前提"
+    assert cov["filled"] == 1, "他自己说的一条"
 
 
 def test_coverage_counts_transcript_under_courses_done():

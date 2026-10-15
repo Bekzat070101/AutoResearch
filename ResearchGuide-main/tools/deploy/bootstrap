@@ -47,8 +47,9 @@ import fastapi
 import pydantic
 import uvicorn
 import cryptography  # 公众号安全模式要它：缺了现在就报错，别等到第一个学生登录才发现
+import pypdf
 
-print("deps ok", fastapi.__version__, pydantic.__version__, flush=True)
+print("deps ok", fastapi.__version__, pydantic.__version__, pypdf.__version__, flush=True)
 PY
 export PYTHONPATH="/tmp/pydeps:${PWD}/server:${PYTHONPATH:-}"
 exec python3 -m uvicorn server.main:app --host 0.0.0.0 --port 9000 --log-level info

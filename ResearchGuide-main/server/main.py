@@ -10,12 +10,16 @@ import asyncio
 import atexit
 import contextvars
 import functools
+import hashlib
 import hmac
 import json
 import math
 import os
 import sqlite3
 import sys
+import threading
+import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,7 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import admin
 import auth
@@ -39,6 +43,7 @@ import llm
 import mcp_curriculum
 import memory
 import onboarding
+import pdf as pdf_mod
 import planner
 import positioning
 import projects
@@ -281,9 +286,10 @@ class TutorTurnReq(BaseModel):
     uid: str
     kit: str
     qid: str
-    answer: str = ""
+    answer: str = Field("", max_length=2000)
     skip: bool = False
     rev: int = 0
+    regrade: bool = False
 
 
 class TutorFinishReq(BaseModel):
@@ -750,6 +756,13 @@ def directions_recommend(uid: str):
     return {"cards": planner.direction_cards(uid, with_courses=False, voice=False)}
 
 
+@app.get("/api/directions/ranking")
+def directions_ranking(uid: str):
+    """按树节点排方向。规则，不调模型。"""
+    _user_or_404(uid)
+    return {"items": planner.direction_ranking(uid)}
+
+
 @app.post("/api/directions/cards")
 @_model_work
 def direction_cards(req: NBAReq):
@@ -829,7 +842,8 @@ class DraftReq(BaseModel):
 
 
 class PrefsReq(BaseModel):
-    kit_id: str = ""
+    kit_id: str | None = None
+    directions: list[str] | None = None
 
 
 class TrailReq(BaseModel):
@@ -856,14 +870,39 @@ def task_draft_put(tid: str, req: DraftReq, request: Request):
     return {"text": store.set_draft(uid, tid, req.text)}
 
 
+def _prefs_out(raw: dict) -> dict:
+    out = dict(raw or {})
+    out.setdefault("kit_id", "")
+    dirs = out.get("directions")
+    out["directions"] = dirs if isinstance(dirs, list) else []
+    return out
+
+
 @app.get("/api/me/prefs")
 def prefs_get(request: Request):
-    return store.get_prefs(auth.me(request))
+    return _prefs_out(store.get_prefs(auth.me(request)))
 
 
 @app.put("/api/me/prefs")
 def prefs_put(req: PrefsReq, request: Request):
-    return store.set_prefs(auth.me(request), kit_id=req.kit_id)
+    extra = None
+    if req.directions is not None:
+        import interests
+        nodes = set(interests.table()["nodes"])
+        seen: list[str] = []
+        for n in req.directions:
+            nid = str(n or "").strip()
+            if nid in nodes and nid not in seen:
+                seen.append(nid)
+            if len(seen) >= 8:
+                break
+        extra = {"directions": seen}
+    if req.kit_id:
+        try:
+            reading.kit(req.kit_id)
+        except reading.ReadingError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return _prefs_out(store.set_prefs(auth.me(request), kit_id=req.kit_id, extra=extra))
 
 
 @app.get("/api/projects/{pid}/trail")
@@ -1245,7 +1284,7 @@ def _reading(fn, *args):
     except (reading.ReadingError, positioning.PositionError) as exc:
         raise HTTPException(400, str(exc)) from exc
     except reading.arxiv.ArxivError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(400 if getattr(exc, "status", 0) == 400 else 502, str(exc)) from exc
 
 
 # 共享的活按种类分开线程池：arXiv 要排限速锁（每次至少隔 3 秒），几篇不同的论文就能把线程全占在等锁上；
@@ -1259,8 +1298,9 @@ _FLIGHTS = {
     "index": AsyncFlight(workpool.BoundedPool(2, 16, "index"), max_pending=16),
     "courses": AsyncFlight(workpool.BoundedPool(4, 32, "courses"), max_pending=32),
     "daily": AsyncFlight(workpool.BoundedPool(1, 16, "daily"), max_pending=16),  # 每日取数单独一个小池，不挤占论文全文的名额
+    "xlate": AsyncFlight(workpool.BoundedPool(1, 8, "xlate"), max_pending=8),  # 标题机翻：后台补译，1 线程
 }
-_FLIGHT_OF = {"paper": "arxiv", "daily": "daily", "index": "index", "courses": "courses"}
+_FLIGHT_OF = {"paper": "arxiv", "daily": "daily", "index": "index", "courses": "courses", "xlate": "xlate", "search": "daily"}
 
 
 async def _shared(key: tuple, fn, *args):
@@ -1338,6 +1378,26 @@ def _daily_payload(uid: str, kit: str, source: tuple[list, str]) -> dict:
     return {**d, "tweak": _reading(positioning.daily_tweak, uid, prefs_kit, today)}
 
 
+_TOPIC_GUARD = threading.Lock()
+_TOPIC_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _topic_fetch(tid: str):
+    hit, miss = _DAILY_MISS.lookup(tid)
+    if hit:
+        return miss
+    with _TOPIC_GUARD:
+        lock = _TOPIC_LOCKS.setdefault(tid, threading.Lock())
+    with lock:
+        hit, miss = _DAILY_MISS.lookup(tid)
+        if hit:
+            return miss
+        got = reading.topic_source(tid, cached_only=False)
+        if got is None or got[1]:
+            _DAILY_MISS.set(tid, got if got is not None else ([], "取不到", False))
+        return got
+
+
 def _interest_daily(uid: str) -> dict:
     import interests
     ids, _ = interests.user_topics(uid)
@@ -1346,15 +1406,28 @@ def _interest_daily(uid: str) -> dict:
     for tid in ids:
         got = reading.topic_source(tid, cached_only=True)
         if got is None and not fetched:
-            got = reading.topic_source(tid, cached_only=False)
+            got = _topic_fetch(tid)
             fetched = True
         if got is not None:
             sources[tid] = got
     d = reading.daily_for_user(uid, sources)
     prefs_kit = store.get_prefs(uid).get("kit_id") or ""
     if prefs_kit:
-        today = [r for r in d["recent_keeps"] if r["created_at"][:10] == reading.now_iso()[:10]]
-        d = {**d, "tweak": _reading(positioning.daily_tweak, uid, prefs_kit, today)}
+        try:
+            k = reading.kit(prefs_kit)
+        except reading.ReadingError:
+            k = None
+        node = interests.direction_node(uid)
+        code = (interests.table().get("legacy") or {})
+        want = None
+        if node:
+            want = next((c for c, n in code.items() if n == node or node.startswith(str(n))), None)
+        if k and (not want or k.get("direction") == want or k.get("direction") == node):
+            try:
+                today = [r for r in d["recent_keeps"] if r["created_at"][:10] == reading.now_iso()[:10]]
+                d = {**d, "tweak": positioning.daily_tweak(uid, prefs_kit, today)}
+            except Exception:
+                pass
     return d
 
 
@@ -1376,12 +1449,90 @@ async def daily_triage(req: TriageReq):
     return await run_in_threadpool(_reading, reading.triage, req.uid, req.kit, req.arxiv_id, req.verdict, req.why, req.title, source)
 
 
+_PDF_POOL = workpool.BoundedPool(1, 4, "pdf")
+
+
+@app.get("/api/papers/search")
+async def papers_search(q: str, uid: str):
+    await run_in_threadpool(_user_or_404, uid)
+    if not auth._allow(f"search:{uid}", 30):
+        raise HTTPException(429, "搜索太勤，过一会儿再试")
+    key = tuple((q or "").lower().split())
+    got = await _shared(("search", key), reading.arxiv.search, q, 20)
+    lib = store.paper_lib([p.get("id") for p in got or []])
+    items = []
+    for p in got or []:
+        items.append({
+            **p, "card_kit": reading.card_kit_for(p), "lib": lib.get(p.get("id") or ""),
+            "in_kit": any(reading.kit_paper(k, p.get("id") or "") for k in reading.kits().values()),
+        })
+    return {"items": items}
+
+
+@app.get("/api/papers/mine")
+def papers_mine(uid: str):
+    _user_or_404(uid)
+    return {"items": store.list_user_papers(uid)}
+
+
+@app.post("/api/papers/upload")
+async def papers_upload(uid: str, request: Request):
+    await run_in_threadpool(_user_or_404, uid)
+    if not auth._allow(f"pdf:{uid}", 10):
+        raise HTTPException(429, "导入太勤，过一会儿再试")
+    data = await _read_capped(request, 10 << 20, "PDF 超过 10 MB")
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(400, "不是 PDF")
+    raw_name = request.headers.get("X-Filename") or "upload.pdf"
+    filename = urllib.parse.unquote(raw_name)[:200]
+    deadline = time.time() + 30
+    try:
+        fut = _PDF_POOL.submit(pdf_mod.extract_pdf, data, deadline)
+        extracted = await asyncio.wait_for(asyncio.wrap_future(fut), 30)
+    except workpool.PoolFull:
+        raise HTTPException(503, "现在解析的人太多，过一会儿再试")
+    except asyncio.TimeoutError:
+        raise HTTPException(400, "解析超过 30 秒")
+    except pdf_mod.PdfError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    text = extracted["text"]
+    pid = "local:" + hashlib.sha256((uid + text).encode("utf-8")).hexdigest()[:12]
+    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    title = extracted.get("title") or filename
+    store.put_user_paper(uid, pid, sha, title, filename, text, extracted["pages"])
+    return {"pid": pid, "title": title, "pages": extracted["pages"], "created_at": now_iso()}
+
+
+@app.delete("/api/papers/{arxiv_id}")
+def papers_delete(arxiv_id: str, uid: str):
+    _user_or_404(uid)
+    if not reading.arxiv.is_local(arxiv_id):
+        raise HTTPException(400, "只能删自己导入的 PDF")
+    if not store.get_user_paper(uid, arxiv_id):
+        raise HTTPException(404, "没有这篇")
+    store.delete_user_paper(uid, arxiv_id)
+    return {"ok": True}
+
+
 @app.get("/api/papers/{arxiv_id}")
-async def paper_text(arxiv_id: str):
+async def paper_text(arxiv_id: str, request: Request):
     """论文正文（arXiv HTML 版，取不到则只有摘要）。只读、缓存。"""
+    if reading.arxiv.is_local(arxiv_id):
+        uid = auth.me(request)
+        paper = store.get_user_paper(uid, arxiv_id)
+        if not paper:
+            raise HTTPException(404, "没有这篇")
+        text = paper.get("text") or ""
+        return {**paper, "lib_at": "user", "tables": [],
+                "sections": [{"name": n, "label": n if n.startswith("第") else reading.arxiv.section_cn(n), "at": at}
+                             for n, at in reading.arxiv.sections(text, strict=True)]}
     aid = _reading(reading.arxiv.clean_id, arxiv_id)
-    got = await run_in_threadpool(_reading, _paper_cached, aid)  # 缓存命中不进 arXiv 线程池排队
-    return got if got is not None else await _shared(("paper", aid), _paper_payload, aid)
+    got = await run_in_threadpool(_reading, _paper_cached, aid)
+    if got is None:
+        got = await _shared(("paper", aid), _paper_payload, aid)
+    zh = store.get_paper_zh(aid)
+    return {**got, "lib_at": "db" if store.get_paper_text(aid) else "",
+            "title_zh": (zh or {}).get("title_zh") or "", "keywords": (zh or {}).get("keywords") or []}
 
 
 @app.get("/api/cards")
@@ -1409,37 +1560,61 @@ def _tutor_call(fn, *args):
     except tutor.TutorError as exc:
         raise HTTPException(400, str(exc)) from exc
     except reading.arxiv.ArxivError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(400 if getattr(exc, "status", 0) == 400 else 502, str(exc)) from exc
+
+
+def _paper_ref(uid: str, raw: str) -> str:
+    if reading.arxiv.is_local(raw):
+        if not store.get_user_paper(uid, raw):
+            raise tutor.TutorError("没有这篇")
+        return raw
+    return reading.arxiv.clean_id(raw)
 
 
 @app.get("/api/tutor/{arxiv_id}")
 def tutor_get(arxiv_id: str, uid: str, kit: str):
     _user_or_404(uid)
-    return {"session": _tutor_call(tutor.get, uid, kit, reading.arxiv.clean_id(arxiv_id))}
+
+    def _do() -> dict:
+        aid = _paper_ref(uid, arxiv_id)
+        sess = tutor.get(uid, kit, aid)
+        in_kit = False
+        try:
+            in_kit = bool(reading.kit_paper(reading.kit(kit), aid))
+        except Exception:
+            in_kit = False
+        return {"session": sess, "can_grade": llm.ready(uid), "in_kit": in_kit}
+
+    return _tutor_call(_do)
 
 
 @app.post("/api/tutor/{arxiv_id}/start", dependencies=SERIAL)
 async def tutor_start(arxiv_id: str, req: TutorStartReq):
-    aid = _reading(reading.arxiv.clean_id, arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
-    if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
-        await _shared(("paper", aid), _paper_payload, aid)
-    await _shared(("index", aid), _paper_index, aid)
+    aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
+    if not reading.arxiv.is_local(aid):
+        if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+            await _shared(("paper", aid), _paper_payload, aid)
+        await _shared(("index", aid), _paper_index, aid)
     return await _in_model_pool(_tutor_call, tutor.start, req.uid, req.kit, aid, req.restart)  # 出题要等模型：进模型池，不占公用线程
 
 
 @app.post("/api/tutor/{arxiv_id}/turn", dependencies=SERIAL)
 async def tutor_turn(arxiv_id: str, req: TutorTurnReq):
-    aid = _reading(reading.arxiv.clean_id, arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
+    aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
+    if not reading.arxiv.is_local(aid):
+        if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+            await _shared(("paper", aid), _paper_payload, aid)
+        await _shared(("index", aid), _paper_index, aid)
     return await _in_model_pool(
-        _tutor_call, tutor.turn, req.uid, req.kit, aid, req.qid, req.answer, req.skip, req.rev)  # 跨站时要出题
+        _tutor_call, tutor.turn, req.uid, req.kit, aid, req.qid, req.answer, req.skip, req.rev, req.regrade)  # 判卷、跨站出题都要等模型
 
 
 @app.post("/api/tutor/{arxiv_id}/finish", dependencies=SERIAL)
 async def tutor_finish(arxiv_id: str, req: TutorFinishReq):
-    aid = _reading(reading.arxiv.clean_id, arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
+    aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
     return await run_in_threadpool(_tutor_call, tutor.finish, req.uid, req.kit, aid)
 
 

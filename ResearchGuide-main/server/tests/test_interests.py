@@ -39,6 +39,9 @@ def test_arxiv_topics_cover_every_tree_node():
     kw = re.compile(r"^[A-Za-z0-9 .\-]+$")
     white = set(table.get("word_whitelist") or [])
     for spec in table["topics"].values():
+        if spec.get("source") == "osf":
+            assert len(spec.get("categories") or []) <= 4
+            continue
         assert len(spec["categories"]) <= 4
         assert len(spec["en"]) <= 6
         for c in spec["categories"]:

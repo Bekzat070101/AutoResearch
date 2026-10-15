@@ -318,14 +318,15 @@ def test_ladder_reports_earliest_gap():
     accepted, _ = memory.validate_ops(uid, ops(op("add", "grade", "大二", "我大二")), POOL)
     memory.apply_ops(uid, accepted, "")
     st = memory.ladder_state(uid)
-    assert st["next_layer"] == "practice", "身份有数了就该问当前实践"
+    assert st["next_layer"] == "interest", "身份有数了就该问倾向"
     assert next(L for L in st["layers"] if L["layer"] == "identity")["known"] is True
 
 
 def test_ladder_counts_every_layer():
     uid = make_user()
     st = memory.ladder_state(uid)
-    assert [L["layer"] for L in st["layers"]] == [n for n, _ in memory.LAYERS]
+    assert [L["layer"] for L in st["layers"]] == [
+        n for n, _ in memory.LAYERS if memory.LADDER_PROBE.get(n)]
 
 
 def test_a_fat_layer_cannot_crowd_out_a_thin_one():
@@ -441,8 +442,8 @@ def test_unsolicited_fields_still_render_in_the_panel():
     uid = make_user()
     acc, _ = memory.validate_ops(uid, ops(op("add", "gender", "女", "我是女生")), ["我是女生"])
     memory.apply_ops(uid, acc, "")
-    ident = next(L for L in memory.board(uid)["layers"] if L["layer"] == "identity")
-    assert [f["key"] for f in ident["facts"]] == ["gender"]
+    other = next(L for L in memory.board(uid)["layers"] if L["layer"] == "other")
+    assert [f["key"] for f in other["facts"]] == ["gender"]
 
 
 def test_slug_allows_hyphen_and_dot():

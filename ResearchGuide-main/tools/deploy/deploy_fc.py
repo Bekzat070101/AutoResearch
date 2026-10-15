@@ -189,6 +189,37 @@ def main(argv: list[str] | None = None) -> None:
             write_state({"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": url, "ACCOUNT_TAIL": aid[-4:]})
         else:
             write_state({"FC_TEST_FUNCTION": name, "TEST_URL": url})
+        warm_after_deploy(url, env_vars)
+
+
+def warm_after_deploy(url: str, env_vars: dict | None, post=None) -> dict:
+    """发版后预热工具包正文。失败只打印，不阻断发版。"""
+    token = (env_vars or {}).get("ADMIN_TOKEN") or ""
+    if not token:
+        print("请手动预热")
+        return {"skipped": True}
+    import urllib.request
+    remaining = 1
+    for _ in range(5):
+        try:
+            if post:
+                body = post(url, token)
+            else:
+                req = urllib.request.Request(
+                    f"{str(url).rstrip('/')}/api/admin/papers/warm?budget=240",
+                    method="POST",
+                    headers={"X-Admin-Token": token},
+                )
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    body = json.loads(resp.read().decode() or "{}")
+            print("WARM", body)
+            remaining = int((body or {}).get("remaining", 1))
+            if remaining == 0:
+                break
+        except Exception as e:
+            print("WARM_FAIL", type(e).__name__, str(e)[:200])
+            break
+    return {"skipped": False, "remaining": remaining}
 
 
 if __name__ == "__main__":
