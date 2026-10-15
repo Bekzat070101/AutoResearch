@@ -84,6 +84,7 @@ def test_web_has_session_persist_and_choose_direction():
     js = (Path(__file__).resolve().parents[2] / "web" / "js" / "app.js").read_text(encoding="utf-8")
     assert "function persistSession" in js
     assert "function chooseDirection" in js
+    assert "await saveTrail" in js
     assert "function reloadInto" in js
     assert "登录已失效，请重新登录" in js
     assert 'localStorage.setItem("rg_token"' in js

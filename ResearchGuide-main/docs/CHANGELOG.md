@@ -6,6 +6,46 @@
 
 ---
 
+## [2026-10-15] [FIX] 并入 main（w81：/metrics、paper_dir 与方向论文入库、隐私渲染、带读拒标题）
+
+- 变更内容：把上游 7a8dc36 并进本分支。上游这 30 个文件是在 Windows 上以 CRLF 提交的：新增 `.gitattributes`（`* text=auto eol=lf`），用 `git merge -X renormalize` 合并，仓库内容仍全部 LF，只剩 5 处真冲突。对接本分支：`workpool.BoundedPool` 仍是本分支的有界队列实现，补 `snapshot()` 给上游 `_model_pool()` 用；health `model_pool` = 本分支模型池实值（workers/threads/running/queued/max_queued）+ 上游的 threads_borrowed/threads_max/pdf_queued/pdf_running；「我的」账号面板与登录页保留本分支（已有 openPrivacy 隐私说明、consentRow 同意勾选、导出、切回账号、设用户名密码），上游新加的 `privacyBox()` 保留但登录页不重复渲染；`applyLlmPill` 取上游（未登录隐藏，不再显示「连接模型」）；上游 `/metrics`、`record_metrics` 中间件、`paper_dir` 表与 `GET /api/papers/dir`、`paper_collect.py`、搜索库优先、研读左栏读目录、带读拒绝标题、`direction_node` 不再回落 7 码、`test_metrics_sync`/`test_paper_dir` 原样并入。界面 w82（上游 w81 与本分支 w81 内容不同，再 +1）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：.gitattributes、server/workpool.py、server/main.py、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
+## [2026-10-15] [OPS] Pages 发到 w81，生产 API 仍是 w74
+
+- 变更内容：前端同步 GitHub Pages（w81）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用）。A5 未挂盘，本轮不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：web/（gh-pages）
+- 决策来源：邬程灿（体验问题/监控计划/论文入库 2026-10-15）
+- 登记人：助手
+
+## [2026-10-15] [FEAT] 本机落地体验/监控小修与方向论文目录
+
+- 变更内容：隐私说明在登录/注册页渲染后再 consent；「记录」改为「我的」；「我的」页可导出 JSON；侧栏默认「我的 DeepSeek」，管理员入口只留登录页。`papers/{id}` 合并工具包 `title_zh`。带读拒绝把论文标题当主张原句。ranking 有条目时 recommend 不再长期空。`direction_node` 不再用 7 码假装细类。占位页不调用死代码。health.model_pool 改为线程池/PDF 池实值。`/metrics` 的 5xx 与分路 counter 同源；补 `qiyan_paper_dir_*`。uptime 多记 ephemeral 与 Pages/API 版本，仅 secrets `QIYAN_REQUIRE_PERSISTENT` 时因 ephemeral 失败。新增 `paper_dir`、`server/paper_collect.py`、`GET /api/papers/dir`、搜索库优先、研读左栏读目录。界面 w81。A5 仍待确认，本轮不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/grafana/qiyan-overview.json
+- 影响模块：server/metrics.py、server/main.py、server/workpool.py、server/planner.py、server/interests.py、server/tutor.py、server/store.py、server/reading.py、server/admin.py、server/paper_collect.py、web/js/app.js、web/index.html、web/css/styles.css、.github/workflows/uptime.yml
+- 决策来源：邬程灿（体验问题/监控计划/论文入库 2026-10-15）
+- 登记人：助手
+
+## [2026-10-15] [DOCS] 体验问题、监控计划、方向论文入库拆成三份
+
+- 变更内容：原 `docs/MONITORING_OPS.md` 拆成 `docs/PRODUCT_ISSUES.md`（产品体验问题）和 `docs/MONITORING_OPS.md`（系统监控 + 系统运维）。新增 `docs/PAPER_COLLECTION.md`：方向树 53 个节点各检索定额论文写入后端（目录 20 / 正文 8，thin 节点 8/4），研读不再只靠现场搜索。副本同步到仓库外 `运维信息/`。
+- 影响文档：docs/CHANGELOG.md、docs/PRODUCT_ISSUES.md、docs/MONITORING_OPS.md、docs/PAPER_COLLECTION.md
+- 影响模块：无代码（计划稿）
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-15] [OPS] 暴露 /metrics，写监控运维计划
+
+- 变更内容：本机 `GET /metrics` 输出 Prometheus 文本（存活、ephemeral、用户/会话、论文库、HTTP 计数与 p95）。Grafana 看板 JSON 在 `docs/grafana/qiyan-overview.json`。体验记录与指标选取后拆到 `docs/PRODUCT_ISSUES.md` 与 `docs/MONITORING_OPS.md`。生产库仍 ephemeral，不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/MONITORING_OPS.md、docs/grafana/qiyan-overview.json
+- 影响模块：server/metrics.py、server/main.py、server/auth.py
+- 决策来源：邬程灿（第 4 次小组汇报 / 课程「系统监控与运维」）
+- 登记人：助手
+
 ## [2026-10-15] [FIX] 并入 main（w75–w80：论文缓存止血、会话与方向、今日按方向、研读三栏与论文库、带读判卷）
 
 - 变更内容：把上游 372e767 并进本分支（它按 docs/tasks 的 11–14 实现了 w75–w80）。对接本分支：预算仍是 budget.py 这一份（按人按天、同意隐私才调、bind/unmetered），补上上游要的 `metered_as("*xlate")`、`current()`、`LLM_DAILY_XLATE`，`*` 开头的伪账号只查自己和全站的上限；`llm.chat/chat_json` 用本分支的扣额逻辑，加上游的 `total`/`retry`；线程池仍是本分支的 workpool（取消即出队、带上下文变量、能 drain），加 `PoolFull = Overloaded` 别名和 kwargs，上游的 pdf 池直接用它；`_FLIGHTS` 全部用 BoundedPool（新增 xlate 1 线程 8 排队）；带读 start/turn 走 `_paper_ref`（本地 PDF 不取 arXiv）但仍进模型池、挂用户锁；`_review_full` 保留；论文原文仍要登录（不按 arXiv 编号放行）；缓存写盘失败照上游打 warn 不 500。前端：会话仍用本分支那套（localStorage 三键、停着的号、换人整页重载），接上上游的 `sessionGoneMsg`（401 落登录页并提示）、`confirmLeave`/`clearChatDraft`、`logout(next)`（退出 / 换账号）、用户菜单四项、`chooseDirection`、`renderPositionSoon`、今日按方向文案、分拣不带 kit；隐私说明用上游 w80 那份（PDF、作答发给模型），版本 2026-10-15。界面 w81。

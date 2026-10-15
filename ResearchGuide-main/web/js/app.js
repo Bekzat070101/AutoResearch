@@ -137,7 +137,7 @@ const PRIVACY_HTML = `
   <h4>存在哪、存多久</h4>
   <ul>
     <li>存在团队租用的阿里云服务器上。不卖数据，不做广告。</li>
-    <li>「记录」页随时可以导出全部数据或删除账号。删除会立刻清掉库里你的所有记录，备份最多再留 7 天。</li>
+    <li>「我的」页随时可以导出全部数据或删除账号。删除会立刻清掉库里你的所有记录，备份最多再留 7 天。</li>
   </ul>`;
 
 function lostUser(err) {
@@ -1952,18 +1952,28 @@ function openConnect() {
   };
 }
 
+function privacyBox() {
+  const box = el("div", "privacy-box");
+  const body = el("div", "privacy-body");
+  body.innerHTML = PRIVACY_HTML;
+  box.appendChild(body);
+  return box;
+}
+
 function applyLlmPill(llm) {
   const pill = document.getElementById("llmPill");
-  if (!pill || !llm) return;
+  if (!pill) return;
   if (S.uid && !S.guest) {
+    pill.hidden = false;
     pill.textContent = S.hasLlmKey ? `我的模型 · ${S.llmKeyTail || "已保存"}` : "我的 DeepSeek";
     pill.classList.toggle("on", !!S.hasLlmKey);
     pill.onclick = () => openMineKey();
     return;
   }
-  pill.textContent = llm.enabled ? `模型 · ${llm.model}` : "连接模型";
-  pill.classList.toggle("on", !!llm.enabled);
-  pill.onclick = () => openConnect();
+  pill.hidden = true;
+  pill.textContent = "我的 DeepSeek";
+  pill.classList.remove("on");
+  pill.onclick = null;
 }
 
 function openMineKey() {
@@ -4235,19 +4245,30 @@ function useKit(kitId) {
 
 async function renderRead() {
   const seq = S.renderSeq;
-  if (!S.kitId) useKit(DEFAULT_KIT);
-  const kitId = S.kitId;
+  let catalog = [];
+  if (S.uid) {
+    try {
+      const d = await api("GET", `/api/papers/dir?uid=${encodeURIComponent(S.uid)}`);
+      catalog = d.items || [];
+    } catch (_) { catalog = []; }
+  }
+  if (!S.kitId && !catalog.length) useKit(DEFAULT_KIT);
+  const kitId = S.kitId || "";
   const tab = S.readTab || "kit";
-  let kit; let cards = { cards: [] };
-  try {
-    kit = await api("GET", `/api/kits/${kitId}`);
-  } catch (e) {
-    if (stale(seq)) return;
-    if (await recoverUser(e)) return;
-    $app.innerHTML = "";
-    $app.appendChild(workspaceHead("研读"));
-    $app.appendChild(el("div", "note-box", `工具包加载失败：${esc(e.message)}`));
-    return;
+  let kit = { id: kitId, papers: [], goal: "", direction: "" }; let cards = { cards: [] };
+  if (kitId) {
+    try {
+      kit = await api("GET", `/api/kits/${kitId}`);
+    } catch (e) {
+      if (stale(seq)) return;
+      if (await recoverUser(e)) return;
+      if (!catalog.length) {
+        $app.innerHTML = "";
+        $app.appendChild(workspaceHead("研读"));
+        $app.appendChild(el("div", "note-box", `工具包加载失败：${esc(e.message)}`));
+        return;
+      }
+    }
   }
   if (!S.uid) {
     if (stale(seq)) return;
@@ -4273,7 +4294,7 @@ async function renderRead() {
   const bar = el("header", "ws-head ws-head-bar");
   const leftH = el("div", "ws-bar-main");
   leftH.appendChild(el("h2", "", "研读"));
-  leftH.appendChild(el("p", "ws-lead", esc((kit.goal || "").slice(0, 42))));
+  leftH.appendChild(el("p", "ws-lead", esc((catalog.length ? "当前方向目录" : (kit.goal || "")).slice(0, 42))));
   const rightH = el("div", "ws-bar-side");
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
@@ -4311,9 +4332,11 @@ async function renderRead() {
   rightH.append(search, up, file);
   bar.append(leftH, rightH);
   $app.appendChild(bar);
-  const mismatch = kitMismatch(kit.direction, await myDirection());
-  if (stale(seq)) return;
-  if (mismatch) $app.appendChild(mismatch);
+  if (!catalog.length) {
+    const mismatch = kitMismatch(kit.direction, await myDirection());
+    if (stale(seq)) return;
+    if (mismatch) $app.appendChild(mismatch);
+  }
 
   document.body.dataset.readTab = tab;
   if (tab === "cards") { renderCardList(kit, byPaper); return; }
@@ -4325,12 +4348,22 @@ async function renderRead() {
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
   leftHead.appendChild(el("small", "", `过线 ${passed} 张`));
   const leftBody = el("div", "read-pane-body");
+  const recPapers = catalog.length ? catalog.map((p, i) => ({
+    arxiv_id: p.paper_id || p.id,
+    title: p.title,
+    title_zh: p.title_zh || "",
+    keywords: p.keywords || [],
+    order: p.rank || i + 1,
+    why: p.why || "",
+    card_kit: p.card_kit || "",
+    lib: p.lib || "",
+  })) : (kit.papers || []);
   const paintPapers = (papers, fromSearch) => {
     leftBody.innerHTML = "";
     if (fromSearch) {
       const back = el("button", "linkish", "← 回到推荐");
       back.type = "button";
-      back.onclick = () => paintPapers(kit.papers, false);
+      back.onclick = () => paintPapers(recPapers, false);
       leftBody.appendChild(back);
     }
     if (!papers.length) {
@@ -4376,16 +4409,17 @@ async function renderRead() {
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
       li.appendChild(main);
-      const go = el("button", primary ? "btn small" : "btn small secondary",
-        fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡"));
+      const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
+      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "写阅读卡" : "打开"));
+      const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
       go.type = "button";
-      go.onclick = () => { S.cardFrom = "read"; openCard(aid, fromSearch ? (p.card_kit || "") : kit.id); };
+      go.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       li.appendChild(go);
       list.appendChild(li);
     });
     leftBody.appendChild(list);
   };
-  paintPapers(kit.papers, false);
+  paintPapers(recPapers, false);
   const mineBox = el("div", "read-mine");
   try {
     const mine = await api("GET", `/api/papers/mine?uid=${S.uid}`);
@@ -5403,7 +5437,7 @@ function posLead(text) {
   return el("p", "pos-lead", esc(text));
 }
 
-async function renderPosition() {
+async function _deadRenderPosition() {
   const seq = S.renderSeq;
   if (!S.kitId) useKit(DEFAULT_KIT);
   const tab = S.posTab || "edges";
@@ -6027,7 +6061,7 @@ function projectTabs(active, mineCount) {
   return nav;
 }
 
-async function renderProjects() {
+async function _deadRenderProjects() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;

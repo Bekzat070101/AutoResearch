@@ -111,3 +111,7 @@ class BoundedPool:
         with self._cv:
             return {"workers": self.workers, "threads": self._threads, "running": self.running,
                     "queued": len(self._queue), "max_queued": self.max_queued}
+
+    def snapshot(self) -> dict[str, int]:
+        """上游 w81 的名字（main._model_pool 用）：同 stats()。"""
+        return self.stats()

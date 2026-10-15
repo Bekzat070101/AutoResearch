@@ -58,6 +58,47 @@ def kit(kit_id: str) -> dict[str, Any]:
     return k
 
 
+def kit_title_zh(aid: str) -> tuple[str, list]:
+    for k in kits().values():
+        p = kit_paper(k, aid)
+        if p and ((p.get("title_zh") or "").strip() or p.get("keywords")):
+            return (p.get("title_zh") or "").strip(), list(p.get("keywords") or [])
+    return "", []
+
+
+def search_library(q: str, limit: int = 20) -> list[dict[str, Any]]:
+    items = []
+    lib_ids = []
+    for p in store.search_paper_dir(q, limit=limit):
+        pid = p.get("id") or p.get("paper_id") or ""
+        if not pid:
+            continue
+        lib_ids.append(pid)
+        items.append({
+            **p, "id": pid, "card_kit": card_kit_for(p), "lib": "",
+            "in_kit": any(kit_paper(k, pid) for k in kits().values()),
+        })
+    lib = store.paper_lib(lib_ids)
+    for it in items:
+        it["lib"] = lib.get(it["id"] or "", "")
+        zh = store.get_paper_zh(it["id"] or "") or {}
+        if not it.get("title_zh"):
+            kit_zh, _ = kit_title_zh(it["id"] or "")
+            it["title_zh"] = (zh.get("title_zh") or "") or kit_zh
+    return items[:limit]
+
+
+def dir_as_papers(node: str) -> list[dict[str, Any]]:
+    out = []
+    for row in store.list_paper_dir(node):
+        out.append({
+            "id": row["paper_id"], "title": row["title"], "summary": row["summary"],
+            "published": row["published"], "authors": row["authors"], "url": row["url"],
+            "categories": row["categories"], "source": row["source"], "tags": [],
+        })
+    return out
+
+
 def warm_targets() -> list[tuple[str, bool, dict]]:
     want: dict[str, tuple[bool, dict]] = {}
     for k in kits().values():
@@ -65,6 +106,18 @@ def warm_targets() -> list[tuple[str, bool, dict]]:
             aid = p.get("arxiv_id")
             if aid:
                 want[aid] = (True, {"title": p.get("title") or "", "summary": ""})
+    try:
+        counts = store.paper_dir_counts()
+        thin = set((interests.table().get("thin") or []))
+        for node, _n in counts.items():
+            quota = 4 if node in thin else 8
+            for row in store.list_paper_dir(node)[:quota]:
+                pid = row["paper_id"]
+                if pid.startswith("local:"):
+                    continue
+                want.setdefault(pid, (True, {"title": row.get("title") or "", "summary": row.get("summary") or ""}))
+    except Exception:
+        pass
     with store._conn() as c:
         for table, col in (("triage", "arxiv_id"), ("cards", "arxiv_id"), ("tutor_sessions", "arxiv_id")):
             try:
@@ -213,6 +266,28 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
     stale = False
     error = ""
     buckets: dict[str, list[dict[str, Any]]] = {t: [] for t in topic_ids}
+    catalog = dir_as_papers(node) if node else []
+    if catalog:
+        for p in catalog:
+            tid = (interests.table()["nodes"].get(node) or [None])[0]
+            if not tid:
+                continue
+            spec = interests.topic(tid) or {}
+            buckets.setdefault(tid, [])
+            if p.get("id") in seen:
+                continue
+            title = p.get("title") or ""
+            abstract = p.get("summary") or ""
+            hits, score = [], 0
+            for en, zh in zip(spec.get("en") or [], (spec.get("zh") or []) + [""] * 8):
+                s = _word_score(title, en) * 2 + _word_score(abstract, en)
+                if s:
+                    hits.append({"term_zh": zh, "term_en": en})
+                    score += s
+            buckets[tid].append({
+                "paper": p, "score": score or 1, "hits": hits, "topic": tid,
+                "published": p.get("published") or "", "arxiv_id": p.get("id") or "",
+            })
     for tid in topic_ids:
         got = (sources or {}).get(tid)
         if got is None:

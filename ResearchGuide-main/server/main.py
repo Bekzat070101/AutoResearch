@@ -124,7 +124,7 @@ app.include_router(admin.router)
 async def maintenance_gate(request: Request, call_next):
     if os.environ.get("QIYAN_MAINTENANCE") == "1":
         path = request.url.path or ""
-        if path.startswith("/api/") and not path.startswith("/api/admin") and path != "/api/health":
+        if path.startswith("/api/") and not path.startswith("/api/admin") and path not in ("/api/health", "/metrics"):
             return JSONResponse({"detail": "维护中"}, status_code=503)
     return await call_next(request)
 
@@ -159,6 +159,24 @@ async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
         return JSONResponse({"detail": "这个账号已经删除了"}, status_code=410)
     print(json.dumps({"error": "integrity", "msg": str(exc)}, ensure_ascii=False))
     return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@app.middleware("http")
+async def record_metrics(request: Request, call_next):
+    import metrics as _metrics
+    t0 = time.time()
+    path = request.url.path or ""
+    watch = path.startswith("/api/") or path in ("/", "/metrics")
+    try:
+        resp = await call_next(request)
+    except Exception:
+        if watch:
+            _metrics.observe_request(path, 500, time.time() - t0)
+        raise
+    if watch:
+        code = getattr(resp, "status_code", None)
+        _metrics.observe_request(path, 0 if code is None else int(code), time.time() - t0)
+    return resp
 
 
 @app.middleware("http")
@@ -753,7 +771,10 @@ def portraits_delete(pid: str, uid: str):
 def directions_recommend(uid: str):
     """按当前画像的兴趣给方向建议，不检索课程、不等模型改写。"""
     _user_or_404(uid)
-    return {"cards": planner.direction_cards(uid, with_courses=False, voice=False)}
+    cards = planner.direction_cards(uid, with_courses=False, voice=False)
+    if not cards:
+        cards = planner.cards_from_ranking(uid)
+    return {"cards": cards}
 
 
 @app.get("/api/directions/ranking")
@@ -1452,19 +1473,59 @@ async def daily_triage(req: TriageReq):
 _PDF_POOL = workpool.BoundedPool(1, 4, "pdf")
 
 
+@app.get("/api/papers/dir")
+def papers_dir(uid: str, node: str = ""):
+    """当前方向（或指定 node）的预存目录。不打 arXiv。"""
+    _user_or_404(uid)
+    import interests
+    nid = (node or "").strip() or interests.direction_node(uid)
+    if nid and nid not in interests.table()["nodes"]:
+        raise HTTPException(400, "没有这个方向")
+    rows = store.list_paper_dir(nid) if nid else []
+    ids = [r["paper_id"] for r in rows]
+    lib = store.paper_lib(ids)
+    items = []
+    for r in rows:
+        zh = store.get_paper_zh(r["paper_id"]) or {}
+        kit_zh, kit_kw = reading.kit_title_zh(r["paper_id"])
+        kid = None
+        for k in reading.kits().values():
+            if reading.kit_paper(k, r["paper_id"]):
+                kid = k.get("id")
+                break
+        items.append({
+            **r, "id": r["paper_id"],
+            "title_zh": (zh.get("title_zh") or "") or kit_zh,
+            "keywords": zh.get("keywords") or kit_kw or [],
+            "lib": lib.get(r["paper_id"], ""),
+            "card_kit": kid or "",
+        })
+    return {"node": nid or "", "items": items}
+
+
 @app.get("/api/papers/search")
 async def papers_search(q: str, uid: str):
     await run_in_threadpool(_user_or_404, uid)
     if not auth._allow(f"search:{uid}", 30):
         raise HTTPException(429, "搜索太勤，过一会儿再试")
-    key = tuple((q or "").lower().split())
-    got = await _shared(("search", key), reading.arxiv.search, q, 20)
-    lib = store.paper_lib([p.get("id") for p in got or []])
-    items = []
+    if reading.arxiv.ZH_RE.search(q or ""):
+        raise HTTPException(400, "arXiv 只认英文关键词")
+    lib_items = await run_in_threadpool(reading.search_library, q, 20)
+    got: list = []
+    if len(lib_items) < 20:
+        key = tuple((q or "").lower().split())
+        got = await _shared(("search", key), reading.arxiv.search, q, 20)
+    seen = {it.get("id") for it in lib_items}
+    live_lib = store.paper_lib([p.get("id") for p in got or []])
+    items = list(lib_items)
     for p in got or []:
+        pid = p.get("id") or ""
+        if pid in seen:
+            continue
+        seen.add(pid)
         items.append({
-            **p, "card_kit": reading.card_kit_for(p), "lib": lib.get(p.get("id") or ""),
-            "in_kit": any(reading.kit_paper(k, p.get("id") or "") for k in reading.kits().values()),
+            **p, "card_kit": reading.card_kit_for(p), "lib": live_lib.get(pid, ""),
+            "in_kit": any(reading.kit_paper(k, pid) for k in reading.kits().values()),
         })
     return {"items": items}
 
@@ -1531,8 +1592,15 @@ async def paper_text(arxiv_id: str, request: Request):
     if got is None:
         got = await _shared(("paper", aid), _paper_payload, aid)
     zh = store.get_paper_zh(aid)
+    title_zh = (zh or {}).get("title_zh") or ""
+    keywords = (zh or {}).get("keywords") or []
+    if not title_zh:
+        kit_zh, kit_kw = reading.kit_title_zh(aid)
+        title_zh = kit_zh
+        if not keywords:
+            keywords = kit_kw
     return {**got, "lib_at": "db" if store.get_paper_text(aid) else "",
-            "title_zh": (zh or {}).get("title_zh") or "", "keywords": (zh or {}).get("keywords") or []}
+            "title_zh": title_zh, "keywords": keywords}
 
 
 @app.get("/api/cards")
@@ -1787,6 +1855,35 @@ def _wechat_secure() -> bool:
         return False
 
 
+@app.get("/metrics")
+def prometheus_metrics():
+    import metrics as _metrics
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(_metrics.render(), media_type="text/plain; version=0.0.4")
+
+
+def _model_pool() -> dict:
+    """health 里的 model_pool：本分支模型池的实值（workers/threads/running/queued/max_queued，queued 长时间接近
+    max_queued 就是模型慢了或该加 QIYAN_MODEL_THREADS），再加上游 w81 要的公用线程池借用数和 pdf 池。"""
+    out = dict(_MODEL.stats())
+    pdf = _PDF_POOL.snapshot()
+    borrowed, cap = 0, THREADS
+    try:
+        lim = anyio.to_thread.current_default_thread_limiter()
+        borrowed = int(getattr(lim, "borrowed_tokens", 0) or 0)
+        cap = int(getattr(lim, "total_tokens", THREADS) or THREADS)
+    except Exception:
+        pass
+    out.update({
+        "threads_borrowed": borrowed,
+        "threads_max": cap,
+        "pdf_queued": pdf["queued"],
+        "pdf_running": pdf["running"],
+        "pdf_max_queued": pdf["max_queued"],
+    })
+    return out
+
+
 @app.get("/api/health")
 def health():
     cfg = llm.config()
@@ -1802,7 +1899,7 @@ def health():
         "auth": auth.status(),
         "db": {"ephemeral": store.ephemeral()},  # true 就是库会随实例一起没：上线前必须是 false
         "threads": THREADS,
-        "model_pool": _MODEL.stats(),  # queued 长时间接近 max_queued：要么模型慢了，要么该加 QIYAN_MODEL_THREADS
+        "model_pool": _model_pool(),  # 模型池实值 + 公用线程借用 + pdf 池
         "checks": {
             "secret_set": bool(os.environ.get("QIYAN_SECRET")),
             "wechat_secure": _wechat_secure(),

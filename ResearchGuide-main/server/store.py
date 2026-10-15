@@ -335,6 +335,22 @@ CREATE TABLE IF NOT EXISTS paper_pool (
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (key, day)
 );
+CREATE TABLE IF NOT EXISTS paper_dir (
+  node_id TEXT NOT NULL,
+  paper_id TEXT NOT NULL,
+  topic_id TEXT NOT NULL,
+  rank INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  authors TEXT NOT NULL DEFAULT '[]',
+  published TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  categories TEXT NOT NULL DEFAULT '[]',
+  collected_at TEXT NOT NULL,
+  PRIMARY KEY (node_id, paper_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_dir_paper ON paper_dir(paper_id);
 CREATE TABLE IF NOT EXISTS tutor_sessions (
   user_id TEXT NOT NULL,
   kit_id TEXT NOT NULL,
@@ -1499,6 +1515,109 @@ def list_triage_all(uid: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _json_list(raw: str) -> list:
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def put_paper_dir(node_id: str, paper_id: str, topic_id: str, rank: int, source: str,
+                  title: str, summary: str = "", authors: list | None = None,
+                  published: str = "", url: str = "", categories: list | None = None) -> None:
+    if not node_id or not paper_id or not title:
+        return
+    now = now_iso()
+    authors_s = json.dumps(authors or [], ensure_ascii=False)
+    cats_s = json.dumps(categories or [], ensure_ascii=False)
+    last = None
+    for _ in range(4):
+        try:
+            with _LOCK, _conn() as c:
+                row = c.execute("SELECT rank FROM paper_dir WHERE node_id=? AND paper_id=?",
+                                (node_id, paper_id)).fetchone()
+                if row:
+                    keep_rank = min(int(row["rank"] or rank), int(rank))
+                    c.execute(
+                        "UPDATE paper_dir SET topic_id=?, rank=?, source=?, title=?, summary=?, authors=?, "
+                        "published=?, url=?, categories=?, collected_at=? WHERE node_id=? AND paper_id=?",
+                        (topic_id or "", keep_rank, source or "", title, summary or "", authors_s,
+                         published or "", url or "", cats_s, now, node_id, paper_id),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO paper_dir(node_id, paper_id, topic_id, rank, source, title, summary, "
+                        "authors, published, url, categories, collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (node_id, paper_id, topic_id or "", int(rank), source or "", title, summary or "",
+                         authors_s, published or "", url or "", cats_s, now),
+                    )
+            return
+        except sqlite3.OperationalError as exc:
+            last = exc
+            time.sleep(0.25)
+    if last:
+        raise last
+
+
+def list_paper_dir(node_id: str) -> list[dict[str, Any]]:
+    if not node_id:
+        return []
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_dir WHERE node_id=? ORDER BY rank ASC, paper_id ASC",
+            (node_id,)).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "node_id": r["node_id"], "paper_id": r["paper_id"], "topic_id": r["topic_id"],
+            "rank": r["rank"], "source": r["source"], "title": r["title"],
+            "summary": r["summary"] or "", "authors": _json_list(r["authors"]),
+            "published": r["published"] or "", "url": r["url"] or "",
+            "categories": _json_list(r["categories"]), "collected_at": r["collected_at"],
+        })
+    return out
+
+
+def search_paper_dir(q: str, limit: int = 20) -> list[dict[str, Any]]:
+    toks = [t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,30}", q or "") if len(t) >= 2][:6]
+    if not toks:
+        return []
+    where = " AND ".join(["(lower(title) LIKE ? OR lower(summary) LIKE ?)" for _ in toks])
+    params: list[str] = []
+    for t in toks:
+        like = f"%{t}%"
+        params.extend([like, like])
+    cap = max(1, min(int(limit), 50))
+    params.append(str(cap * 4))
+    with _conn() as c:
+        rows = c.execute(
+            f"SELECT * FROM paper_dir WHERE {where} ORDER BY rank ASC, paper_id ASC LIMIT ?",
+            params).fetchall()
+    seen, out = set(), []
+    for r in rows:
+        pid = r["paper_id"]
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append({
+            "id": pid, "paper_id": pid, "title": r["title"], "summary": r["summary"] or "",
+            "authors": _json_list(r["authors"]), "published": r["published"] or "",
+            "url": r["url"] or "", "categories": _json_list(r["categories"]),
+            "source": r["source"], "node_id": r["node_id"],
+        })
+    return out
+
+
+def paper_dir_counts() -> dict[str, int]:
+    with _conn() as c:
+        try:
+            rows = c.execute("SELECT node_id, COUNT(*) n FROM paper_dir GROUP BY node_id").fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    return {r["node_id"]: int(r["n"]) for r in rows}
+
+
 def get_paper_pool(key: str, day: str) -> dict[str, Any] | None:
     with _conn() as c:
         row = c.execute("SELECT data, fetched_at FROM paper_pool WHERE key=? AND day=?", (key, day)).fetchone()
@@ -1566,13 +1685,15 @@ def put_paper_text(aid: str, result: dict[str, Any], pinned: bool = False) -> No
     blob = json.dumps(result.get("tables") or [], ensure_ascii=False)
     text = result.get("text") or ""
     with _LOCK, _conn() as c:
+        old = c.execute("SELECT pinned FROM paper_text WHERE arxiv_id=?", (aid,)).fetchone()
+        keep_pin = 1 if pinned or (old and old["pinned"]) else 0
         c.execute(
             "INSERT OR REPLACE INTO paper_text(arxiv_id, sha, source, title, url, text, tables, retry_after, bytes, pinned, fetched_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (aid, result.get("sha") or hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
              result.get("source") or "abstract", result.get("title") or "",
              result.get("url") or "", text, blob, float(result.get("retry_after") or 0),
-             len(text.encode("utf-8")), 1 if pinned else 0, now_iso()),
+             len(text.encode("utf-8")), keep_pin, now_iso()),
         )
         cap = int(os.environ.get("ARXIV_CACHE_MAX_BYTES") or (100 * 1024 * 1024))
         max_files = int(os.environ.get("ARXIV_CACHE_MAX_FILES") or 2000)

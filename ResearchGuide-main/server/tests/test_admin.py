@@ -43,6 +43,7 @@ def test_admin_requires_token(client):
     assert r.status_code == 200
     body = r.json()
     assert "users" in body and "expired_sessions" in body
+    assert "paper_dir_gaps" in body and "paper_dir_rows" in body
 
 
 def test_backup_vacuum_and_restore(client, tmp_path):
@@ -81,4 +82,5 @@ def test_health_gains_checks_and_keeps_ok(client):
     assert h["ok"] is True
     assert "checks" in h and "secret_set" in h["checks"]
     assert "model_pool" in h
+    assert "threads_max" in h["model_pool"]
     assert h["version"] == "0.2.0"

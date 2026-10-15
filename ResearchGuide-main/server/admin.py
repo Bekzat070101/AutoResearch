@@ -145,6 +145,16 @@ def restore(request: Request, object: str = "", req: RestoreReq | None = None):
     return {"ok": True, "object": name}
 
 
+@router.post("/api/admin/papers/collect")
+def papers_collect(request: Request, node: str = "", quota: int = 20, fulltext: int = 8):
+    _admin(request)
+    import paper_collect
+    try:
+        return paper_collect.collect(node=node, quota=quota, fulltext=fulltext, xlate=True)
+    except paper_collect.CollectError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/api/admin/papers/warm")
 def papers_warm(request: Request, budget: int = 240):
     _admin(request)
@@ -226,7 +236,28 @@ def stats(request: Request):
         "tmp_free": tmp_free, "today_star": star, "today_guest": guest, "xlate_today": xlate, "top_uids": usage,
         "build": build, "ephemeral": store.ephemeral(),
         "pools": {"threads": int(os.environ.get("QIYAN_THREADS") or 128)},
+        **_paper_dir_stats(),
     }
+
+
+def _paper_dir_stats() -> dict:
+    try:
+        import interests
+        counts = store.paper_dir_counts()
+        thin = set(interests.table().get("thin") or [])
+        gaps = []
+        for nid in interests.table().get("nodes") or {}:
+            need = 8 if nid in thin else 20
+            n = int(counts.get(nid) or 0)
+            if n < need:
+                gaps.append({"node": nid, "dir_n": n, "need": need, "thin": nid in thin})
+        return {
+            "paper_dir_rows": sum(counts.values()),
+            "paper_dir_nodes": len(counts),
+            "paper_dir_gaps": gaps,
+        }
+    except Exception:
+        return {"paper_dir_rows": 0, "paper_dir_nodes": 0, "paper_dir_gaps": []}
 
 
 @router.post("/api/admin/maintenance")

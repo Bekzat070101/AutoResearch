@@ -22,6 +22,29 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/wechat?signature=x&timestamp=1&nonce=1&echostr=p")
           test "$code" = "403"
           curl -fsS https://chengcanwu.github.io/AutoResearch/ | grep -q build-stamp
+      - name: Record ephemeral and Pages vs API
+        env:
+          QIYAN_URL: ${{ secrets.QIYAN_URL }}
+          QIYAN_REQUIRE_PERSISTENT: ${{ secrets.QIYAN_REQUIRE_PERSISTENT }}
+        run: |
+          set -euo pipefail
+          URL="${QIYAN_URL:-https://qiyan-caxplsowco.cn-hangzhou.fcapp.run}"
+          curl -fsS -m 20 "$URL/api/health" > /tmp/qiyan-health.json
+          curl -fsS -m 20 https://chengcanwu.github.io/AutoResearch/ > /tmp/qiyan-pages.html
+          python - <<'PY'
+          import json, os, re, sys
+          health = json.load(open("/tmp/qiyan-health.json", encoding="utf-8"))
+          html = open("/tmp/qiyan-pages.html", encoding="utf-8", errors="replace").read()
+          ephemeral = bool((health.get("db") or {}).get("ephemeral"))
+          build = str((health.get("checks") or {}).get("build") or "")
+          m = re.search(r"界面版本\s*<b>(w\d+)</b>", html)
+          pages = m.group(1) if m else ""
+          print(f"ephemeral={ephemeral} pages={pages} api_build={build}")
+          print(f"::notice::ephemeral={ephemeral} pages={pages} api_build={build}")
+          require = (os.environ.get("QIYAN_REQUIRE_PERSISTENT") or "").strip() in ("1", "true", "TRUE", "yes")
+          if require and ephemeral:
+              sys.exit("QIYAN_REQUIRE_PERSISTENT：生产库仍是 ephemeral")
+          PY
       - name: Alert
         if: failure()
         env:

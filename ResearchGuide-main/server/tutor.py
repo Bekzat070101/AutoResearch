@@ -80,6 +80,18 @@ class TutorConflict(Exception):
     pass
 
 
+def _is_paper_title(answer: str, paper: dict[str, Any]) -> bool:
+    title = quotes.norm(paper.get("title") or "")
+    got = quotes.norm(answer or "")
+    if not title or not got:
+        return False
+    if got == title:
+        return True
+    if len(got) >= 12 and (got in title or title in got):
+        return True
+    return False
+
+
 def paper_sha(paper: dict[str, Any]) -> str:
     return hashlib.sha256((paper.get("text") or "").encode("utf-8")).hexdigest()[:16]
 
@@ -367,7 +379,10 @@ def judge(slot: dict[str, Any], answer: str, paper: dict[str, Any], station: dic
     loc: dict[str, Any] = {}
     if typ == "find_quote":
         loc = quotes.locate(ans, paper, within=within)
-        ok, note = loc["found"], ("已定位" if loc["found"] else (loc.get("reason") or f"这句不在「{station['label']}」"))
+        if loc["found"] and _is_paper_title(ans, paper):
+            ok, note = False, "这是标题，不是主张原句"
+        else:
+            ok, note = loc["found"], ("已定位" if loc["found"] else (loc.get("reason") or f"这句不在「{station['label']}」"))
     elif typ == "number":
         if not NUM_RE.search(ans):
             return {"pass": False, "note": "表格里的字核对不了，选正文句子", "where": station["label"], "at": None}

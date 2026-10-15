@@ -320,8 +320,6 @@ def direction_ranking(uid: str, limit: int = 5) -> list[dict[str, Any]]:
     pid = store.active_portrait_id(uid) or "default"
     trail = store.get_trail(uid, pid) or {}
     current = trail.get("dir") or ""
-    if not current:
-        current = LEGACY_DIR.get(_user_direction(uid, facts) or "", "")
 
     out = sorted(scores.values(), key=lambda x: (-x["score"], x["node"]))[:limit]
     for item in out:
@@ -345,3 +343,39 @@ def choose_direction(uid: str, code: str) -> UserFact:
     memory._supersede_existing(uid, f.key, memory._NAMESPACED["direction"], keep=None, decision_id="card_selection")
     store.add_fact(f)
     return f
+
+
+def _code_of_node(node: str) -> str:
+    n = node or ""
+    homes = (
+        ("520.20", "ai"), ("520.40", "se"), ("520.10", "se"), ("520.30", "se"),
+        ("520.60", "se"), ("520", "se"), ("110.67", "stat"), ("110.64", "stat"),
+        ("110", "math"), ("190", "psy"), ("790", "econ"), ("310", "med"),
+    )
+    while n:
+        for home, code in homes:
+            if n == home or n.startswith(home + "."):
+                return code
+        n = n.rsplit(".", 1)[0] if "." in n else ""
+    return ""
+
+
+def cards_from_ranking(uid: str, limit: int = 3) -> list[dict[str, Any]]:
+    """ranking 已有树节点时，给 recommend 合成规则卡，不调模型。"""
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for it in direction_ranking(uid, limit=7):
+        node = str(it.get("node") or "")
+        code = _code_of_node(node)
+        if not code or code in seen or code not in DIRECTIONS:
+            continue
+        seen.add(code)
+        d = DIRECTIONS[code]
+        why = [w for w in (it.get("why") or []) if w] or [f"按你说过的，{d['name']}排在前面"]
+        card = _build_card(uid, d, why, False, True)
+        card["voice"] = "rules"
+        card["node"] = node
+        cards.append(card)
+        if len(cards) >= limit:
+            break
+    return cards

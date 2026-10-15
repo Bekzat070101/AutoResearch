@@ -1,0 +1,60 @@
+{
+  "title": "启研 qiyan overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "tags": ["qiyan"],
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "stat", "title": "进程存活", "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "targets": [{ "expr": "qiyan_up", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "生产库 ephemeral（必须为 0）", "gridPos": {"h": 4, "w": 6, "x": 4, "y": 0},
+      "targets": [{ "expr": "qiyan_db_ephemeral", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "模型兜底", "gridPos": {"h": 4, "w": 4, "x": 10, "y": 0},
+      "targets": [{ "expr": "qiyan_llm_enabled", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "注册用户", "gridPos": {"h": 4, "w": 5, "x": 14, "y": 0},
+      "targets": [{ "expr": "qiyan_users", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "HTTP p95 秒", "gridPos": {"h": 4, "w": 5, "x": 19, "y": 0},
+      "targets": [{ "expr": "qiyan_http_latency_p95_seconds", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "HTTP 请求（按状态）", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{ "expr": "sum by (code) (rate(qiyan_http_requests_total[5m]))", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "5xx 累计", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{ "expr": "qiyan_http_errors_5xx_total", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "论文正文库字节", "gridPos": {"h": 7, "w": 12, "x": 0, "y": 12},
+      "targets": [{ "expr": "qiyan_paper_text_bytes", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "方向目录条数", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 19},
+      "targets": [{ "expr": "qiyan_paper_dir_rows", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "已有目录的节点", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 19},
+      "targets": [{ "expr": "qiyan_paper_dir_nodes", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "论文正文条数", "gridPos": {"h": 4, "w": 6, "x": 12, "y": 19},
+      "targets": [{ "expr": "qiyan_paper_text_rows", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "会话 / 过期会话", "gridPos": {"h": 7, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        { "expr": "qiyan_sessions", "refId": "A", "legendFormat": "sessions" },
+        { "expr": "qiyan_sessions_expired", "refId": "B", "legendFormat": "expired" }
+      ]
+    }
+  ]
+}
