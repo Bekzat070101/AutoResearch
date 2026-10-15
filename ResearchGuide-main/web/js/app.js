@@ -80,7 +80,7 @@ const PRIVACY_HTML = `
   <h4>存在哪、存多久</h4>
   <ul>
     <li>存在团队租用的阿里云服务器上。不卖数据，不做广告。</li>
-    <li>「记录」页随时可以导出全部数据或删除账号。删除会立刻清掉库里你的所有记录，备份最多再留 7 天。</li>
+    <li>「我的」页随时可以导出全部数据或删除账号。删除会立刻清掉库里你的所有记录，备份最多再留 7 天。</li>
   </ul>`;
 
 function lostUser(err) {
@@ -1404,6 +1404,18 @@ function accountPanel() {
     acts.appendChild(b);
   };
   if (!S.guest) add("我的 DeepSeek", "btn small", () => openMineKey());
+  add("导出数据", "btn small secondary", async () => {
+    try {
+      const data = await api("GET", "/api/me/export");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `qiyan-export-${S.username || S.uid}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast("已下载导出文件");
+    } catch (e) { toast(e.message); }
+  });
   add("退出", "btn small secondary", async () => { await logout(); });
   add("删除账号", "btn small ghost", async () => {
     const typed = window.prompt("删除后记录立刻清掉。确定的话输入「删除」：");
@@ -1448,27 +1460,31 @@ function renderLogin() {
         } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "登录"; }
       };
       pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
-      body.append(user, pass, btn);
+      body.append(user, pass, privacyBox(), btn);
     } else if (mode === "register") {
       const user = el("input"); user.placeholder = "用户名，例如 xiaobei"; user.autocomplete = "username";
       const nick = el("input"); nick.placeholder = "怎么称呼你（可与用户名相同）"; nick.maxLength = 24;
       const pass = el("input"); pass.type = "password"; pass.placeholder = "密码，至少 8 位"; pass.autocomplete = "new-password";
       const btn = el("button", "btn", "注册并进入");
       btn.type = "button";
+      const consent = el("input"); consent.type = "checkbox";
+      const row = el("label", "consent-row");
+      row.append(consent, document.createTextNode(" 我已阅读并同意上述说明"));
       btn.onclick = async () => {
         if (!user.value.trim() || pass.value.length < 8) { toast("用户名和至少 8 位密码"); return; }
+        if (!consent.checked) { toast("请先阅读并同意隐私说明"); return; }
         btn.disabled = true; btn.textContent = "注册中…";
         try {
           setSession(await api("POST", "/api/auth/register", {
             username: user.value.trim(), password: pass.value,
-            nickname: nick.value.trim() || user.value.trim(), consent: true,
+            nickname: nick.value.trim() || user.value.trim(), consent: consent.checked,
           }));
           S.myDir = undefined;
           await afterEnter();
         } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "注册并进入"; }
       };
       pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
-      body.append(user, nick, pass, btn);
+      body.append(user, nick, pass, privacyBox(), row, btn);
     }
   };
   [["signin", "登录"], ["register", "注册"]].forEach(([id, label]) => {
@@ -1554,18 +1570,28 @@ function openConnect() {
   };
 }
 
+function privacyBox() {
+  const box = el("div", "privacy-box");
+  const body = el("div", "privacy-body");
+  body.innerHTML = PRIVACY_HTML;
+  box.appendChild(body);
+  return box;
+}
+
 function applyLlmPill(llm) {
   const pill = document.getElementById("llmPill");
-  if (!pill || !llm) return;
+  if (!pill) return;
   if (S.uid && !S.guest) {
+    pill.hidden = false;
     pill.textContent = S.hasLlmKey ? `我的模型 · ${S.llmKeyTail || "已保存"}` : "我的 DeepSeek";
     pill.classList.toggle("on", !!S.hasLlmKey);
     pill.onclick = () => openMineKey();
     return;
   }
-  pill.textContent = llm.enabled ? `模型 · ${llm.model}` : "连接模型";
-  pill.classList.toggle("on", !!llm.enabled);
-  pill.onclick = () => openConnect();
+  pill.hidden = true;
+  pill.textContent = "我的 DeepSeek";
+  pill.classList.remove("on");
+  pill.onclick = null;
 }
 
 function openMineKey() {
@@ -3774,19 +3800,30 @@ function useKit(kitId) {
 
 async function renderRead() {
   const seq = S.renderSeq;
-  if (!S.kitId) useKit(DEFAULT_KIT);
-  const kitId = S.kitId;
+  let catalog = [];
+  if (S.uid) {
+    try {
+      const d = await api("GET", `/api/papers/dir?uid=${encodeURIComponent(S.uid)}`);
+      catalog = d.items || [];
+    } catch (_) { catalog = []; }
+  }
+  if (!S.kitId && !catalog.length) useKit(DEFAULT_KIT);
+  const kitId = S.kitId || "";
   const tab = S.readTab || "kit";
-  let kit; let cards = { cards: [] };
-  try {
-    kit = await api("GET", `/api/kits/${kitId}`);
-  } catch (e) {
-    if (stale(seq)) return;
-    if (await recoverUser(e)) return;
-    $app.innerHTML = "";
-    $app.appendChild(workspaceHead("研读"));
-    $app.appendChild(el("div", "note-box", `工具包加载失败：${esc(e.message)}`));
-    return;
+  let kit = { id: kitId, papers: [], goal: "", direction: "" }; let cards = { cards: [] };
+  if (kitId) {
+    try {
+      kit = await api("GET", `/api/kits/${kitId}`);
+    } catch (e) {
+      if (stale(seq)) return;
+      if (await recoverUser(e)) return;
+      if (!catalog.length) {
+        $app.innerHTML = "";
+        $app.appendChild(workspaceHead("研读"));
+        $app.appendChild(el("div", "note-box", `工具包加载失败：${esc(e.message)}`));
+        return;
+      }
+    }
   }
   if (!S.uid) {
     if (stale(seq)) return;
@@ -3812,7 +3849,7 @@ async function renderRead() {
   const bar = el("header", "ws-head ws-head-bar");
   const leftH = el("div", "ws-bar-main");
   leftH.appendChild(el("h2", "", "研读"));
-  leftH.appendChild(el("p", "ws-lead", esc((kit.goal || "").slice(0, 42))));
+  leftH.appendChild(el("p", "ws-lead", esc((catalog.length ? "当前方向目录" : (kit.goal || "")).slice(0, 42))));
   const rightH = el("div", "ws-bar-side");
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
@@ -3850,9 +3887,11 @@ async function renderRead() {
   rightH.append(search, up, file);
   bar.append(leftH, rightH);
   $app.appendChild(bar);
-  const mismatch = kitMismatch(kit.direction, await myDirection());
-  if (stale(seq)) return;
-  if (mismatch) $app.appendChild(mismatch);
+  if (!catalog.length) {
+    const mismatch = kitMismatch(kit.direction, await myDirection());
+    if (stale(seq)) return;
+    if (mismatch) $app.appendChild(mismatch);
+  }
 
   document.body.dataset.readTab = tab;
   if (tab === "cards") { renderCardList(kit, byPaper); return; }
@@ -3864,12 +3903,22 @@ async function renderRead() {
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
   leftHead.appendChild(el("small", "", `过线 ${passed} 张`));
   const leftBody = el("div", "read-pane-body");
+  const recPapers = catalog.length ? catalog.map((p, i) => ({
+    arxiv_id: p.paper_id || p.id,
+    title: p.title,
+    title_zh: p.title_zh || "",
+    keywords: p.keywords || [],
+    order: p.rank || i + 1,
+    why: p.why || "",
+    card_kit: p.card_kit || "",
+    lib: p.lib || "",
+  })) : (kit.papers || []);
   const paintPapers = (papers, fromSearch) => {
     leftBody.innerHTML = "";
     if (fromSearch) {
       const back = el("button", "linkish", "← 回到推荐");
       back.type = "button";
-      back.onclick = () => paintPapers(kit.papers, false);
+      back.onclick = () => paintPapers(recPapers, false);
       leftBody.appendChild(back);
     }
     if (!papers.length) {
@@ -3915,16 +3964,17 @@ async function renderRead() {
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
       li.appendChild(main);
-      const go = el("button", primary ? "btn small" : "btn small secondary",
-        fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : "写阅读卡"));
+      const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
+      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "写阅读卡" : "打开"));
+      const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
       go.type = "button";
-      go.onclick = () => { S.cardFrom = "read"; openCard(aid, fromSearch ? (p.card_kit || "") : kit.id); };
+      go.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       li.appendChild(go);
       list.appendChild(li);
     });
     leftBody.appendChild(list);
   };
-  paintPapers(kit.papers, false);
+  paintPapers(recPapers, false);
   const mineBox = el("div", "read-mine");
   try {
     const mine = await api("GET", `/api/papers/mine?uid=${S.uid}`);
@@ -4925,7 +4975,7 @@ function posLead(text) {
   return el("p", "pos-lead", esc(text));
 }
 
-async function renderPosition() {
+async function _deadRenderPosition() {
   const seq = S.renderSeq;
   if (!S.kitId) useKit(DEFAULT_KIT);
   const tab = S.posTab || "edges";
@@ -5527,7 +5577,7 @@ function projectTabs(active, mineCount) {
   return nav;
 }
 
-async function renderProjects() {
+async function _deadRenderProjects() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;

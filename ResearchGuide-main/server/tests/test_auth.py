@@ -30,7 +30,7 @@ import store  # noqa: E402
 
 pytestmark = pytest.mark.real_auth
 SERVER = Path(__file__).resolve().parent.parent
-PRIVACY_DIGEST = "74b7c8b0ee3c"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
+PRIVACY_DIGEST = "ac4b619a78fa"  # web/js/app.js 里 PRIVACY_HTML 的指纹，见最后一个测试
 TOKEN = "test-token"
 OPENID = "o_test_user_1"
 

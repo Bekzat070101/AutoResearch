@@ -43,7 +43,7 @@ PRIVACY_VERSION = "2026-10-15"
 
 # 不登录也能用的接口（按路由模板写）。新加的接口默认要登录：要么带 uid，要么加到这里并说明为什么可以公开。
 PUBLIC = frozenset({
-    "/", "/api/health",
+    "/", "/api/health", "/metrics",
     "/api/auth/login", "/api/auth/register", "/api/auth/signin", "/api/auth/legacy",
     "/api/auth/wechat/start", "/api/auth/wechat/poll", "/api/auth/wechat/dev-send",
     "/api/wechat",  # 微信服务器回调，自己验签
@@ -55,7 +55,7 @@ PUBLIC = frozenset({
     "/api/llm/connect",  # 自己核对管理员口令
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
     "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
-    "/api/admin/papers/warm",
+    "/api/admin/papers/warm", "/api/admin/papers/collect",
 })
 
 _ARXIV_PAPER_PATH = re.compile(r"^/api/papers/\d{4}\.\d{4,5}$")

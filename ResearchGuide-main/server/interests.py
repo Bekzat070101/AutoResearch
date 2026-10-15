@@ -74,13 +74,6 @@ def direction_node(uid: str) -> str:
     node = str(trail.get("dir") or "")
     if node and node in table()["nodes"]:
         return node
-    facts = memory.active_facts(uid)
-    for f in facts:
-        if (f.key or "").startswith("direction:"):
-            code = f.key.split(":", 1)[1]
-            legacy = table()["legacy"].get(code)
-            if legacy and legacy in table()["nodes"]:
-                return legacy
     return ""
 
 

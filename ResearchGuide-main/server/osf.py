@@ -88,7 +88,7 @@ def recent(provider: str, subjects: list[str] | None = None, max_results: int = 
             time.sleep(wait)
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.api+json"})
         try:
-            raw = fetch(req, timeout=20, max_bytes=400_000)
+            raw = fetch(req, timeout=40, max_bytes=2_000_000)
         except urllib.error.HTTPError as exc:
             raise OsfError(f"OSF 返回 HTTP {exc.code}", exc.code) from exc
         except ReadLimitError as exc:

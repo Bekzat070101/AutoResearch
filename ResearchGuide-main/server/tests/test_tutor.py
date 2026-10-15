@@ -206,6 +206,14 @@ def test_find_quote_must_be_verbatim_and_in_station(fake_model):
     assert fake_model["counts"]["paper-quiz-grade"] == before + 1
 
 
+def test_find_quote_rejects_paper_title():
+    paper = _paper()
+    slot = {"type": "find_quote", "field": "claim_quote", "question": "q", "hint": ""}
+    st = {"key": "abstract", "label": "摘要", "start": 0, "end": len(paper["text"])}
+    assert not tutor.judge(slot, paper["title"], paper, st)["pass"]
+    assert tutor.judge(slot, QUOTES["q_claim_quote"], paper, st)["pass"]
+
+
 def test_number_answer_needs_a_digit():
     paper = _paper()
     slot = {"type": "number", "field": "evidence_quote", "question": "q", "hint": ""}

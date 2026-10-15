@@ -6,6 +6,38 @@
 
 ---
 
+## [2026-10-15] [OPS] Pages 发到 w81，生产 API 仍是 w74
+
+- 变更内容：前端同步 GitHub Pages（w81）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用）。A5 未挂盘，本轮不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：web/（gh-pages）
+- 决策来源：邬程灿（体验问题/监控计划/论文入库 2026-10-15）
+- 登记人：助手
+
+## [2026-10-15] [FEAT] 本机落地体验/监控小修与方向论文目录
+
+- 变更内容：隐私说明在登录/注册页渲染后再 consent；「记录」改为「我的」；「我的」页可导出 JSON；侧栏默认「我的 DeepSeek」，管理员入口只留登录页。`papers/{id}` 合并工具包 `title_zh`。带读拒绝把论文标题当主张原句。ranking 有条目时 recommend 不再长期空。`direction_node` 不再用 7 码假装细类。占位页不调用死代码。health.model_pool 改为线程池/PDF 池实值。`/metrics` 的 5xx 与分路 counter 同源；补 `qiyan_paper_dir_*`。uptime 多记 ephemeral 与 Pages/API 版本，仅 secrets `QIYAN_REQUIRE_PERSISTENT` 时因 ephemeral 失败。新增 `paper_dir`、`server/paper_collect.py`、`GET /api/papers/dir`、搜索库优先、研读左栏读目录。界面 w81。A5 仍待确认，本轮不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/grafana/qiyan-overview.json
+- 影响模块：server/metrics.py、server/main.py、server/workpool.py、server/planner.py、server/interests.py、server/tutor.py、server/store.py、server/reading.py、server/admin.py、server/paper_collect.py、web/js/app.js、web/index.html、web/css/styles.css、.github/workflows/uptime.yml
+- 决策来源：邬程灿（体验问题/监控计划/论文入库 2026-10-15）
+- 登记人：助手
+
+## [2026-10-15] [DOCS] 体验问题、监控计划、方向论文入库拆成三份
+
+- 变更内容：原 `docs/MONITORING_OPS.md` 拆成 `docs/PRODUCT_ISSUES.md`（产品体验问题）和 `docs/MONITORING_OPS.md`（系统监控 + 系统运维）。新增 `docs/PAPER_COLLECTION.md`：方向树 53 个节点各检索定额论文写入后端（目录 20 / 正文 8，thin 节点 8/4），研读不再只靠现场搜索。副本同步到仓库外 `运维信息/`。
+- 影响文档：docs/CHANGELOG.md、docs/PRODUCT_ISSUES.md、docs/MONITORING_OPS.md、docs/PAPER_COLLECTION.md
+- 影响模块：无代码（计划稿）
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-15] [OPS] 暴露 /metrics，写监控运维计划
+
+- 变更内容：本机 `GET /metrics` 输出 Prometheus 文本（存活、ephemeral、用户/会话、论文库、HTTP 计数与 p95）。Grafana 看板 JSON 在 `docs/grafana/qiyan-overview.json`。体验记录与指标选取后拆到 `docs/PRODUCT_ISSUES.md` 与 `docs/MONITORING_OPS.md`。生产库仍 ephemeral，不发生产函数。
+- 影响文档：docs/CHANGELOG.md、docs/MONITORING_OPS.md、docs/grafana/qiyan-overview.json
+- 影响模块：server/metrics.py、server/main.py、server/auth.py
+- 决策来源：邬程灿（第 4 次小组汇报 / 课程「系统监控与运维」）
+- 登记人：助手
+
 ## [2026-10-14] [FIX] 今日去掉「定位微调」
 
 - 变更内容：今日不再渲染定位入口。服务端 `daily_tweak` 仍回 `view:"position"`（测试不动），页面不画。界面 w80。A5 仍待确认，本轮不发生产。
