@@ -43,6 +43,7 @@ import llm
 import mcp_curriculum
 import memory
 import onboarding
+import osf
 import pdf as pdf_mod
 import planner
 import positioning
@@ -66,6 +67,7 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # Starlette 的工作线程池默认 40 个：每个同步接口、每个流式对话各占一个线程直到做完。
 # 四十个学生同时在对话，第四十一个人的任何请求都要排队。线程等模型回话几乎不占资源，可以多开。
 THREADS = int(os.environ.get("QIYAN_THREADS") or 128)
+_LIMITER = None
 
 # 要等模型的活（对话、交任务、方向推荐……）不进上面那个公用池，在 workpool 里跑：公用池留给普通读写，
 # 两百个人同时等模型也不会让登录、读任务排队（Codex 第五轮压测）。排队的再超过 MODEL_QUEUE 个就回 503。
@@ -104,7 +106,9 @@ def _model_work(fn):
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    anyio.to_thread.current_default_thread_limiter().total_tokens = THREADS
+    global _LIMITER
+    _LIMITER = anyio.to_thread.current_default_thread_limiter()
+    _LIMITER.total_tokens = THREADS
     if store.ephemeral():
         print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
                          ensure_ascii=False))
@@ -165,17 +169,38 @@ async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
 async def record_metrics(request: Request, call_next):
     import metrics as _metrics
     t0 = time.time()
-    path = request.url.path or ""
-    watch = path.startswith("/api/") or path in ("/", "/metrics")
+    raw = request.url.path or ""
+    watch = raw.startswith("/api/") or raw in ("/", "/metrics")
     try:
         resp = await call_next(request)
     except Exception:
         if watch:
+            route = request.scope.get("route")
+            path = getattr(route, "path", None) or "unknown"
             _metrics.observe_request(path, 500, time.time() - t0)
         raise
     if watch:
         code = getattr(resp, "status_code", None)
-        _metrics.observe_request(path, 0 if code is None else int(code), time.time() - t0)
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unknown"
+        media = (getattr(resp, "media_type", None) or resp.headers.get("content-type") or "")
+        iterator = getattr(resp, "body_iterator", None)
+        if iterator is not None and "text/event-stream" in media:
+            async def _wrap():
+                err = False
+                try:
+                    async for chunk in iterator:
+                        raw_chunk = chunk if isinstance(chunk, (bytes, bytearray)) else str(chunk).encode()
+                        if b"event: error" in raw_chunk:
+                            err = True
+                            _metrics.observe_stream_error()
+                        yield chunk
+                finally:
+                    _metrics.observe_request(path, 500 if err else (0 if code is None else int(code)),
+                                             time.time() - t0)
+            resp.body_iterator = _wrap()
+        else:
+            _metrics.observe_request(path, 0 if code is None else int(code), time.time() - t0)
     return resp
 
 
@@ -877,7 +902,7 @@ def task_draft_get(tid: str, request: Request):
     t = store.get_task(tid)
     if not t or t.user_id != uid:
         raise HTTPException(404, "task not found")
-    return {"text": store.get_draft(uid, tid)}
+    return store.get_draft_row(uid, tid)
 
 
 @app.put("/api/tasks/{tid}/draft")
@@ -888,7 +913,7 @@ def task_draft_put(tid: str, req: DraftReq, request: Request):
         raise HTTPException(404, "task not found")
     if t.status == "done" and (req.text or "").strip():
         raise HTTPException(400, "已完成的作业不用再改草稿")  # 交完之后前端会把草稿清空（空串），这一笔要放行，不然库里留着旧草稿
-    return {"text": store.set_draft(uid, tid, req.text)}
+    return store.set_draft_row(uid, tid, req.text)
 
 
 def _prefs_out(raw: dict) -> dict:
@@ -1416,17 +1441,50 @@ def _topic_fetch(tid: str):
         got = reading.topic_source(tid, cached_only=False)
         if got is None or got[1]:
             _DAILY_MISS.set(tid, got if got is not None else ([], "取不到", False))
+        _TOPIC_REFRESHED.add((tid, reading.arxiv_day()))
         return got
 
 
-def _interest_daily(uid: str) -> dict:
+def _interest_prep(uid: str) -> dict:
+    """要不要现场取话题池：目录够就不上游；昨日 stale 每天每话题最多刷 1 次。"""
     import interests
     ids, _ = interests.user_topics(uid)
-    sources = {}
-    fetched = False
+    node = interests.direction_node(uid)
+    catalog = reading.dir_as_papers(node) if node else []
+    cutoff = reading._cutoff()
+    catalog_recent = [p for p in catalog if (p.get("published") or "9999") >= cutoff]
+    fetch_tid = None
+    day = reading.arxiv_day()
     for tid in ids:
         got = reading.topic_source(tid, cached_only=True)
-        if got is None and not fetched:
+        empty = got is None
+        stale = bool(got) and len(got) > 2 and got[2]
+        if empty and len(catalog_recent) < 6:
+            fetch_tid = tid
+            break
+        if stale and (tid, day) not in _TOPIC_REFRESHED and len(catalog_recent) < 6:
+            fetch_tid = tid
+            break
+    return {"fetch_tid": fetch_tid}
+
+
+def _interest_daily(uid: str, allow_fetch: bool = True) -> dict:
+    import interests
+    ids, _ = interests.user_topics(uid)
+    node = interests.direction_node(uid)
+    catalog = reading.dir_as_papers(node) if node else []
+    cutoff = reading._cutoff()
+    catalog_recent = [p for p in catalog if (p.get("published") or "9999") >= cutoff]
+    sources = {}
+    fetched = False
+    need_fetch = len(catalog_recent) < 6
+    day = reading.arxiv_day()
+    for tid in ids:
+        got = reading.topic_source(tid, cached_only=True)
+        stale = bool(got) and len(got) > 2 and got[2]
+        if allow_fetch and not fetched and need_fetch and (
+            got is None or (stale and (tid, day) not in _TOPIC_REFRESHED)
+        ):
             got = _topic_fetch(tid)
             fetched = True
         if got is not None:
@@ -1458,7 +1516,14 @@ async def daily_feed(uid: str, kit: str = ""):
     if kit:
         source = await _daily_source_for(kit)
         return await run_in_threadpool(_daily_payload, uid, kit, source)
-    return await run_in_threadpool(_reading, _interest_daily, uid)
+    prep = await run_in_threadpool(_interest_prep, uid)
+    if prep.get("fetch_tid"):
+        try:
+            fut = _DAILY_POOL.submit(_topic_fetch, prep["fetch_tid"])
+        except workpool.PoolFull:
+            raise HTTPException(503, "今日正在取，稍后再试") from None
+        await asyncio.wrap_future(fut)
+    return await run_in_threadpool(_reading, _interest_daily, uid, False)
 
 
 @app.post("/api/daily/triage", dependencies=SERIAL)
@@ -1471,6 +1536,8 @@ async def daily_triage(req: TriageReq):
 
 
 _PDF_POOL = workpool.BoundedPool(1, 4, "pdf")
+_DAILY_POOL = workpool.BoundedPool(1, 16, "daily")
+_TOPIC_REFRESHED: set[tuple[str, str]] = set()
 
 
 @app.get("/api/papers/dir")
@@ -1512,9 +1579,15 @@ async def papers_search(q: str, uid: str):
         raise HTTPException(400, "arXiv 只认英文关键词")
     lib_items = await run_in_threadpool(reading.search_library, q, 20)
     got: list = []
+    upstream_error = ""
     if len(lib_items) < 20:
         key = tuple((q or "").lower().split())
-        got = await _shared(("search", key), reading.arxiv.search, q, 20)
+        try:
+            got = await _shared(("search", key), reading.arxiv.search, q, 20 - len(lib_items))
+        except Exception as exc:
+            if not lib_items:
+                raise HTTPException(502, str(exc) or "搜索上游失败") from exc
+            upstream_error = str(exc)
     seen = {it.get("id") for it in lib_items}
     live_lib = store.paper_lib([p.get("id") for p in got or []])
     items = list(lib_items)
@@ -1527,7 +1600,11 @@ async def papers_search(q: str, uid: str):
             **p, "card_kit": reading.card_kit_for(p), "lib": live_lib.get(pid, ""),
             "in_kit": any(reading.kit_paper(k, pid) for k in reading.kits().values()),
         })
-    return {"items": items}
+    items = items[:20]
+    out = {"items": items}
+    if upstream_error:
+        out["upstream_error"] = upstream_error
+    return out
 
 
 @app.get("/api/papers/mine")
@@ -1587,6 +1664,22 @@ async def paper_text(arxiv_id: str, request: Request):
         return {**paper, "lib_at": "user", "tables": [],
                 "sections": [{"name": n, "label": n if n.startswith("第") else reading.arxiv.section_cn(n), "at": at}
                              for n, at in reading.arxiv.sections(text, strict=True)]}
+    if osf.is_id(arxiv_id):
+        aid = osf.clean_id(arxiv_id)
+        row = store.get_paper_text(aid)
+        if row and (row.get("text") or "") and row.get("source") in ("html", "pdf"):
+            return {**row, "lib_at": "db", "tables": row.get("tables") or [],
+                    "sections": [{"name": n, "label": reading.arxiv.section_cn(n), "at": at}
+                                 for n, at in reading.arxiv.sections(row.get("text") or "")]}
+        meta = store.get_paper_dir_item(aid) or {}
+        summary = (row or {}).get("text") or meta.get("summary") or ""
+        return {
+            "id": aid, "title": (row or {}).get("title") or meta.get("title") or aid,
+            "source": "abstract", "text": summary, "url": meta.get("url") or "",
+            "tables": [], "lib_at": "db" if row else "",
+            "title_zh": "", "keywords": [],
+            "sections": [],
+        }
     aid = _reading(reading.arxiv.clean_id, arxiv_id)
     got = await run_in_threadpool(_reading, _paper_cached, aid)
     if got is None:
@@ -1636,6 +1729,8 @@ def _paper_ref(uid: str, raw: str) -> str:
         if not store.get_user_paper(uid, raw):
             raise tutor.TutorError("没有这篇")
         return raw
+    if osf.is_id(raw):
+        return osf.clean_id(raw)
     return reading.arxiv.clean_id(raw)
 
 
@@ -1794,13 +1889,14 @@ def _may_configure(request: Request) -> bool:
 def llm_connect(req: LlmConnectReq, request: Request):
     if not _may_configure(request):
         raise HTTPException(403, "只有在服务器本机，或带管理员口令，才能改模型设置")
+    override = _mine_override(req)
+    probe = llm.probe(override=override)
+    if not probe.get("ok"):
+        raise HTTPException(502, probe.get("error") or "模型连通失败")
     try:
         cfg = llm.apply_config(req.base_url, req.api_key, req.model, persist=True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    probe = llm.probe()
-    if not probe.get("ok"):
-        raise HTTPException(502, probe.get("error") or "模型连通失败")
     return {"ok": True, "model": cfg["model"], "base_url": cfg["base_url"]}
 
 
@@ -1855,8 +1951,21 @@ def _wechat_secure() -> bool:
         return False
 
 
+def _metrics_allowed(request: Request) -> bool:
+    token = os.environ.get("METRICS_TOKEN") or ""
+    if token:
+        authz = request.headers.get("Authorization") or ""
+        got = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
+        q = request.query_params.get("token") or ""
+        return hmac.compare_digest(got, token) or hmac.compare_digest(q, token)
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost", "testclient")
+
+
 @app.get("/metrics")
-def prometheus_metrics():
+def prometheus_metrics(request: Request):
+    if not _metrics_allowed(request):
+        raise HTTPException(401, "metrics 需要本机或 METRICS_TOKEN")
     import metrics as _metrics
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(_metrics.render(), media_type="text/plain; version=0.0.4")
@@ -1869,7 +1978,7 @@ def _model_pool() -> dict:
     pdf = _PDF_POOL.snapshot()
     borrowed, cap = 0, THREADS
     try:
-        lim = anyio.to_thread.current_default_thread_limiter()
+        lim = _LIMITER or anyio.to_thread.current_default_thread_limiter()
         borrowed = int(getattr(lim, "borrowed_tokens", 0) or 0)
         cap = int(getattr(lim, "total_tokens", THREADS) or THREADS)
     except Exception:
@@ -1885,7 +1994,7 @@ def _model_pool() -> dict:
 
 
 @app.get("/api/health")
-def health():
+async def health():
     cfg = llm.config()
     return {
         "ok": True,

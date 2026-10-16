@@ -6,6 +6,31 @@
 
 ---
 
+## [2026-10-17] [FIX] 并入 main（w83：request-10-16 缺陷修复）
+
+- 变更内容：把上游 f4c91f6（w83，按 docs/tasks 15–19 缺陷单修复）并进本分支。本次上游已是 LF；`.gitattributes` 取本分支版本（多列二进制类型）。对接本分支：auth 的 `PER_IP_HOUR` 仍按本分支（环境变量 `AUTH_PER_IP_HOUR`，默认 600）并加上游的 `SIGNIN_USER_LIMIT/WINDOW`，`_allow`/`_recent` 加 `window` 参数；`budget.py` 仍是本分支那份，补上游 `consented()`；`llm.enabled` = 同意检查 + 本分支「服务器 key 要有额度」；`PUT /api/tasks/{tid}/draft` 保留本分支「已完成的作业可清空草稿」的放行，返回上游 `set_draft_row`（带 updated_at）；`deploy_fc.llm_settings()` 取上游形状（key/base_url/model，`test_local_defaults_returns_three_keys` 钉着），`_local_defaults` 只在 DeepSeek 地址下写 `DEEPSEEK_API_KEY` 并透传 `LLM_REASONING_EFFORT`；app.js 会话块仍是本分支的（`setSession/clearSession` 补 `llmKeyInvalid`），任务草稿键仍按人（`rg_draft_${uid}_${tid}`、`rg_draft_meta_${uid}_${tid}`）并接上游的 updated_at/dirty 同步。界面 w84（上游 w83 与本分支 w82 内容不同）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：.gitattributes、server/auth.py、server/budget.py、server/llm.py、server/main.py、tools/deploy/deploy_fc.py、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
+## [2026-10-16] [OPS] Pages 发到 w83，生产 API 仍是 w74
+
+- 变更内容：前端同步 GitHub Pages（w83）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用或行为不同）。A5 未挂盘，本轮不发生产函数，未把 `/metrics` 发到现网。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：web/（gh-pages）
+- 决策来源：邬程灿（request-10-16 评审 2026-10-16）
+- 登记人：助手
+
+## [2026-10-16] [FIX] request-10-16 本机可证缺陷修复（w83）
+
+- 变更内容：对照 15–19 缺陷单，本机落地 P0/P1 与部分 P2。16：密钥 InvalidTag 回落、rewrap 不改环境变量、restore 原子换库、refuse_unsafe 拦未挂载路径、登录先限流+用户名桶、自带 key 也查隐私同意、OSS 失败 502、测连成功后再写配置、ticket 过期 410。18：收藏/草稿/输入框数据丢失；带读旧题失败保留 retry、restart 升 rev、标题规则收紧、节选以 loc 为中心。17：目录模式 OSF 打开、补搜失败保本地、今日去重、thin 先读目录、目录优先；_load 以库为准、abstract 不盖 html；今日取数进 BoundedPool；stale 每天每话题刷新 1 次；OSF `_vN` 可 triage；admin 采集切片+互斥锁。19：/metrics 路由模板+基数上限+锁内快照+令牌；本机可证后**仍不把 /metrics 发到生产**。界面 w83。A5 NAS、两次发版后账号、监控计划 §2.2 的 1–4 仍待确认。本轮未发生产函数。
+- 未做完的 P2（不准写成已完成）：17-C18、C19、C20、C22、C23、C26；19 建议项 histogram / llm_calls；Grafana alert rules；生产抓取 /metrics。16-A1 真挂 NAS 与两次发版后 qiyan_users 不变：待确认。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、.github/workflows/uptime.yml
+- 影响模块：server/auth.py、store.py、llm.py、budget.py、admin.py、arxiv.py、tutor.py、main.py、paper_collect.py、reading.py、metrics.py、pdf.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-16 评审 2026-10-16）
+- 登记人：助手
+
 ## [2026-10-15] [FIX] 并入 main（w81：/metrics、paper_dir 与方向论文入库、隐私渲染、带读拒标题）
 
 - 变更内容：把上游 7a8dc36 并进本分支。上游这 30 个文件是在 Windows 上以 CRLF 提交的：新增 `.gitattributes`（`* text=auto eol=lf`），用 `git merge -X renormalize` 合并，仓库内容仍全部 LF，只剩 5 处真冲突。对接本分支：`workpool.BoundedPool` 仍是本分支的有界队列实现，补 `snapshot()` 给上游 `_model_pool()` 用；health `model_pool` = 本分支模型池实值（workers/threads/running/queued/max_queued）+ 上游的 threads_borrowed/threads_max/pdf_queued/pdf_running；「我的」账号面板与登录页保留本分支（已有 openPrivacy 隐私说明、consentRow 同意勾选、导出、切回账号、设用户名密码），上游新加的 `privacyBox()` 保留但登录页不重复渲染；`applyLlmPill` 取上游（未登录隐藏，不再显示「连接模型」）；上游 `/metrics`、`record_metrics` 中间件、`paper_dir` 表与 `GET /api/papers/dir`、`paper_collect.py`、搜索库优先、研读左栏读目录、带读拒绝标题、`direction_node` 不再回落 7 码、`test_metrics_sync`/`test_paper_dir` 原样并入。界面 w82（上游 w81 与本分支 w81 内容不同，再 +1）。

@@ -13,7 +13,7 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import DEFAULT_NAME, is_function_missing, merge_env, refuse_unsafe
+from fc_safety import DEFAULT_NAME, assert_health_persistent, is_function_missing, merge_env, refuse_unsafe
 from pack_fc import OUT, main as pack
 
 REGION = "cn-hangzhou"
@@ -39,25 +39,20 @@ def write_state(rows: dict[str, str]) -> None:
     STATE.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
 
 
-MODEL_KEYS = ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "LLM_REASONING_EFFORT")
-
-
 def llm_settings() -> dict[str, str]:
-    """本机要发上去的模型设置：地址、模型、密钥一整组。本机没有密钥就返回空——函数上现有的那组原样保留。
-    只换密钥不换地址会配错：函数上用的是别家的地址，本机留着 DeepSeek 的密钥，发版之后模型就认证失败（Codex 复现）。"""
     app_env = load_env(Path(__file__).resolve().parents[2] / ".env")
     root_env = load_env()
-    src = app_env if app_env.get("LLM_API_KEY") else root_env
-    key = src.get("LLM_API_KEY") or src.get("DEEPSEEK_API_KEY") or ""
-    if not key:
-        return {}
-    group = {"LLM_BASE_URL": src.get("LLM_BASE_URL") or "https://api.deepseek.com/v1",
-             "LLM_MODEL": src.get("LLM_MODEL") or "deepseek-flash", "LLM_API_KEY": key}
-    if "api.deepseek.com" in group["LLM_BASE_URL"]:
-        group["DEEPSEEK_API_KEY"] = key
-    if src.get("LLM_REASONING_EFFORT"):  # 推理强度也是这一组的：不写就清掉，免得留着函数上原来的 max（Codex 复现）
-        group["LLM_REASONING_EFFORT"] = src["LLM_REASONING_EFFORT"]
-    return group
+    key = (app_env.get("LLM_API_KEY") or root_env.get("DEEPSEEK_API_KEY")
+           or root_env.get("LLM_API_KEY") or "")
+    base = (app_env.get("LLM_BASE_URL") or root_env.get("LLM_BASE_URL")
+            or "https://api.deepseek.com/v1")
+    model = (app_env.get("LLM_MODEL") or root_env.get("LLM_MODEL") or "deepseek-flash")
+    effort = app_env.get("LLM_REASONING_EFFORT") or root_env.get("LLM_REASONING_EFFORT") or ""
+    return {"key": key, "base_url": base, "model": model, "effort": effort}
+
+
+def llm_key() -> str:
+    return llm_settings()["key"]
 
 
 def client(ak: str, sk: str, aid: str) -> Client:
@@ -83,15 +78,19 @@ def existing_env(cli: Client, name: str) -> dict[str, str] | None:
 
 
 def _local_defaults(name: str) -> dict[str, str]:
+    settings = llm_settings()
     env_vars = {
-        "LLM_BASE_URL": "https://api.deepseek.com/v1",
-        "LLM_MODEL": "deepseek-flash",
+        "LLM_BASE_URL": settings["base_url"],
+        "LLM_MODEL": settings["model"],
         "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
     }
-    key = llm_key()
+    key = settings["key"]
     if key:
         env_vars["LLM_API_KEY"] = key
-        env_vars["DEEPSEEK_API_KEY"] = key
+        if "api.deepseek.com" in settings["base_url"]:  # 别家地址别配 DEEPSEEK_API_KEY：发版后模型会认证失败（Codex 复现）
+            env_vars["DEEPSEEK_API_KEY"] = key
+    if settings.get("effort"):  # 推理强度也是这一组的：本机写了才发，免得留着函数上原来的 max
+        env_vars["LLM_REASONING_EFFORT"] = settings["effort"]
     return env_vars
 
 
@@ -187,9 +186,21 @@ def main(argv: list[str] | None = None) -> None:
     if url:
         if name == DEFAULT_NAME:
             write_state({"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": url, "ACCOUNT_TAIL": aid[-4:]})
+            check_deployed_health(url)
         else:
             write_state({"FC_TEST_FUNCTION": name, "TEST_URL": url})
         warm_after_deploy(url, env_vars)
+
+
+def check_deployed_health(url: str) -> dict:
+    """生产发完必须看到 health.db.ephemeral=false。本函数只读探活，不发版。"""
+    import urllib.request
+    req = urllib.request.Request(f"{str(url).rstrip('/')}/api/health")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode() or "{}")
+    assert_health_persistent(body)
+    print("HEALTH persistent")
+    return body
 
 
 def warm_after_deploy(url: str, env_vars: dict | None, post=None) -> dict:

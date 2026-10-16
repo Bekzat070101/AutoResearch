@@ -98,6 +98,8 @@ def test_two_users_chat_use_own_keys_without_touching_environ(client, monkeypatc
     monkeypatch.setenv("LLM_API_KEY", "sk-server-shared")
     a = store.register_user("user_a", "secret-ok", "甲")
     b = store.register_user("user_b", "secret-ok", "乙")
+    store.record_consent(a["uid"], auth.PRIVACY_VERSION)
+    store.record_consent(b["uid"], auth.PRIVACY_VERSION)
     store.save_llm_secret(a["uid"], "sk-aaa-aaaa", "https://api.deepseek.com/v1", "deepseek-flash")
     store.save_llm_secret(b["uid"], "sk-bbb-bbbb", "https://api.deepseek.com/v1", "deepseek-flash")
     seen: list[str] = []
@@ -130,6 +132,46 @@ def test_same_length_keys_cannot_unwrap_each_other():
     assert store.unwrap_secret(b) == "sk-bbb-bbbb"
 
 
+def test_wrong_qiyan_secret_does_not_500_and_flags_invalid(client, monkeypatch, capsys):
+    """16-F03：换 QIYAN_SECRET 后对话走规则版，密文保留，/me 标 llm_key_invalid。"""
+    acc = _reg(client, "wrap_fail")
+    store.save_llm_secret(acc["uid"], "sk-keep-this-key", "https://api.deepseek.com/v1", "deepseek-flash")
+    with store._conn() as c:
+        wrapped = c.execute(
+            "SELECT wrapped FROM user_secrets WHERE user_id=? AND kind='llm'", (acc["uid"],)
+        ).fetchone()["wrapped"]
+    monkeypatch.setenv("QIYAN_SECRET", "rotated-secret")
+    me = client.get("/api/auth/me", headers=_h(acc["token"])).json()
+    assert me["has_llm_key"] is True
+    assert me["llm_key_invalid"] is True
+    r = client.post("/api/dialogue/turn", json={"uid": acc["uid"], "message": "还在吗"},
+                    headers=_h(acc["token"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("voice") == "rules" or body.get("degraded") is True
+    tutor = client.get(f"/api/tutor/2009.03300?uid={acc['uid']}&kit=llm-eval",
+                       headers=_h(acc["token"]))
+    assert tutor.status_code != 500
+    with store._conn() as c:
+        still = c.execute(
+            "SELECT wrapped FROM user_secrets WHERE user_id=? AND kind='llm'", (acc["uid"],)
+        ).fetchone()["wrapped"]
+    assert still == wrapped
+    store.llm_secret(acc["uid"])
+    logged = capsys.readouterr().out
+    assert "llm_secret_invalid" in logged
+    monkeypatch.setattr(llm, "probe", lambda **k: {"ok": True, "model": "deepseek-flash"})
+    saved = client.post("/api/llm/mine", json={
+        "api_key": "sk-new-after-rotate",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-flash",
+    }, headers=_h(acc["token"]))
+    assert saved.status_code == 200, saved.text
+    me2 = client.get("/api/auth/me", headers=_h(acc["token"])).json()
+    assert me2["llm_key_invalid"] is False
+    assert me2["has_llm_key"] is True
+
+
 def test_model_output_includes_own(capsys, monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "sk-team-key")
     monkeypatch.setattr(llm, "_post", lambda *a, **k: ({"choices": [{"message": {"content": "ok"}}], "usage": {}}, ""))
@@ -137,7 +179,27 @@ def test_model_output_includes_own(capsys, monkeypatch):
     logged = capsys.readouterr().out
     assert '"own": false' in logged
     uid = store.create_user("自钥")["uid"]
+    store.record_consent(uid, auth.PRIVACY_VERSION)
     store.save_llm_secret(uid, "sk-own-key", "https://api.deepseek.com/v1", "deepseek-flash")
     assert llm.chat("s", "u", uid=uid) == "ok"
     logged = capsys.readouterr().out
     assert '"own": true' in logged
+
+
+def test_own_key_requires_current_consent(monkeypatch):
+    uid = store.register_user("ck_user", "secret-ok", "甲")["uid"]
+    store.record_consent(uid, "2000-01-01")
+    store.save_llm_secret(uid, "sk-own-key", "https://api.deepseek.com/v1", "deepseek-flash")
+    seen: list[int] = []
+
+    def fake_post(url, key, payload, timeout, total=None):
+        seen.append(1)
+        return {"choices": [{"message": {"content": "ok"}}], "usage": {}}, ""
+
+    monkeypatch.setattr(llm, "_post", fake_post)
+    assert llm.chat("s", "private-marker", uid=uid) is None
+    assert list(llm.chat_stream("s", "private-marker", uid=uid)) == []
+    assert seen == []
+    store.record_consent(uid, auth.PRIVACY_VERSION)
+    assert llm.chat("s", "private-marker", uid=uid) == "ok"
+    assert seen == [1]

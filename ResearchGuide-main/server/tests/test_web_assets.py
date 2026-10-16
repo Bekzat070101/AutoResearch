@@ -407,6 +407,30 @@ def test_position_view_is_placeholder():
     assert "async function renderProjects()" not in js
 
 
+def test_request_1016_frontend_copy():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    chat = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
+    css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+    assert "回到对话" in js
+    assert "先核对" in chat
+    assert "留下／跳过的理由（4–80 字）" in js
+    assert "kit-paper::before" not in css
+    adopt = re.search(r"function adoptDirection\(facts\) \{.*?\n\}", js, re.S)
+    assert adopt and "saveTrail" not in adopt.group(0)
+    assert "记录" not in js.split("function firstView")[1][:800] or "我的" in js
+    assert "refreshFacts();" in chat
+
+
+def test_frontend_loss_guards():
+    import subprocess
+    script = WEB.parent / "tools" / "verify" / "verify_frontend_loss.js"
+    r = subprocess.run(["node", str(script)], capture_output=True, text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout + r.stderr
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "async function ensureMyDirs" in js
+    assert "llm_key_invalid" in js or "llmKeyInvalid" in js
+
+
 def test_privacy_export_and_sidebar_copy():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     html = (WEB / "index.html").read_text(encoding="utf-8")

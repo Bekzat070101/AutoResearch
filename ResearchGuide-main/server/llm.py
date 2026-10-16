@@ -75,10 +75,25 @@ def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
     return {**cfg, "key": key, "own": False}
 
 
+def _consent_ok(uid: str | None, override: dict | None = None, cfg: dict | None = None) -> bool:
+    if override or not uid:
+        return True
+    cfg = cfg if cfg is not None else resolve_cfg(uid, override)
+    if not cfg.get("own"):
+        return True
+    try:
+        import budget
+        return budget.consented(uid)
+    except Exception:
+        return False
+
+
 def enabled(uid: str | None = None) -> bool:
     """配了密钥（服务器的，或这个人自己上传的），并且——用服务器密钥时——这个请求的人今天还有额度（budget.py）。
-    各功能在这里拿到 False 就走规则版。"""
+    自带 key 也要先同意当前隐私说明（16-F08：同意检查不再只挂在扣费路径上）。各功能在这里拿到 False 就走规则版。"""
     cfg = resolve_cfg(uid)
+    if not _consent_ok(uid, cfg=cfg):
+        return False
     return cfg["enabled"] and (cfg["own"] or budget.allowed())
 
 
@@ -179,7 +194,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     用服务器密钥时每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。
     用户自己的 key 只当参数用，绝不写进 os.environ，也不扣团队预算。标题机翻在 budget.metered_as("*xlate") 里调，算在伪账号头上。"""
     cfg = resolve_cfg(uid, override)
-    if not cfg["enabled"]:
+    if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return None
     metered = not cfg["own"]
     if metered and not budget.charge():
@@ -289,7 +304,7 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     原来这里都没有：每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。
     """
     cfg = resolve_cfg(uid, override)
-    if not cfg["enabled"]:
+    if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return
     if not cfg["own"] and not budget.charge():  # 自己的 key 不扣团队预算
         print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))

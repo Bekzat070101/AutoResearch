@@ -6,7 +6,6 @@ import gzip
 import hmac
 import json
 import os
-import shutil
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -72,23 +71,53 @@ def make_backup() -> dict:
     return {"ok": True, "bytes": len(blob), "object": name, "oss": oss, "integrity": "ok"}
 
 
+def _oss_signed(method: str, bucket: str, object_key: str, blob: bytes | None = None) -> "urllib.request.Request":
+    import base64
+    import hashlib
+    import urllib.request
+    from email.utils import formatdate
+    key_id = (os.environ.get("BACKUP_OSS_ACCESS_KEY_ID") or os.environ.get("OSS_ACCESS_KEY_ID") or "").strip()
+    secret = (os.environ.get("BACKUP_OSS_ACCESS_KEY_SECRET") or os.environ.get("OSS_ACCESS_KEY_SECRET") or "").strip()
+    if not key_id or not secret:
+        raise RuntimeError("OSS AccessKey 未配置")
+    endpoint = (os.environ.get("BACKUP_OSS_ENDPOINT") or "https://oss-cn-hangzhou.aliyuncs.com").rstrip("/")
+    date = formatdate(usegmt=True)
+    content_type = "application/octet-stream"
+    resource = f"/{bucket}/daily/{object_key}"
+    to_sign = f"{method}\n\n{content_type}\n{date}\n{resource}"
+    sig = base64.b64encode(hmac.new(secret.encode("utf-8"), to_sign.encode("utf-8"), hashlib.sha1).digest()).decode()
+    headers = {
+        "Content-Type": content_type,
+        "Date": date,
+        "Authorization": f"OSS {key_id}:{sig}",
+    }
+    url = f"{endpoint}{resource}"
+    return urllib.request.Request(url, data=blob, method=method, headers=headers)
+
+
 def _put_oss(name: str, blob: bytes) -> str:
-    """有 RAM 角色和桶名才上传；没有就只落本地，不假装已经进 OSS。"""
+    """有桶名才上传；配了桶而上传失败不能报成功。"""
     bucket = os.environ.get("BACKUP_OSS_BUCKET") or ""
     if not bucket:
         return "local"
     try:
         import urllib.request
-        endpoint = os.environ.get("BACKUP_OSS_ENDPOINT") or "https://oss-cn-hangzhou.aliyuncs.com"
-        req = urllib.request.Request(
-            f"{endpoint.rstrip('/')}/{bucket}/daily/{name}", data=blob, method="PUT",
-            headers={"Content-Type": "application/octet-stream"},
-        )
-        urllib.request.urlopen(req, timeout=30)
-        return "oss"
+        urllib.request.urlopen(_oss_signed("PUT", bucket, name, blob), timeout=30)
+        return "ok"
+    except HTTPException:
+        raise
     except Exception as exc:
         print(json.dumps({"event": "backup", "ok": False, "error": type(exc).__name__}, ensure_ascii=False))
-        return "local"
+        raise HTTPException(502, f"OSS 上传失败：{type(exc).__name__}") from exc
+
+
+def _get_oss(name: str) -> bytes | None:
+    bucket = os.environ.get("BACKUP_OSS_BUCKET") or ""
+    if not bucket:
+        return None
+    import urllib.request
+    with urllib.request.urlopen(_oss_signed("GET", bucket, name), timeout=30) as resp:
+        return resp.read()
 
 
 @router.post("/api/admin/backup")
@@ -112,47 +141,74 @@ def restore(request: Request, object: str = "", req: RestoreReq | None = None):
         raise HTTPException(503, "BACKUP_KEY 未设或太短")
     src = Path(os.environ.get("BACKUP_DIR") or "/tmp/qiyan-backup") / name
     if not src.exists():
-        raise HTTPException(404, "本地没有这份备份；OSS 下载尚未接通")
-    raw = gzip.decompress(_aes(src.read_bytes(), key, False))
-    tmp = Path(str(store.DB_PATH) + ".restoring")
-    tmp.write_bytes(raw)
-    conn = sqlite3.connect(str(tmp))
-    try:
-        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise HTTPException(500, "恢复包 integrity_check 失败")
-    finally:
-        conn.close()
-    target = Path(store.DB_PATH)
-    with store._LOCK, store._conn() as c:
-        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    for extra in (str(target) + "-wal", str(target) + "-shm"):
-        Path(extra).unlink(missing_ok=True)
-    last = None
-    for _ in range(8):
         try:
-            shutil.copyfile(tmp, target)
-            last = None
-            break
-        except OSError as exc:
-            last = exc
-            time.sleep(0.05)
+            blob = _get_oss(name)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"OSS 下载失败：{type(exc).__name__}") from exc
+        if not blob:
+            raise HTTPException(404, "本地没有这份备份；OSS 也没有")
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(blob)
+    raw = gzip.decompress(_aes(src.read_bytes(), key, False))
     try:
-        tmp.unlink(missing_ok=True)
-    except OSError:
-        pass
-    if last:
-        raise HTTPException(500, f"换库失败：{last}") from last
+        install_restored_db(raw)
+    except OSError as exc:
+        raise HTTPException(500, f"换库失败：{exc}") from exc
     return {"ok": True, "object": name}
 
 
-@router.post("/api/admin/papers/collect")
-def papers_collect(request: Request, node: str = "", quota: int = 20, fulltext: int = 8):
-    _admin(request)
-    import paper_collect
+def install_restored_db(raw: bytes) -> None:
+    """把恢复包写到目标同目录临时文件，校验后再 os.replace。失败保留原库。"""
+    target = Path(store.DB_PATH)
+    staging = target.with_name(target.name + ".incoming")
     try:
-        return paper_collect.collect(node=node, quota=quota, fulltext=fulltext, xlate=True)
+        _write_restore_bytes(staging, raw)
+        conn = sqlite3.connect(str(staging))
+        try:
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise HTTPException(500, "恢复包 integrity_check 失败")
+        finally:
+            conn.close()
+        with store._LOCK:
+            with store._conn() as c:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            os.replace(staging, target)
+            for extra in (str(target) + "-wal", str(target) + "-shm"):
+                Path(extra).unlink(missing_ok=True)
+    except HTTPException:
+        staging.unlink(missing_ok=True)
+        raise
+    except OSError:
+        staging.unlink(missing_ok=True)
+        raise
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _write_restore_bytes(path: Path, raw: bytes) -> None:
+    path.write_bytes(raw)
+
+
+@router.post("/api/admin/papers/collect")
+def papers_collect(request: Request, node: str = "", quota: int = 20, fulltext: int = 8,
+                   max_seconds: int = 240):
+    _admin(request)
+    if quota < 1 or quota > 50:
+        raise HTTPException(400, "quota 须在 1–50")
+    if fulltext < 0 or fulltext > quota:
+        raise HTTPException(400, "fulltext 须在 0–quota")
+    import paper_collect
+    if not store.try_collect_lock(max_seconds):
+        raise HTTPException(409, "采集正在跑")
+    try:
+        return paper_collect.collect(node=node, quota=quota, fulltext=fulltext, xlate=True,
+                                     max_seconds=max_seconds)
     except paper_collect.CollectError as exc:
         raise HTTPException(409, str(exc)) from exc
+    finally:
+        store.release_collect_lock()
 
 
 @router.post("/api/admin/papers/warm")
@@ -314,28 +370,31 @@ class RewrapReq(BaseModel):
 @router.post("/api/admin/rewrap")
 def rewrap(req: RewrapReq, request: Request):
     _admin(request)
-    old = (req.old_secret or "").encode()
+    old = req.old_secret or ""
     if not old:
         raise HTTPException(400, "请求体带 old_secret")
+    env_before = os.environ.get("QIYAN_SECRET")
     n = 0
+    failed: list[str] = []
     with store._LOCK, store._conn() as c:
         rows = list(c.execute("SELECT user_id, kind, wrapped FROM user_secrets"))
     for r in rows:
-        os.environ["_QIYAN_OLD"] = req.old_secret
         try:
-            prev = os.environ.get("QIYAN_SECRET")
-            os.environ["QIYAN_SECRET"] = req.old_secret
-            plain = store.unwrap_secret(r["wrapped"])
-            if prev is None:
-                os.environ.pop("QIYAN_SECRET", None)
-            else:
-                os.environ["QIYAN_SECRET"] = prev
+            plain = store.unwrap_secret(r["wrapped"], secret=old)
             new = store.wrap_secret(plain)
             with store._LOCK, store._conn() as c:
-                c.execute("UPDATE user_secrets SET wrapped=?, key_id='v2' WHERE user_id=? AND kind=?",
-                          (new, r["user_id"], r["kind"]))
+                c.execute(
+                    "UPDATE user_secrets SET wrapped=?, key_id='v2' WHERE user_id=? AND kind=?",
+                    (new, r["user_id"], r["kind"]),
+                )
             n += 1
         except Exception:
-            if "QIYAN_SECRET" in os.environ and req.old_secret == os.environ.get("QIYAN_SECRET"):
-                pass
+            failed.append(r["user_id"])
+    if os.environ.get("QIYAN_SECRET") != env_before:
+        if env_before is None:
+            os.environ.pop("QIYAN_SECRET", None)
+        else:
+            os.environ["QIYAN_SECRET"] = env_before
+    if failed:
+        raise HTTPException(400, {"ok": False, "rewrapped": n, "failed": failed})
     return {"ok": True, "rewrapped": n}

@@ -46,6 +46,15 @@ def guest_cap() -> int:
     return _int("LLM_DAILY_GUEST", 15)
 
 
+def consented(uid: str | None) -> bool:
+    """是否接受了当前隐私说明。自带 key 也要先过这一关，不从扣费路径里顺带检查。"""
+    if not uid:
+        return True
+    import auth as _auth
+    u = store.get_user(uid) or {}
+    return (u.get("consent_version") or "") == _auth.PRIVACY_VERSION
+
+
 def guests_cap() -> int:
     return _int("LLM_DAILY_GUESTS", 500)
 
@@ -70,7 +79,7 @@ def unmetered() -> Iterator[None]:
 
 
 def _today() -> str:
-    return datetime.now(CN).strftime("%Y-%m-%d")
+    return store.llm_day()  # 北京时间的今天；store.llm_usage_today/bump_llm_usage 用同一口径
 
 
 def _caps(uid: str) -> dict[str, int]:

@@ -53,6 +53,7 @@ def test_draft_and_trail_and_prefs_isolated(client):
     assert client.put(f"/api/tasks/{t.id}/draft", json={"text": "偷"}, headers=_h(b["token"])).status_code == 404
     got = client.get(f"/api/tasks/{t.id}/draft", headers=_h(a["token"]))
     assert got.json()["text"] == "我先写下已知"
+    assert got.json().get("updated_at")
 
     pid = "portrait-a"
     client.put(f"/api/projects/{pid}/trail", json={"data": {"code": "ai", "done": ["n1"]}},

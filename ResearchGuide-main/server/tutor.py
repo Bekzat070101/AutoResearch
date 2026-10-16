@@ -80,14 +80,15 @@ class TutorConflict(Exception):
     pass
 
 
-def _is_paper_title(answer: str, paper: dict[str, Any]) -> bool:
+def _is_paper_title(answer: str, paper: dict[str, Any], loc: dict[str, Any] | None = None) -> bool:
     title = quotes.norm(paper.get("title") or "")
     got = quotes.norm(answer or "")
     if not title or not got:
         return False
     if got == title:
         return True
-    if len(got) >= 12 and (got in title or title in got):
+    at = None if loc is None else loc.get("at")
+    if at is not None and at < len(paper.get("title") or "") + 50 and got in title:
         return True
     return False
 
@@ -379,7 +380,7 @@ def judge(slot: dict[str, Any], answer: str, paper: dict[str, Any], station: dic
     loc: dict[str, Any] = {}
     if typ == "find_quote":
         loc = quotes.locate(ans, paper, within=within)
-        if loc["found"] and _is_paper_title(ans, paper):
+        if loc["found"] and _is_paper_title(ans, paper, loc):
             ok, note = False, "这是标题，不是主张原句"
         else:
             ok, note = loc["found"], ("已定位" if loc["found"] else (loc.get("reason") or f"这句不在「{station['label']}」"))
@@ -411,15 +412,23 @@ def judge(slot: dict[str, Any], answer: str, paper: dict[str, Any], station: dic
 
 
 def _excerpt(paper: dict[str, Any], station: dict[str, Any], slot: dict[str, Any], at: Any) -> str:
-    sents = sentences(paper.get("text") or "", station["start"], station["end"])
+    text = paper.get("text") or ""
+    start, end = station["start"], station["end"]
+    if at is not None:
+        lo = max(start, int(at) - 1000)
+        hi = min(end, int(at) + 1000)
+        window = text[lo:hi]
+        sents = sentences(text, lo, hi)
+        if sents:
+            return "\n".join(f"{s['s']} | {s['text']}" for s in sents)[:GRADE_EXCERPT]
+        return window[:GRADE_EXCERPT]
+    sents = sentences(text, start, end)
     if not sents:
-        return (paper.get("text") or "")[station["start"]:station["start"] + GRADE_EXCERPT]
+        return text[start:start + GRADE_EXCERPT]
     center = None
     anc = slot.get("anchor") or {}
     if anc.get("s"):
         center = next((s for s in sents if s["s"] == anc["s"]), None)
-    if center is None and at is not None:
-        center = next((s for s in sents if s["start"] <= at < s["end"]), None)
     if center is None:
         center = sents[0]
     i = sents.index(center)
@@ -582,6 +591,8 @@ def start(uid: str, kit_id: str, aid: str, restart: bool = False) -> dict[str, A
     state = _build(uid, kit_id, paper)
     state["grade_calls"] = inherit.get("grade_calls", 0)
     state["answers_total"] = inherit.get("answers_total", 0)
+    if restart and inherit:
+        state["rev"] = int(inherit.get("rev") or 1) + 1
     store.save_tutor(uid, kit_id, aid, state["status"], state, None)
     return public(state)
 
@@ -631,30 +642,41 @@ def turn(uid: str, kit_id: str, aid: str, qid: str, answer: str = "", skip: bool
         sl["status"] = "skipped"
         sl["note"] = sl.get("note") or f"已跳过。看「{st['label']}」"
         return _advance(uid, kit_id, aid, paper, state, sl, st, rev, hard=False)
-    ans = (sl.get("last") if regrade else answer).strip() if regrade else (answer or "").strip()
     if regrade:
+        raw_last = sl.get("last")
+        if not raw_last:
+            raise TutorError("还没有作答")
         sl["regrades"] = sl.get("regrades", 0) + 1
         if sl["regrades"] > REGRADE_MAX:
             raise TutorError("这题重判次数用完了，改答案或跳过")
-        ans = (sl.get("last") or "").strip()
+        ans = str(raw_last).strip()
+    else:
+        ans = (answer or "").strip()
     if not ans:
         raise TutorError("先写答案")
     if len(ans) > ANSWER_MAX:
         raise TutorError("作答太长，压到 600 字以内")
     if state.get("answers_total", 0) >= ANSWERS_MAX:
         raise TutorError("这篇作答次数用完了")
+    prev_last = sl.get("last")
     sl["last"] = ans
     verd = judge(sl, ans, paper, st)
     if not verd["pass"]:
         sl["attempts"] = sl.get("attempts", 0) + 1
         state["answers_total"] = state.get("answers_total", 0) + 1
         sl["note"] = verd["note"]
-        sl["status"] = "skipped" if sl["attempts"] >= ATTEMPTS_MAX else "open"
         sl["feedback"] = ""
         sl["missing"] = []
-        if sl["status"] == "skipped":
+        if sl["attempts"] >= ATTEMPTS_MAX:
+            sl["status"] = "skipped"
             sl["note"] = f"{verd['note']}。已经 3 次，可跳过。提示：在「{st['label']}」"
             return _advance(uid, kit_id, aid, paper, state, sl, st, rev, hard=True)
+        if sl is not current:
+            if prev_last:
+                sl["last"] = prev_last
+            sl["status"] = "retry"
+        else:
+            sl["status"] = "open"
         state["rev"] = state.get("rev", 1) + 1
         if not store.save_tutor(uid, kit_id, aid, state["status"], state, rev):
             raise TutorConflict("这题已经答过了，刷新")

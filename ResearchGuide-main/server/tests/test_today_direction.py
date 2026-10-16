@@ -147,6 +147,47 @@ def test_interest_mode_failure_shared(monkeypatch):
     assert n["c"] == 1
 
 
+def test_daily_pool_full_is_503(monkeypatch):
+    import workpool
+    u = _uid()
+    token = store.create_session(u, 3600)
+    monkeypatch.setattr(main, "_interest_prep", lambda uid: {"fetch_tid": "ai"})
+
+    def boom(*a, **k):
+        raise workpool.PoolFull()
+
+    monkeypatch.setattr(main._DAILY_POOL, "submit", boom)
+    client = TestClient(main.app)
+    r = client.get(f"/api/daily?uid={u}", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 503
+
+
+def test_stale_topic_triggers_refresh(monkeypatch):
+    u = _uid()
+    store.set_trail(u, store.active_portrait_id(u) or "default", {"dir": "520.20"})
+    store.put_paper_pool("ai", "2000-01-01", [
+        {"id": "2401.00001", "title": "Old", "summary": "x", "published": "2024-01-01",
+         "authors": [], "url": "u", "categories": ["cs.AI"]},
+    ])
+    calls = {"n": 0}
+
+    def fake_recent(*a, **k):
+        calls["n"] += 1
+        return [{"id": "2402.00002", "title": "New", "summary": "x", "published": "2026-10-16",
+                 "authors": [], "url": "u", "categories": ["cs.AI"]}]
+
+    import arxiv
+    monkeypatch.setattr(arxiv, "recent", fake_recent)
+    monkeypatch.setattr(reading.arxiv, "recent", fake_recent)
+    main._TOPIC_REFRESHED.clear()
+    main._DAILY_MISS = type(main._DAILY_MISS)(30, 64)
+    main._interest_daily(u, True)
+    assert calls["n"] >= 1
+    day = reading.arxiv_day()
+    got = store.get_paper_pool("ai", day)
+    assert got and any(p["id"] == "2402.00002" for p in got["papers"])
+
+
 def test_newest_first():
     papers = [
         {"id": "2401.00001", "title": "Old", "summary": "x", "published": "2024-01-01", "authors": [], "url": "u"},
