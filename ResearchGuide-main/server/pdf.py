@@ -36,8 +36,10 @@ def extract_pdf(data: bytes, deadline: float | None = None) -> dict[str, Any]:
     text = "\n".join(parts)
     if len(text) > 600_000:
         raise PdfError("文字太多")
-    if len(text) < 2000:
+    if len(text.strip()) == 0:
         raise PdfError("没有文字层（扫描件）")
+    if len(text) < 2000:
+        raise PdfError(f"文字太少（{len(text)} 字，至少 2000）")
     title = ""
     meta = getattr(reader, "metadata", None)
     if meta is not None:

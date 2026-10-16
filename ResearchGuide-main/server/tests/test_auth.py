@@ -217,6 +217,13 @@ def test_ticket_is_single_use_and_expires(client, wx):
     assert "没找到" in _reply(_send(client, OPENID, s["code"]))["Content"]
     assert client.post("/api/auth/wechat/poll", json={"ticket": "made-up"}).status_code == 410
 
+    s = client.post("/api/auth/wechat/start", json={}).json()
+    _send(client, OPENID, s["code"])
+    with sqlite3.connect(store.DB_PATH) as c:
+        c.execute("UPDATE wechat_tickets SET expires_at=?", (time.time() - 1,))
+        c.commit()
+    assert client.post("/api/auth/wechat/poll", json={"ticket": s["ticket"]}).status_code == 410
+
 
 def test_wechat_retries_are_idempotent_but_another_sender_cannot_take_over(client, wx):
     s = client.post("/api/auth/wechat/start", json={}).json()

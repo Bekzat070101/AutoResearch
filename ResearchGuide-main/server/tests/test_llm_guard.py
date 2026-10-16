@@ -31,10 +31,26 @@ def test_connect_refuses_remote_visitors(monkeypatch, no_write):
 
 def test_connect_needs_the_admin_token_when_set(monkeypatch, no_write):
     monkeypatch.setenv("ADMIN_TOKEN", "t0ken")
+    monkeypatch.setattr(llm, "probe", lambda **k: {"ok": True, "model": "m", "base_url": BODY["base_url"]})
     c = TestClient(main.app)
     assert c.post("/api/llm/connect", json=BODY, headers={"X-Admin-Token": "nope"}).status_code == 403
     assert c.post("/api/llm/connect", json=BODY, headers={"X-Admin-Token": "t0ken"}).status_code == 400  # 过了门，停在 apply_config
     assert len(no_write) == 1
+
+
+def test_connect_probe_fail_does_not_apply(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "t0ken")
+    monkeypatch.setenv("LLM_API_KEY", "sk-good")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-flash")
+    monkeypatch.setattr(llm, "probe", lambda **k: {"ok": False, "error": "bad key"})
+    applied = []
+    monkeypatch.setattr(llm, "apply_config", lambda *a, **k: applied.append(a) or llm.config())
+    c = TestClient(main.app)
+    r = c.post("/api/llm/connect", json=BODY, headers={"X-Admin-Token": "t0ken"})
+    assert r.status_code == 502
+    assert not applied
+    assert llm.config()["model"] == "deepseek-flash"
 
 
 def test_deepseek_payload_disables_thinking_and_caps_output(monkeypatch):

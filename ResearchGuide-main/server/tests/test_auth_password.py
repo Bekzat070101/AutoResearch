@@ -115,3 +115,17 @@ def test_upgrade_guest_then_signin(client):
     twice = client.post("/api/auth/upgrade", json={"username": "other_nm", "password": "secret-ok"},
                         headers=_h(token))
     assert twice.status_code == 409
+
+
+def test_signin_rate_limits_before_password(client, monkeypatch):
+    monkeypatch.setattr(auth, "SIGNIN_USER_LIMIT", 2)
+    client.post("/api/auth/register", json={
+        "username": "rate_me", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    assert client.post("/api/auth/signin", json={"username": "rate_me", "password": "nope-nope"}).status_code == 401
+    assert client.post("/api/auth/signin", json={"username": "rate_me", "password": "nope-nope"}).status_code == 401
+    third = client.post("/api/auth/signin", json={"username": "rate_me", "password": "nope-nope"})
+    assert third.status_code == 429
+    ok_in_window = client.post("/api/auth/signin", json={"username": "rate_me", "password": "secret-ok"})
+    assert ok_in_window.status_code == 429

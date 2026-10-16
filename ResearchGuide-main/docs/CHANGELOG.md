@@ -6,6 +6,23 @@
 
 ---
 
+## [2026-10-16] [OPS] Pages 发到 w83，生产 API 仍是 w74
+
+- 变更内容：前端同步 GitHub Pages（w83）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用或行为不同）。A5 未挂盘，本轮不发生产函数，未把 `/metrics` 发到现网。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：web/（gh-pages）
+- 决策来源：邬程灿（request-10-16 评审 2026-10-16）
+- 登记人：助手
+
+## [2026-10-16] [FIX] request-10-16 本机可证缺陷修复（w83）
+
+- 变更内容：对照 15–19 缺陷单，本机落地 P0/P1 与部分 P2。16：密钥 InvalidTag 回落、rewrap 不改环境变量、restore 原子换库、refuse_unsafe 拦未挂载路径、登录先限流+用户名桶、自带 key 也查隐私同意、OSS 失败 502、测连成功后再写配置、ticket 过期 410。18：收藏/草稿/输入框数据丢失；带读旧题失败保留 retry、restart 升 rev、标题规则收紧、节选以 loc 为中心。17：目录模式 OSF 打开、补搜失败保本地、今日去重、thin 先读目录、目录优先；_load 以库为准、abstract 不盖 html；今日取数进 BoundedPool；stale 每天每话题刷新 1 次；OSF `_vN` 可 triage；admin 采集切片+互斥锁。19：/metrics 路由模板+基数上限+锁内快照+令牌；本机可证后**仍不把 /metrics 发到生产**。界面 w83。A5 NAS、两次发版后账号、监控计划 §2.2 的 1–4 仍待确认。本轮未发生产函数。
+- 未做完的 P2（不准写成已完成）：17-C18、C19、C20、C22、C23、C26；19 建议项 histogram / llm_calls；Grafana alert rules；生产抓取 /metrics。16-A1 真挂 NAS 与两次发版后 qiyan_users 不变：待确认。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、.github/workflows/uptime.yml
+- 影响模块：server/auth.py、store.py、llm.py、budget.py、admin.py、arxiv.py、tutor.py、main.py、paper_collect.py、reading.py、metrics.py、pdf.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿（request-10-16 评审 2026-10-16）
+- 登记人：助手
+
 ## [2026-10-15] [OPS] Pages 发到 w81，生产 API 仍是 w74
 
 - 变更内容：前端同步 GitHub Pages（w81）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用）。A5 未挂盘，本轮不发生产函数。

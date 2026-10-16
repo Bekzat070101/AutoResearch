@@ -322,9 +322,13 @@ def _from_store(aid: str) -> dict[str, Any] | None:
 
 
 def _load(aid: str) -> dict[str, Any] | None:
-    # 路径键优先：换 CACHE_DIR 的测试不会和 aid 内存命中串；
-    # 刚写入的同一对象也从这里回来，corrupt 缓存测试靠 identity。
+    # 以库为准：磁盘只在 DB 缺行时回退。旧摘要 JSON 不能盖掉已入库的 html/pdf。
+    db = _from_store(aid)
     disk = _on_disk(aid)
+    if db:
+        if disk and disk.get("source") == db.get("source") and disk.get("text") == db.get("text"):
+            return disk
+        return db
     if disk:
         try:
             import store
@@ -333,7 +337,7 @@ def _load(aid: str) -> dict[str, Any] | None:
         except Exception:
             pass
         return disk
-    return _from_store(aid)
+    return None
 
 
 def _save(aid: str, result: dict[str, Any]) -> None:

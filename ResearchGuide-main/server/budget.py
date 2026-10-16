@@ -23,6 +23,15 @@ def _caps(who: str) -> dict[str, int]:
     return {}
 
 
+def consented(uid: str | None) -> bool:
+    """是否接受了当前隐私说明。自带 key 也要先过这一关，不从扣费路径里顺带检查。"""
+    if not uid:
+        return True
+    import auth as _auth
+    u = store.get_user(uid) or {}
+    return (u.get("consent_version") or "") == _auth.PRIVACY_VERSION
+
+
 def allowed(who: str | None = None) -> bool:
     who = who if who is not None else _WHO.get()
     if not who:

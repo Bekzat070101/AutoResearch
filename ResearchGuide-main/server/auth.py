@@ -36,6 +36,8 @@ import wechat
 SESSION_TTL = 30 * 86400   # 三十天不用才过期；用着的一天续一次
 TICKET_TTL = 300           # 网页上的数字五分钟有效
 PER_IP_HOUR = 30           # 同一来源一小时最多开三十次登录、三十个访客号
+SIGNIN_USER_LIMIT = 10     # 同一用户名 10 分钟内最多试这么多次（含对的密码）
+SIGNIN_USER_WINDOW = 600
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
@@ -145,14 +147,14 @@ def _client_ip(request: Request) -> str | None:
         return None
 
 
-def _allow(key: str, limit: int) -> bool:
-    """一小时内同一个 key 最多 limit 次。内存计数，有界。"""
+def _allow(key: str, limit: int, window: float = 3600) -> bool:
+    """window 秒内同一个 key 最多 limit 次。内存计数，有界。"""
     now = time.time()
     with _HITS_LOCK:
         if len(_HITS) > 10000:  # 一小时内的才有用，旧的整体清掉
             for k in [k for k, v in _HITS.items() if not v or now - v[-1] > 3600]:
                 del _HITS[k]
-        hits = [t for t in _HITS.get(key, []) if now - t < 3600]
+        hits = [t for t in _HITS.get(key, []) if now - t < window]
         if len(hits) >= limit:
             _HITS[key] = hits
             return False
@@ -214,6 +216,7 @@ def account(uid: str) -> dict[str, Any]:
         "privacy_version": PRIVACY_VERSION,
         "has_llm_key": meta["has_key"],
         "llm_key_tail": meta["tail"],
+        "llm_key_invalid": store.llm_secret_invalid(uid) if meta["has_key"] else False,
         "entered": user_entered(uid, u),
     }
 
@@ -314,11 +317,13 @@ def register(req: RegisterReq, request: Request):
 @router.post("/api/auth/signin")
 def signin(req: SigninReq, request: Request):
     username = store.normalize_username(req.username)
+    if not _ip_allows(request, "signin"):
+        raise HTTPException(429, "试得太频繁了，过一会儿再试")
+    if username and not _allow(f"signin-user:{username}", SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
+        raise HTTPException(429, "试得太频繁了，过一会儿再试")
     user = store.user_by_username(username)
     if not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash")):
         raise HTTPException(401, "用户名或密码不对")
-    if not _ip_allows(request, "signin"):
-        raise HTTPException(429, "试得太频繁了，过一会儿再试")
     return {**account(user["id"]), "token": store.create_session(user["id"], SESSION_TTL)}
 
 
@@ -373,11 +378,11 @@ def wechat_poll(req: WechatPollReq, request: Request):
     row = store.wechat_ticket(req.ticket)
     if not row or row["used"]:
         raise HTTPException(410, "这次登录已经结束了，请重新开始")
+    left = row["expires_at"] - time.time()
+    if left <= 0:
+        raise HTTPException(410, "数字过期了，请重新开始")
     openid = row["openid"]
     if not openid:
-        left = row["expires_at"] - time.time()
-        if left <= 0:
-            raise HTTPException(410, "数字过期了，请重新开始")
         return {"pending": True, "expires_in": int(left)}
     if not store.wechat_use_ticket(req.ticket):
         raise HTTPException(410, "这次登录已经结束了，请重新开始")

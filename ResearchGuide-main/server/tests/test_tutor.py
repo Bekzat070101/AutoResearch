@@ -208,10 +208,20 @@ def test_find_quote_must_be_verbatim_and_in_station(fake_model):
 
 def test_find_quote_rejects_paper_title():
     paper = _paper()
+    paper = {**paper, "text": paper["title"] + "\n" + paper["text"]}
     slot = {"type": "find_quote", "field": "claim_quote", "question": "q", "hint": ""}
     st = {"key": "abstract", "label": "摘要", "start": 0, "end": len(paper["text"])}
     assert not tutor.judge(slot, paper["title"], paper, st)["pass"]
     assert tutor.judge(slot, QUOTES["q_claim_quote"], paper, st)["pass"]
+    body = "We show that benchmark contamination is detectable even when models are small."
+    titled = {
+        **_paper(),
+        "title": "Benchmark contamination is detectable",
+        "text": ("Lead-in words that push the quote past the title zone. " + body + " " + PAD),
+    }
+    st2 = {"key": "abstract", "label": "摘要", "start": 0, "end": len(titled["text"])}
+    assert not tutor.judge(slot, titled["title"], titled, st2)["pass"]
+    assert tutor.judge(slot, body, titled, st2)["pass"]
 
 
 def test_number_answer_needs_a_digit():
@@ -574,6 +584,60 @@ def test_skip_allowed_after_first_fail_only(fake_model):
     bad = tutor.turn(u, KIT, AID, sl["qid"], "zzzz not in paper", False, sess["rev"])
     skipped = tutor.turn(u, KIT, AID, sl["qid"], "", True, bad["session"]["rev"])
     assert skipped["session"]["slots"][0]["status"] == "skipped"
+
+
+def test_old_pending_hard_fail_stays_retry(fake_model, monkeypatch):
+    monkeypatch.setattr(llm, "ready", lambda uid=None: True)
+    monkeypatch.setattr(llm, "enabled", lambda uid=None: True)
+
+    def chat_json(system, user, **kw):
+        if kw.get("tag") == "paper-quiz-grade":
+            return None
+        return _tutor_items()
+
+    monkeypatch.setattr(llm, "chat_json", chat_json)
+    u = uid()
+    sess = tutor.start(u, KIT, AID)
+    sl = sess["slots"][0]
+    out = tutor.turn(u, KIT, AID, sl["qid"], QUOTES["q_claim_quote"], False, sess["rev"])
+    assert out["session"]["slots"][0]["status"] == "pending"
+    cur = out["session"]["cur"]
+    assert cur >= 1
+    bad = tutor.turn(u, KIT, AID, sl["qid"], "this sentence is not in the paper at all",
+                     False, out["session"]["rev"])
+    slot = next(s for s in bad["session"]["slots"] if s["qid"] == sl["qid"])
+    assert slot["status"] == "retry"
+    assert bad["session"]["cur"] == cur
+    assert QUOTES["q_claim_quote"] in (slot.get("last") or "")
+
+
+def test_restart_bumps_rev_and_rejects_old(fake_model):
+    u = uid()
+    first = tutor.start(u, KIT, AID)
+    sl = first["slots"][0]
+    fresh = tutor.start(u, KIT, AID, restart=True)
+    assert fresh["rev"] == first["rev"] + 1
+    with pytest.raises(tutor.TutorConflict):
+        tutor.turn(u, KIT, AID, sl["qid"], QUOTES["q_claim_quote"], False, first["rev"])
+
+
+def test_regrade_without_answer_is_error(fake_model):
+    u = uid()
+    sess = tutor.start(u, KIT, AID)
+    sl = sess["slots"][0]
+    with pytest.raises(tutor.TutorError):
+        tutor.turn(u, KIT, AID, sl["qid"], "", False, sess["rev"], True)
+
+
+def test_excerpt_keeps_late_sentence():
+    quote = QUOTES["q_claim_quote"]
+    long = ("word " * 1800) + quote + (" tail " * 80)
+    paper = {**_paper(), "text": long}
+    st = {"key": "abstract", "label": "摘要", "start": 0, "end": len(long)}
+    at = long.find(quote)
+    slot = {"type": "find_quote", "field": "claim_quote", "question": "q", "hint": "", "anchor": {}}
+    ex = tutor._excerpt(paper, st, slot, at)
+    assert quote in ex
 
 
 def test_grade_calls_survive_restart(fake_model):

@@ -377,6 +377,15 @@ CREATE TABLE IF NOT EXISTS user_papers (
   created_at TEXT NOT NULL,
   PRIMARY KEY (user_id, pid)
 );
+CREATE TABLE IF NOT EXISTS paper_collect_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  node TEXT NOT NULL DEFAULT '',
+  phase TEXT NOT NULL DEFAULT '',
+  attempt INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  lock_until REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 # 老库补列：SQLite 的 ADD COLUMN 是安全操作，已存在就跳过。
@@ -546,18 +555,21 @@ def upgrade_user(uid: str, username: str, password: str) -> dict[str, Any]:
     return out
 
 
-def _wrap_key() -> bytes:
-    secret = (os.environ.get("QIYAN_SECRET") or os.environ.get("LLM_API_KEY") or "qiyan-dev-wrap").encode()
-    return hashlib.sha256(secret).digest()
+def _wrap_key(secret: str | None = None) -> bytes:
+    if secret is None:
+        material = os.environ.get("QIYAN_SECRET") or os.environ.get("LLM_API_KEY") or "qiyan-dev-wrap"
+    else:
+        material = secret
+    return hashlib.sha256(material.encode()).digest()
 
 
-def _aes_key() -> bytes:
-    return hashlib.sha256(b"aes:" + _wrap_key()).digest()
+def _aes_key(secret: str | None = None) -> bytes:
+    return hashlib.sha256(b"aes:" + _wrap_key(secret)).digest()
 
 
-def _wrap_xor(plaintext: str) -> str:
+def _wrap_xor(plaintext: str, secret: str | None = None) -> str:
     raw = (plaintext or "").encode("utf-8")
-    key = _wrap_key()
+    key = _wrap_key(secret)
     out = bytearray(len(raw))
     i = ctr = 0
     while i < len(raw):
@@ -571,9 +583,9 @@ def _wrap_xor(plaintext: str) -> str:
     return out.hex()
 
 
-def _unwrap_xor(hexed: str) -> str:
+def _unwrap_xor(hexed: str, secret: str | None = None) -> str:
     raw = bytes.fromhex(hexed)
-    key = _wrap_key()
+    key = _wrap_key(secret)
     out = bytearray(len(raw))
     i = ctr = 0
     while i < len(raw):
@@ -587,20 +599,20 @@ def _unwrap_xor(hexed: str) -> str:
     return bytes(out).decode("utf-8")
 
 
-def wrap_secret(plaintext: str) -> str:
+def wrap_secret(plaintext: str, secret: str | None = None) -> str:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     nonce = os.urandom(12)
-    ct = AESGCM(_aes_key()).encrypt(nonce, (plaintext or "").encode("utf-8"), None)
+    ct = AESGCM(_aes_key(secret)).encrypt(nonce, (plaintext or "").encode("utf-8"), None)
     return "v2:" + nonce.hex() + ":" + ct.hex()
 
 
-def unwrap_secret(hexed: str) -> str:
+def unwrap_secret(hexed: str, secret: str | None = None) -> str:
     if (hexed or "").startswith("v2:"):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         _, nonce_h, ct_h = hexed.split(":", 2)
-        pt = AESGCM(_aes_key()).decrypt(bytes.fromhex(nonce_h), bytes.fromhex(ct_h), None)
+        pt = AESGCM(_aes_key(secret)).decrypt(bytes.fromhex(nonce_h), bytes.fromhex(ct_h), None)
         return pt.decode("utf-8")
-    return _unwrap_xor(hexed)
+    return _unwrap_xor(hexed, secret)
 
 
 def save_llm_secret(uid: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
@@ -639,11 +651,32 @@ def llm_secret(uid: str) -> dict[str, str] | None:
         return None
     try:
         key = unwrap_secret(row["wrapped"])
-    except (ValueError, UnicodeDecodeError):
+    except Exception as exc:
+        from cryptography.exceptions import InvalidTag
+        if not isinstance(exc, (InvalidTag, ValueError, UnicodeDecodeError)):
+            raise
+        print(json.dumps({"event": "llm_secret_invalid", "uid": uid, "error": type(exc).__name__},
+                         ensure_ascii=False))
         return None
     if not key:
         return None
     return {"key": key, "base_url": row["base_url"], "model": row["model"]}
+
+
+def llm_secret_invalid(uid: str) -> bool:
+    """密文还在但当前 QIYAN_SECRET 解不开。不解出明文。"""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT wrapped FROM user_secrets WHERE user_id=? AND kind='llm'",
+            (uid,),
+        ).fetchone()
+    if not row:
+        return False
+    try:
+        unwrap_secret(row["wrapped"])
+        return False
+    except Exception:
+        return True
 
 
 def delete_llm_secret(uid: str) -> None:
@@ -685,25 +718,39 @@ def set_prefs(uid: str, kit_id: str | None = None, extra: dict[str, Any] | None 
     return get_prefs(uid)
 
 
-def get_draft(uid: str, task_id: str) -> str:
+def get_draft_row(uid: str, task_id: str) -> dict[str, str]:
     with _conn() as c:
-        row = c.execute("SELECT text FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id)).fetchone()
-    return row["text"] if row else ""
+        row = c.execute(
+            "SELECT text, updated_at FROM drafts WHERE user_id=? AND task_id=?",
+            (uid, task_id),
+        ).fetchone()
+    if not row:
+        return {"text": "", "updated_at": ""}
+    return {"text": row["text"] or "", "updated_at": row["updated_at"] or ""}
+
+
+def get_draft(uid: str, task_id: str) -> str:
+    return get_draft_row(uid, task_id)["text"]
 
 
 def set_draft(uid: str, task_id: str, text: str) -> str:
+    return set_draft_row(uid, task_id, text)["text"]
+
+
+def set_draft_row(uid: str, task_id: str, text: str) -> dict[str, str]:
     text = text or ""
     if not text.strip():
         with _LOCK, _conn() as c:
             c.execute("DELETE FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id))
-        return ""
+        return {"text": "", "updated_at": ""}
+    stamp = now_iso()
     with _LOCK, _conn() as c:
         c.execute(
             "INSERT INTO drafts(user_id, task_id, text, updated_at) VALUES(?,?,?,?) "
             "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
-            (uid, task_id, text, now_iso()),
+            (uid, task_id, text, stamp),
         )
-    return text
+    return {"text": text, "updated_at": stamp}
 
 
 def get_trail(uid: str, project_id: str) -> dict[str, Any]:
@@ -849,10 +896,12 @@ def wechat_ticket(ticket: str) -> dict[str, Any] | None:
 
 
 def wechat_use_ticket(ticket: str) -> bool:
-    """换成会话只能一次：两个轮询同时到，只有一个拿到。"""
+    """换成会话只能一次：两个轮询同时到，只有一个拿到。过期的不能换。"""
     with _LOCK, _conn() as c:
-        cur = c.execute("UPDATE wechat_tickets SET used=1 WHERE ticket_hash=? AND used=0 AND openid IS NOT NULL",
-                        (_token_hash(ticket),))
+        cur = c.execute(
+            "UPDATE wechat_tickets SET used=1 WHERE ticket_hash=? AND used=0 AND openid IS NOT NULL AND expires_at>?",
+            (_token_hash(ticket), time.time()),
+        )
     return cur.rowcount == 1
 
 
@@ -1409,11 +1458,17 @@ def put_paper_dir(node_id: str, paper_id: str, topic_id: str, rank: int, source:
                                 (node_id, paper_id)).fetchone()
                 if row:
                     keep_rank = min(int(row["rank"] or rank), int(rank))
+                    old = c.execute(
+                        "SELECT authors, url, categories FROM paper_dir WHERE node_id=? AND paper_id=?",
+                        (node_id, paper_id)).fetchone()
+                    keep_authors = authors_s if (authors or []) else (old["authors"] if old else authors_s)
+                    keep_url = url if url else (old["url"] if old else url)
+                    keep_cats = cats_s if (categories or []) else (old["categories"] if old else cats_s)
                     c.execute(
                         "UPDATE paper_dir SET topic_id=?, rank=?, source=?, title=?, summary=?, authors=?, "
                         "published=?, url=?, categories=?, collected_at=? WHERE node_id=? AND paper_id=?",
-                        (topic_id or "", keep_rank, source or "", title, summary or "", authors_s,
-                         published or "", url or "", cats_s, now, node_id, paper_id),
+                        (topic_id or "", keep_rank, source or "", title, summary or "", keep_authors,
+                         published or "", keep_url, keep_cats, now, node_id, paper_id),
                     )
                 else:
                     c.execute(
@@ -1449,6 +1504,24 @@ def list_paper_dir(node_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def get_paper_dir_item(paper_id: str) -> dict[str, Any] | None:
+    if not paper_id:
+        return None
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM paper_dir WHERE paper_id=? ORDER BY rank ASC LIMIT 1",
+            (paper_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "node_id": row["node_id"], "paper_id": row["paper_id"], "topic_id": row["topic_id"],
+        "rank": row["rank"], "source": row["source"], "title": row["title"],
+        "summary": row["summary"] or "", "authors": _json_list(row["authors"]),
+        "published": row["published"] or "", "url": row["url"] or "",
+        "categories": _json_list(row["categories"]), "collected_at": row["collected_at"],
+    }
+
+
 def search_paper_dir(q: str, limit: int = 20) -> list[dict[str, Any]]:
     toks = [t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,30}", q or "") if len(t) >= 2][:6]
     if not toks:
@@ -1459,17 +1532,18 @@ def search_paper_dir(q: str, limit: int = 20) -> list[dict[str, Any]]:
         like = f"%{t}%"
         params.extend([like, like])
     cap = max(1, min(int(limit), 50))
-    params.append(str(cap * 4))
+    params.append(cap)
     with _conn() as c:
         rows = c.execute(
-            f"SELECT * FROM paper_dir WHERE {where} ORDER BY rank ASC, paper_id ASC LIMIT ?",
+            f"SELECT paper_id, MIN(rank) AS rank, MIN(node_id) AS node_id, "
+            f"MIN(topic_id) AS topic_id, MIN(source) AS source, MIN(title) AS title, "
+            f"MIN(summary) AS summary, MIN(authors) AS authors, MIN(published) AS published, "
+            f"MIN(url) AS url, MIN(categories) AS categories "
+            f"FROM paper_dir WHERE {where} GROUP BY paper_id ORDER BY rank ASC, paper_id ASC LIMIT ?",
             params).fetchall()
-    seen, out = set(), []
+    out = []
     for r in rows:
         pid = r["paper_id"]
-        if pid in seen:
-            continue
-        seen.add(pid)
         out.append({
             "id": pid, "paper_id": pid, "title": r["title"], "summary": r["summary"] or "",
             "authors": _json_list(r["authors"]), "published": r["published"] or "",
@@ -1551,12 +1625,17 @@ def get_paper_text(aid: str) -> dict[str, Any] | None:
     }
 
 
-def put_paper_text(aid: str, result: dict[str, Any], pinned: bool = False) -> None:
+def put_paper_text(aid: str, result: dict[str, Any], pinned: bool = False, force: bool = False) -> None:
     blob = json.dumps(result.get("tables") or [], ensure_ascii=False)
     text = result.get("text") or ""
+    new_src = result.get("source") or "abstract"
     with _LOCK, _conn() as c:
-        old = c.execute("SELECT pinned FROM paper_text WHERE arxiv_id=?", (aid,)).fetchone()
+        old = c.execute("SELECT pinned, source FROM paper_text WHERE arxiv_id=?", (aid,)).fetchone()
         keep_pin = 1 if pinned or (old and old["pinned"]) else 0
+        if (not force and old and (old["source"] or "") in ("html", "pdf") and new_src == "abstract"):
+            if keep_pin and not old["pinned"]:
+                c.execute("UPDATE paper_text SET pinned=1 WHERE arxiv_id=?", (aid,))
+            return
         c.execute(
             "INSERT OR REPLACE INTO paper_text(arxiv_id, sha, source, title, url, text, tables, retry_after, bytes, pinned, fetched_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1584,6 +1663,44 @@ def pin_papers(ids: list[str]) -> None:
     with _LOCK, _conn() as c:
         for aid in ids:
             c.execute("UPDATE paper_text SET pinned=1 WHERE arxiv_id=?", (aid,))
+
+
+def try_collect_lock(seconds: float = 240) -> bool:
+    now = time.time()
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO paper_collect_state(id, node, phase, attempt, error, lock_until, updated_at) "
+            "VALUES(1,'','idle',0,'',0,'')"
+        )
+        row = c.execute("SELECT lock_until FROM paper_collect_state WHERE id=1").fetchone()
+        if row and float(row["lock_until"] or 0) > now:
+            return False
+        c.execute("UPDATE paper_collect_state SET lock_until=?, updated_at=? WHERE id=1",
+                  (now + seconds, now_iso()))
+        return True
+
+
+def release_collect_lock() -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE paper_collect_state SET lock_until=0, updated_at=? WHERE id=1", (now_iso(),))
+
+
+def collect_progress() -> dict[str, Any]:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM paper_collect_state WHERE id=1").fetchone()
+    return dict(row) if row else {}
+
+
+def set_collect_progress(node: str = "", phase: str = "", attempt: int = 0, error: str = "") -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO paper_collect_state(id, node, phase, attempt, error, lock_until, updated_at) "
+            "VALUES(1,'','idle',0,'',0,'')"
+        )
+        c.execute(
+            "UPDATE paper_collect_state SET node=?, phase=?, attempt=?, error=?, updated_at=? WHERE id=1",
+            (node or "", phase or "", int(attempt), error or "", now_iso()),
+        )
 
 
 def paper_lib(ids: list[str]) -> dict[str, str]:

@@ -41,6 +41,12 @@ jobs:
           pages = m.group(1) if m else ""
           print(f"ephemeral={ephemeral} pages={pages} api_build={build}")
           print(f"::notice::ephemeral={ephemeral} pages={pages} api_build={build}")
+          if not pages:
+              sys.exit("Pages 版本戳缺失")
+          if not build:
+              sys.exit("API 版本戳缺失")
+          if pages != build:
+              sys.exit(f"Pages {pages} ≠ API {build}")
           require = (os.environ.get("QIYAN_REQUIRE_PERSISTENT") or "").strip() in ("1", "true", "TRUE", "yes")
           if require and ephemeral:
               sys.exit("QIYAN_REQUIRE_PERSISTENT：生产库仍是 ephemeral")

@@ -1026,10 +1026,10 @@ code { font-family: var(--mono); font-size: 0.92em; padding: 1px 5px; border-rad
 
 /* ---------- 研读：工具包、阅读卡、矩阵 ---------- */
 
-.kit-papers { margin: var(--gap-3) 0 0; padding: 0; list-style: none; counter-reset: kp; }
-.kit-paper { display: flex; align-items: flex-start; gap: var(--gap-4); padding: var(--gap-3) 0; border-top: 1px solid var(--line); counter-increment: kp; }
+.kit-papers { margin: var(--gap-3) 0 0; padding: 0; list-style: none; }
+.kit-paper { display: flex; align-items: flex-start; gap: var(--gap-4); padding: var(--gap-3) 0; border-top: 1px solid var(--line); }
 .kit-paper:first-child { border-top: 0; }
-.kit-paper::before { content: counter(kp); flex-shrink: 0; width: 22px; font-family: var(--serif); font-size: 18px; color: var(--ink-3); }
+.kp-n { flex-shrink: 0; width: 22px; font-family: var(--serif); font-size: 18px; color: var(--ink-3); }
 .kp-main { flex: 1; min-width: 0; }
 .kp-main a { font-weight: 600; color: var(--ink); text-decoration: none; }
 .kp-main a:hover { color: var(--teal-ink); }

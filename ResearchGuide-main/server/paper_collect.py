@@ -135,8 +135,24 @@ def _fulltext_node(node_id: str, want: int) -> dict[str, int]:
             store.put_paper_text(pid, existing, pinned=True)
             html_or_pdf += 1
             continue
+        if osf.is_id(pid):
+            try:
+                got = osf.fulltext(pid)
+                src = (got or {}).get("source") or ""
+                if src in ("html", "pdf"):
+                    store.put_paper_text(osf.clean_id(pid), got, pinned=True)
+                    html_or_pdf += 1
+                else:
+                    abstract_only += 1
+                    _log({"phase": "fulltext", "node": node_id, "paper_id": pid,
+                          "error": (got or {}).get("reason") or "abstract_only"})
+            except Exception as exc:
+                failed += 1
+                _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": str(exc)[:200]})
+            continue
         if not _is_arxiv_id(pid):
             abstract_only += 1
+            _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": "not_arxiv"})
             continue
         try:
             got = arxiv.fulltext(pid, hint={"title": row.get("title") or "", "summary": row.get("summary") or ""})
@@ -153,19 +169,23 @@ def _fulltext_node(node_id: str, want: int) -> dict[str, int]:
 
 
 def _xlate_node(node_id: str, limit: int = 20) -> int:
-    try:
-        import llm
-        if not llm.enabled(None):
-            return 0
-    except Exception:
-        return 0
+    import budget
     n = 0
-    for row in store.list_paper_dir(node_id)[:limit]:
-        pid = row["paper_id"]
-        if (store.get_paper_zh(pid) or {}).get("title_zh"):
-            continue
-        reading.schedule_xlate([{"id": pid, "title": row.get("title") or ""}], None)
-        n += 1
+    with budget.metered_as("*xlate"):
+        try:
+            import llm
+            if not llm.enabled(None):
+                return 0
+        except Exception:
+            return 0
+        for row in store.list_paper_dir(node_id)[:limit]:
+            if not budget.allowed():
+                break
+            pid = row["paper_id"]
+            if (store.get_paper_zh(pid) or {}).get("title_zh"):
+                continue
+            reading.schedule_xlate([{"id": pid, "title": row.get("title") or ""}], None)
+            n += 1
     return n
 
 
@@ -238,15 +258,30 @@ def collect_node(node_id: str, quota: int = 20, fulltext: int = 8, xlate: bool =
 
 
 def collect(node: str = "", quota: int = 20, fulltext: int = 8, xlate: bool = False,
-            metadata_only: bool = False, pin_kit: bool = True) -> dict[str, Any]:
+            metadata_only: bool = False, pin_kit: bool = True, max_seconds: float = 240) -> dict[str, Any]:
     store.init_db()
     if store.ephemeral():
         raise CollectError("ephemeral 库禁止 collect，避免往生产 /tmp 灌库")
-    nodes = [node] if node else list(interests.table()["nodes"])
-    if node and node not in interests.table()["nodes"]:
-        raise CollectError(f"没有这个节点：{node}")
+    all_nodes = list(interests.table()["nodes"])
+    if node:
+        if node not in interests.table()["nodes"]:
+            raise CollectError(f"没有这个节点：{node}")
+        nodes = [node]
+    else:
+        prog = store.collect_progress()
+        start = (prog.get("node") or "").strip()
+        if start and start in all_nodes:
+            nodes = all_nodes[all_nodes.index(start):]
+        else:
+            nodes = all_nodes
     out = []
+    next_node = ""
+    t0 = time.time()
     for nid in nodes:
+        if time.time() - t0 >= max_seconds:
+            next_node = nid
+            break
+        store.set_collect_progress(nid, "running")
         try:
             out.append(collect_node(nid, quota=quota, fulltext=fulltext, xlate=xlate,
                                     metadata_only=metadata_only))
@@ -256,11 +291,16 @@ def collect(node: str = "", quota: int = 20, fulltext: int = 8, xlate: bool = Fa
             rec = {"node": nid, "dir_n": len(store.list_paper_dir(nid)), "error": str(exc)[:200],
                    "reasons": [str(exc)]}
             _log({"phase": "node_fail", **rec})
+            store.set_collect_progress(nid, "error", error=str(exc)[:200])
             out.append(rec)
+    else:
+        next_node = ""
     kit_n = 0
-    if pin_kit and not metadata_only:
+    if pin_kit and not metadata_only and not next_node:
         kit_n = _pin_kit()
-    return {"ok": True, "nodes": out, "kit_pinned": kit_n, "ephemeral": store.ephemeral()}
+    store.set_collect_progress(next_node, "continue" if next_node else "idle")
+    return {"ok": True, "nodes": out, "kit_pinned": kit_n, "ephemeral": store.ephemeral(),
+            "next_node": next_node}
 
 
 def report() -> dict[str, Any]:
@@ -272,7 +312,9 @@ def report() -> dict[str, Any]:
         html_n = abstract_n = 0
         for r in catalog:
             t = store.get_paper_text(r["paper_id"])
-            if t and t.get("source") in ("html", "pdf"):
+            text = (t or {}).get("text") or ""
+            if (t and t.get("source") in ("html", "pdf") and len(text) >= 2000
+                    and int(t.get("pinned") or 0)):
                 html_n += 1
             else:
                 abstract_n += 1

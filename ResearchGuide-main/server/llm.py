@@ -81,8 +81,24 @@ def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
     return {**cfg, "key": key, "own": False}
 
 
+def _consent_ok(uid: str | None, override: dict | None = None, cfg: dict | None = None) -> bool:
+    if override or not uid:
+        return True
+    cfg = cfg if cfg is not None else resolve_cfg(uid, override)
+    if not cfg.get("own"):
+        return True
+    try:
+        import budget
+        return budget.consented(uid)
+    except Exception:
+        return False
+
+
 def enabled(uid: str | None = None) -> bool:
-    return resolve_cfg(uid)["enabled"]
+    cfg = resolve_cfg(uid)
+    if not _consent_ok(uid, cfg=cfg):
+        return False
+    return cfg["enabled"]
 
 
 def ready(uid: str | None = None) -> bool:
@@ -185,7 +201,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     except Exception:
         who = None
     cfg = resolve_cfg(uid, override)
-    if not cfg["enabled"]:
+    if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return None
     if who and who.startswith("*"):
         try:
@@ -267,7 +283,7 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     原来这里都没有：每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。
     """
     cfg = resolve_cfg(uid, override)
-    if not cfg["enabled"]:
+    if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return
     key = cfg.get("key") or ""
     payload: dict = {

@@ -14,6 +14,7 @@ const S = {
   username: "",
   hasLlmKey: false,
   llmKeyTail: "",
+  llmKeyInvalid: false,
   auth: null,
   view: "home",
   entered: false,
@@ -97,6 +98,7 @@ function setSession(r) {
   S.guest = r.guest !== false && !r.wechat && !S.username;
   S.hasLlmKey = !!r.has_llm_key;
   S.llmKeyTail = r.llm_key_tail || "";
+  S.llmKeyInvalid = !!r.llm_key_invalid;
   if (r.entered !== undefined) S.entered = !!r.entered;
   persistSession();
   const chip = document.getElementById("userNickname");
@@ -127,7 +129,7 @@ function dropPersistedSession() {
 
 function clearSession() {
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
-  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = "";
+  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
   S.nickname = "";
   S.entered = false;
   S.myDir = undefined;
@@ -1396,6 +1398,9 @@ function accountPanel() {
       ? `已用微信登录：${esc(S.nickname)}`
       : `访客「${esc(S.nickname)}」。换设备找不回，请退出后注册一个账号。`;
   box.appendChild(el("p", "panel-sub", who));
+  if (S.llmKeyInvalid) {
+    box.appendChild(el("p", "panel-sub warn", "你的 DeepSeek 密钥无法解开，请重新保存。"));
+  }
   const acts = el("div", "account-actions");
   const add = (label, cls, fn) => {
     const b = el("button", cls, label);
@@ -1583,8 +1588,10 @@ function applyLlmPill(llm) {
   if (!pill) return;
   if (S.uid && !S.guest) {
     pill.hidden = false;
-    pill.textContent = S.hasLlmKey ? `我的模型 · ${S.llmKeyTail || "已保存"}` : "我的 DeepSeek";
-    pill.classList.toggle("on", !!S.hasLlmKey);
+    pill.textContent = S.llmKeyInvalid
+      ? "密钥失效，请重存"
+      : (S.hasLlmKey ? `我的模型 · ${S.llmKeyTail || "已保存"}` : "我的 DeepSeek");
+    pill.classList.toggle("on", !!S.hasLlmKey && !S.llmKeyInvalid);
     pill.onclick = () => openMineKey();
     return;
   }
@@ -1599,7 +1606,9 @@ function openMineKey() {
   document.querySelectorAll(".connect-mask").forEach((n) => n.remove());
   const mask = el("div", "connect-mask");
   const box = el("form", "connect-box");
-  const saved = S.hasLlmKey ? `已保存 · 末四位 ${esc(S.llmKeyTail)}` : "还没有保存自己的密钥";
+  const saved = S.llmKeyInvalid
+    ? "当前密钥无法解开，请重新保存"
+    : (S.hasLlmKey ? `已保存 · 末四位 ${esc(S.llmKeyTail)}` : "还没有保存自己的密钥");
   box.innerHTML = `
     <p class="hero-kicker">MINE</p>
     <h3>我的 DeepSeek</h3>
@@ -1619,7 +1628,7 @@ function openMineKey() {
   if (del) del.onclick = async () => {
     try {
       await api("DELETE", "/api/llm/mine");
-      S.hasLlmKey = false; S.llmKeyTail = "";
+      S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
       applyLlmPill({ enabled: false });
       toast("已删除自己的密钥");
       mask.remove();
@@ -1634,7 +1643,7 @@ function openMineKey() {
       const r = await api("POST", "/api/llm/mine", {
         base_url: box.base.value.trim(), api_key: box.key.value.trim(), model: box.model.value.trim(),
       });
-      S.hasLlmKey = true; S.llmKeyTail = r.tail || "";
+      S.hasLlmKey = true; S.llmKeyTail = r.tail || ""; S.llmKeyInvalid = false;
       applyLlmPill({ enabled: true, model: r.model });
       toast("已保存你的 DeepSeek");
       mask.remove();
@@ -1720,9 +1729,15 @@ async function loadPrefs() {
     const p = await api("GET", "/api/me/prefs");
     S.myDirs = Array.isArray(p.directions) ? p.directions : [];
     if (p.kit_id) useKit(p.kit_id);
+    return true;
   } catch (_) {
-    S.myDirs = S.myDirs || [];
+    return false;
   }
+}
+
+async function ensureMyDirs() {
+  if (Array.isArray(S.myDirs)) return true;
+  return loadPrefs();
 }
 
 async function putPrefs(patch) {
@@ -1732,7 +1747,8 @@ async function putPrefs(patch) {
 }
 
 async function addMyDirection(nodeId) {
-  const cur = S.myDirs || [];
+  if (!(await ensureMyDirs())) { toast("没读到已收藏的方向，这次没有改"); return; }
+  const cur = S.myDirs;
   if (cur.includes(nodeId)) { toast("已经在我的方向里"); return; }
   await putPrefs({ directions: cur.concat(nodeId) });
   paintChrome();
@@ -1750,7 +1766,8 @@ async function chooseDirection(nodeId) {
   await saveTrail({
     code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
   }, true);
-  const dirs = S.myDirs || [];
+  if (!(await ensureMyDirs())) { toast("方向已确认，收藏列表没读到，没有改「我的」"); return; }
+  const dirs = S.myDirs;
   if (!dirs.includes(nodeId)) await putPrefs({ directions: dirs.concat(nodeId) });
   S.myDir = undefined;
   paintChrome();
@@ -2450,9 +2467,7 @@ function adoptDirection(facts) {
   const chosen = dirs[dirs.length - 1];
   const code = chosen ? chosen.key.split(":")[1] : "";
   if (!code || !FIELD_TREES[code]) return t;
-  const next = { code, dir: (window.RG_DIR && RG_DIR.legacyDir[code]) || "", done: [], tasks: {} };
-  saveTrail(next);
-  return next;
+  return { ...t, code, dir: (window.RG_DIR && RG_DIR.legacyDir[code]) || t.dir || "" };
 }
 
 function pathNodes(field) {
@@ -3124,23 +3139,47 @@ async function showTeacher(name) {
 function readDraft(tid) {
   try { return localStorage.getItem("rg_draft_" + tid) || ""; } catch (_) { return ""; }
 }
+function readDraftMeta(tid) {
+  try { return JSON.parse(localStorage.getItem("rg_draft_meta_" + tid) || "{}"); } catch (_) { return {}; }
+}
+function writeDraftMeta(tid, meta) {
+  try { localStorage.setItem("rg_draft_meta_" + tid, JSON.stringify(meta || {})); } catch (_) { /* ignore */ }
+}
 function writeDraft(tid, text) {
+  const at = new Date().toISOString();
   try {
     if (text) localStorage.setItem("rg_draft_" + tid, text);
     else localStorage.removeItem("rg_draft_" + tid);
+    writeDraftMeta(tid, { updated_at: at, dirty: true });
   } catch (_) { /* 存不了就算了，不影响提交 */ }
-  if (S.token) api("PUT", `/api/tasks/${tid}/draft`, { text: text || "" }).catch(() => {});
+  if (S.token) {
+    api("PUT", `/api/tasks/${tid}/draft`, { text: text || "", updated_at: at }).then((r) => {
+      writeDraftMeta(tid, { updated_at: (r && r.updated_at) || at, dirty: false });
+    }).catch(() => {
+      writeDraftMeta(tid, { updated_at: at, dirty: true });
+    });
+  }
 }
 async function hydrateDraft(tid, ta) {
   if (!S.token) return;
+  const local = readDraft(tid);
+  const meta = readDraftMeta(tid);
+  const localAt = Date.parse(meta.updated_at || "") || 0;
   try {
     const r = await api("GET", `/api/tasks/${tid}/draft`);
-    if (r.text) {
+    const remoteAt = Date.parse(r.updated_at || "") || 0;
+    if (r.text && remoteAt > localAt) {
       try { localStorage.setItem("rg_draft_" + tid, r.text); } catch (_) { /* ignore */ }
-      if (ta && !ta.value) ta.value = r.text;
-    } else if (readDraft(tid)) {
-      await api("PUT", `/api/tasks/${tid}/draft`, { text: readDraft(tid) });
+      writeDraftMeta(tid, { updated_at: r.updated_at, dirty: false });
+      if (ta && document.activeElement !== ta) ta.value = r.text;
+      else if (ta && !ta.value) ta.value = r.text;
+    } else if (local && (meta.dirty || !r.text)) {
+      try {
+        const saved = await api("PUT", `/api/tasks/${tid}/draft`, { text: local, updated_at: meta.updated_at || new Date().toISOString() });
+        writeDraftMeta(tid, { updated_at: (saved && saved.updated_at) || meta.updated_at, dirty: false });
+      } catch (_) { /* 下次再试 */ }
     }
+    if (ta && !ta.value && readDraft(tid)) ta.value = readDraft(tid);
   } catch (_) { /* 断网先用本地 */ }
 }
 
@@ -3832,15 +3871,19 @@ async function renderRead() {
     $app.appendChild(el("div", "note-box", "先进入启研，再看你的阅读卡。工具包本身可以稍后打开。"));
     return;
   }
-  try {
-    cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
-  } catch (e) {
-    if (stale(seq)) return;
-    if (await recoverUser(e)) return;
-    $app.innerHTML = "";
-    $app.appendChild(workspaceHead("研读"));
-    $app.appendChild(el("div", "note-box", `阅读卡没取到：${esc(e.message)}`));
-    return;
+  if (kitId) {
+    try {
+      cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
+    } catch (e) {
+      if (stale(seq)) return;
+      if (await recoverUser(e)) return;
+      if (!catalog.length) {
+        $app.innerHTML = "";
+        $app.appendChild(workspaceHead("研读"));
+        $app.appendChild(el("div", "note-box", `阅读卡没取到：${esc(e.message)}`));
+        return;
+      }
+    }
   }
   if (stale(seq)) return;
   const byPaper = Object.fromEntries((cards.cards || []).map((c) => [c.arxiv_id, c]));
@@ -3894,6 +3937,17 @@ async function renderRead() {
   }
 
   document.body.dataset.readTab = tab;
+  const hasKitPapers = !!(kit.papers || []).length;
+  if ((tab === "cards" || tab === "matrix") && !hasKitPapers) {
+    const panel = el("div", "panel");
+    panel.appendChild(el("p", "panel-sub", "这个方向还没有阅读卡工具包"));
+    const useEval = el("button", "btn", "用 llm-eval");
+    useEval.type = "button";
+    useEval.onclick = () => { useKit("llm-eval"); S.readTab = tab; setView("read"); };
+    panel.appendChild(useEval);
+    $app.appendChild(panel);
+    return;
+  }
   if (tab === "cards") { renderCardList(kit, byPaper); return; }
   if (tab === "matrix") { await renderMatrix(seq, kit); return; }
 
@@ -3935,9 +3989,10 @@ async function renderRead() {
       if (unread && !fromSearch) firstUnread = false;
       const li = el("li", "kit-paper");
       const main = el("div", "kp-main");
+      const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
       const title = el("button", "linkish", esc(p.title));
       title.type = "button";
-      title.onclick = () => { S.cardFrom = "read"; openCard(aid, fromSearch ? (p.card_kit || "") : kit.id); };
+      title.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       main.appendChild(el("span", "kp-n", String(p.order || i + 1)));
       main.appendChild(title);
       if (p.title_zh) {
@@ -3964,7 +4019,6 @@ async function renderRead() {
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
       li.appendChild(main);
-      const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
       const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "写阅读卡" : "打开"));
       const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
       go.type = "button";
@@ -4035,7 +4089,7 @@ async function renderRead() {
   (kit.datasets || []).forEach((d) => dl.appendChild(el("li", "", `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)} ↗</a>　${esc(d.note)}`)));
   dataBody.appendChild(dl);
   data.appendChild(dataBody);
-  side.append(open, data);
+  if (!catalog.length) side.append(open, data);
   grid.append(leftPane, side);
   $app.appendChild(grid);
 }
@@ -4043,14 +4097,17 @@ async function renderRead() {
 function renderCardList(kit, byPaper) {
   const panel = el("div", "panel");
   const cards = Object.values(byPaper);
+  const first = (kit.papers || [])[0];
   if (!cards.length) {
     panel.appendChild(el("p", "panel-sub", "还没有阅读卡。从「经典文献推荐」挑一篇开始。"));
-    panel.appendChild(el("p", "panel-sub", esc(kit.papers[0].title)));
-    const go = el("button", "btn", "写第一张阅读卡");
-    go.type = "button";
-    go.style.marginTop = "16px";
-    go.onclick = () => openCard(kit.papers[0].arxiv_id);
-    panel.appendChild(go);
+    if (first) {
+      panel.appendChild(el("p", "panel-sub", esc(first.title)));
+      const go = el("button", "btn", "写第一张阅读卡");
+      go.type = "button";
+      go.style.marginTop = "16px";
+      go.onclick = () => openCard(first.arxiv_id);
+      panel.appendChild(go);
+    }
     $app.appendChild(panel);
     return;
   }
@@ -4352,6 +4409,10 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
         uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0, regrade: !!regrade,
       });
       sess = out.session;
+      if (focusQid) {
+        const focused = (sess.slots || []).find((s) => s.qid === focusQid);
+        if (!focused || !["open", "pending", "retry"].includes(focused.status)) focusQid = null;
+      }
       paint();
     } catch (e) {
       if (/已经答过|刷新/.test(e.message || "")) toast("这题已经答过了，刷新");
@@ -4389,7 +4450,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
 
 async function renderCard() {
   const seq = S.renderSeq;
-  const kitId = S.kitId || DEFAULT_KIT;
+  const kitId = S.cardKit || "";
   const aid = S.cardId;
   if (!aid) { setView("read"); return; }
   $app.innerHTML = "";
@@ -4403,12 +4464,15 @@ async function renderCard() {
   let paper; let cards = { cards: [], fields: [] };
   try {
     const jobs = [api("GET", `/api/papers/${encodeURIComponent(aid)}`)];
-    if (!isLocal) jobs.unshift(api("GET", `/api/kits/${kitId}`));
+    if (!isLocal && kitId) jobs.unshift(api("GET", `/api/kits/${kitId}`));
     const got = await Promise.all(jobs);
-    if (!isLocal) { kit = got[0]; paper = got[1]; }
+    if (stale(seq)) return;
+    if (!isLocal && kitId) { kit = got[0]; paper = got[1]; }
     else paper = got[0];
-    const showCards = !isLocal && !!(S.cardKit || (kit.papers || []).some((p) => p.arxiv_id === aid));
+    const inKit = !!(kit.papers || []).some((p) => p.arxiv_id === aid);
+    const showCards = !isLocal && inKit;
     if (S.uid && showCards) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
+    if (stale(seq)) return;
   } catch (e) {
     if (stale(seq)) return;
     if (await recoverUser(e)) return;
@@ -4422,7 +4486,7 @@ async function renderCard() {
   }
   if (stale(seq)) return;
   loading.remove();
-  const showCard = !isLocal && !!(S.cardKit || (kit.papers || []).some((p) => p.arxiv_id === aid));
+  const showCard = !isLocal && !!(kit.papers || []).some((p) => p.arxiv_id === aid);
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
   const draftKey = `rg_card_${S.uid || "anon"}_${kitId}_${aid}`;
   let draft = null;
@@ -4482,6 +4546,7 @@ async function renderCard() {
   if (S.uid) {
     try { tutorMeta = await api("GET", `/api/tutor/${encodeURIComponent(aid)}?uid=${S.uid}&kit=${kitId}`); }
     catch (_) { /* 没有会话就当没开始 */ }
+    if (stale(seq)) return;
   }
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
@@ -4899,7 +4964,7 @@ async function dailyBlock(seq) {
     row.appendChild(el("small", "", `${esc((it.authors || []).join(", "))} · ${esc(it.published || "")}`));
     const ctl = el("div", "triage-ctl");
     const why = el("input");
-    why.placeholder = "为什么（一句，≤30 字）：碰到了什么 / 离你的问题多远";
+    why.placeholder = "留下／跳过的理由（4–80 字）：碰到了什么 / 离你的问题多远";
     why.maxLength = 80;
     const send = async (verdict) => {
       try {
@@ -5504,6 +5569,14 @@ async function renderMe() {
   const now = Date.now();
   const expired = facts.filter((f) => f.valid_until && new Date(f.valid_until).getTime() < now);
   $app.innerHTML = "";
+  if (!S.entered) {
+    const backRow = el("p", "panel-sub");
+    const back = el("button", "btn", "回到对话");
+    back.type = "button";
+    back.onclick = () => setView("dialogue");
+    backRow.appendChild(back);
+    $app.appendChild(backRow);
+  }
   $app.appendChild(workspaceHead("我的", "账号、核对和它记下的，都在这一页。"));
   $app.appendChild(accountPanel());
   $app.appendChild(myDirectionsPanel());

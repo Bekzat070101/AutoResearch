@@ -22,7 +22,7 @@ import quotes
 import store
 from schemas import UserFact, new_id, now_iso
 
-OSF_KEY = re.compile(r"^(psyarxiv|socarxiv):[a-z0-9]{5,}$", re.I)
+OSF_KEY = re.compile(r"^(psyarxiv|socarxiv):[a-z0-9]{5,}(?:_v\d+)?$", re.I)
 
 ROOT = Path(__file__).resolve().parent.parent
 KITS = ROOT / "knowledge" / "kits"
@@ -132,7 +132,10 @@ def warm_targets() -> list[tuple[str, bool, dict]]:
     for aid, (pinned, hint) in want.items():
         row = store.get_paper_text(aid)
         if row:
-            if row.get("source") == "html" and not row.get("needs_reparse"):
+            if row.get("source") in ("html", "pdf") and not row.get("needs_reparse"):
+                if int(row.get("pinned") or 0):
+                    continue
+                out.append((aid, True, hint))
                 continue
             if row.get("source") == "abstract" and time.time() < float(row.get("retry_after") or 0):
                 continue
@@ -260,13 +263,14 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
     if not topic_ids:
         return {**empty, "empty_reason": "no_topics"}
     dir_topics = list(interests.table()["nodes"].get(node) or [])[:2] if node else []
+    catalog = dir_as_papers(node) if node else []
     thin_ids = dir_topics or topic_ids
-    if thin_ids and all(interests.is_thin_topic(t) for t in thin_ids):
+    if not catalog and thin_ids and all(interests.is_thin_topic(t) for t in thin_ids):
         return {**empty, "empty_reason": "thin", "channels": interests.channel_exits(node)}
     stale = False
     error = ""
     buckets: dict[str, list[dict[str, Any]]] = {t: [] for t in topic_ids}
-    catalog = dir_as_papers(node) if node else []
+    seen_ids: set[str] = set()
     if catalog:
         for p in catalog:
             tid = (interests.table()["nodes"].get(node) or [None])[0]
@@ -274,8 +278,10 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
                 continue
             spec = interests.topic(tid) or {}
             buckets.setdefault(tid, [])
-            if p.get("id") in seen:
+            pid = p.get("id") or ""
+            if pid in seen or pid in seen_ids:
                 continue
+            seen_ids.add(pid)
             title = p.get("title") or ""
             abstract = p.get("summary") or ""
             hits, score = [], 0
@@ -300,8 +306,10 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
             error = err
         spec = interests.topic(tid) or {}
         for p in papers:
-            if p.get("id") in seen:
+            pid = p.get("id") or ""
+            if pid in seen or pid in seen_ids:
                 continue
+            seen_ids.add(pid)
             title = p.get("title") or ""
             abstract = p.get("summary") or ""
             hits = []
@@ -320,8 +328,10 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
     recent_buckets = {t: [r for r in buckets[t] if (r["published"] or "9999") >= cutoff] for t in topic_ids}
     old_buckets = {t: [r for r in buckets[t] if (r["published"] or "") < cutoff] for t in topic_ids}
 
+    used: set[str] = set()
+
     def take(from_ids: list[str], n: int, pool: dict[str, list]) -> list[dict[str, Any]]:
-        items, used = [], set()
+        items = []
         while len(items) < n:
             added = False
             for tid in from_ids:
@@ -429,6 +439,8 @@ def apply_xlate(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
     titles = {b["key"]: b["title"] for b in batch}
     user = json.dumps([{"key": b["key"], "title": b["title"], "abstract": b["abstract"]} for b in batch], ensure_ascii=False)
     with budget.metered_as("*xlate"):
+        if not budget.allowed():
+            return []
         data = llm.chat_json("把论文标题译成中文，并给不超过 5 个中文关键词。", user,
                              timeout=20, total=30, retry=False, tag="xlate", uid=None)
     now = now_iso()
@@ -470,7 +482,7 @@ def triage(uid: str, kit_id: str, arxiv_id: str, verdict: str, why: str, title: 
     if kit_id != "*daily":
         kit(kit_id)
     raw = (arxiv_id or "").strip()
-    aid = raw if OSF_KEY.match(raw) else arxiv.clean_id(raw)
+    aid = osf.clean_id(raw) if osf.is_id(raw) else arxiv.clean_id(raw)
     if verdict not in ("keep", "skip"):
         raise ReadingError("只能选「留」或「跳过」")
     why = (why or "").strip()

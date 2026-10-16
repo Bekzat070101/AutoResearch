@@ -186,6 +186,13 @@ const ChatView = (() => {
 
     autoGrow();
     input.focus();
+    try {
+      const draft = sessionStorage.getItem("rg_chat_draft_" + S.uid);
+      if (draft) { input.value = draft; autoGrow(); }
+    } catch (_) { /* ignore */ }
+    input.addEventListener("input", () => {
+      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, input.value); } catch (_) { /* ignore */ }
+    });
 
     /* --- 历史 --- */
     // 有一张记忆卡正在编辑时，refreshFacts 不能把面板清掉重建。
@@ -218,13 +225,6 @@ const ChatView = (() => {
     }
 
     /* --- 发送 --- */
-    try {
-      const draft = sessionStorage.getItem("rg_chat_draft_" + S.uid);
-      if (draft) { input.value = draft; autoGrow(); }
-    } catch (_) { /* ignore */ }
-    input.addEventListener("input", () => {
-      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, input.value); } catch (_) { /* ignore */ }
-    });
 
     async function send(text) {
       const msg = (text || "").trim();
@@ -343,8 +343,8 @@ const ChatView = (() => {
         added.forEach((f) => items.push("记下：" + f.value));
         changed.forEach((f) => items.push("更新：" + f.value));
         groups.push({ label: "记忆", note: `${added.length + changed.length} 条`, items });
-        refreshFacts();   // 整块重画，保证分层展示和库里一致
       }
+      refreshFacts();
       if (tools.length) {
         const items = tools.map((t) => (t.ok ? `已查 ${t.tool}` : `查询失败（${t.tool}）：${t.error || "没有结果"}`));
         groups.push({ label: "查询", note: "", items });
@@ -575,7 +575,7 @@ const ChatView = (() => {
         });
         sideFoot.innerHTML = "";
         const go = el("button", "linkish",
-          drafts.length ? `它记下 ${nFacts} 条 · 去「我的」页核对（${drafts.length} 条待核对）`
+          drafts.length ? `先核对 ${drafts.length} 条 · 它记下 ${nFacts} 条 · 去「我的」页核对`
             : `它记下 ${nFacts} 条 · 去「我的」页核对`);
         go.type = "button";
         go.onclick = () => setView("me");
