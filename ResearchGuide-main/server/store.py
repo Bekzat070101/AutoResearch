@@ -105,6 +105,14 @@ CREATE TABLE IF NOT EXISTS triage (
   created_at TEXT NOT NULL,
   PRIMARY KEY (user_id, kit_id, arxiv_id)
 );
+CREATE TABLE IF NOT EXISTS feedback (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id);
 CREATE TABLE IF NOT EXISTS cards (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -407,6 +415,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "password_salt", "ALTER TABLE users ADD COLUMN password_salt TEXT"),
     ("users", "password_hash", "ALTER TABLE users ADD COLUMN password_hash TEXT"),
     ("user_secrets", "key_id", "ALTER TABLE user_secrets ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"),
+    # 画像自命名：空串表示还没起过名，展示层会退到「按方向起的默认名 / 画像N」
+    ("portraits", "name", "ALTER TABLE portraits ADD COLUMN name TEXT NOT NULL DEFAULT ''"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
@@ -775,6 +785,49 @@ def set_trail(uid: str, project_id: str, data: dict[str, Any]) -> dict[str, Any]
     return get_trail(uid, project_id)
 
 
+# ---------- feedback（用户意见反馈） ----------
+
+def add_feedback(uid: str, text: str) -> dict[str, Any]:
+    fid = new_id()
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO feedback(id, user_id, text, status, created_at) VALUES(?,?,?,?,?)",
+            (fid, uid, text, "open", now_iso()),
+        )
+    return {"id": fid, "text": text, "status": "open", "created_at": now_iso()}
+
+
+def list_feedback(uid: str, limit: int = 50) -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, text, status, created_at FROM feedback"
+            " WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (uid, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_all_feedback(status: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    """给管理端看的全量反馈（带提交人昵称），新→旧。"""
+    q = ("SELECT f.id, f.user_id, f.text, f.status, f.created_at,"
+         " COALESCE(u.nickname, '') AS nickname"
+         " FROM feedback f LEFT JOIN users u ON u.id = f.user_id")
+    args: list[Any] = []
+    if status:
+        q += " WHERE f.status=?"
+        args.append(status)
+    q += " ORDER BY f.created_at DESC, f.rowid DESC LIMIT ?"
+    args.append(max(1, min(int(limit), 1000)))
+    with _conn() as c:
+        return [dict(r) for r in c.execute(q, args)]
+
+
+def set_feedback_status(fid: str, status: str) -> bool:
+    with _LOCK, _conn() as c:
+        cur = c.execute("UPDATE feedback SET status=? WHERE id=?", (status, fid))
+        return bool(cur.rowcount)
+
+
 # ---------- 账号：微信、会话、删号与导出 ----------
 # 规则（有效期、频率、签名校验）在 auth.py / wechat.py；这里只管读写。
 
@@ -1117,7 +1170,8 @@ def _portrait_rows(c: sqlite3.Connection, uid: str) -> list[sqlite3.Row]:
 
 def _portrait_public(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [
-        {"id": r["id"], "name": _portrait_label(i), "active": bool(r["active"]), "created_at": r["created_at"]}
+        {"id": r["id"], "name": r["name"] or "", "fallback": _portrait_label(i),
+         "active": bool(r["active"]), "created_at": r["created_at"]}
         for i, r in enumerate(rows, 1)
     ]
 
@@ -1297,6 +1351,15 @@ def activate_portrait(uid: str, pid: str) -> None:
         _load_live(c, uid, snap)
         c.execute("UPDATE portraits SET active=0 WHERE user_id=?", (uid,))
         c.execute("UPDATE portraits SET active=1 WHERE id=?", (pid,))
+
+
+def rename_portrait(uid: str, pid: str, name: str) -> None:
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "UPDATE portraits SET name=? WHERE id=? AND user_id=?", (name, pid, uid)
+        )
+        if not cur.rowcount:
+            raise KeyError(pid)
 
 
 def delete_portrait(uid: str, pid: str) -> bool:

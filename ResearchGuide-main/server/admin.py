@@ -363,6 +363,33 @@ def admin_delete(req: AdminUserReq, request: Request):
     return {"ok": True, "deleted": store.delete_user(req.uid)}
 
 
+# ---------- 用户反馈（团队看全部） ----------
+
+@router.get("/api/admin/feedback")
+def admin_feedback_list(request: Request, status: str = "", limit: int = 200):
+    """全部用户的反馈，新→旧，带提交人昵称。?status=open|reviewed|done 可过滤。"""
+    _admin(request)
+    if status and status not in ("open", "reviewed", "done"):
+        raise HTTPException(400, "status 只能是 open / reviewed / done，或不传")
+    return {"items": store.list_all_feedback(status, limit)}
+
+
+class FeedbackStatusReq(BaseModel):
+    id: str
+    status: str
+
+
+@router.post("/api/admin/feedback/status")
+def admin_feedback_status(req: FeedbackStatusReq, request: Request):
+    """处理进度：open（已收到）→ reviewed（已读）→ done（已处理）。"""
+    _admin(request)
+    if req.status not in ("open", "reviewed", "done"):
+        raise HTTPException(400, "status 只能是 open / reviewed / done")
+    if not store.set_feedback_status(req.id, req.status):
+        raise HTTPException(404, "没有这条反馈")
+    return {"ok": True, "id": req.id, "status": req.status}
+
+
 class RewrapReq(BaseModel):
     old_secret: str = ""
 
