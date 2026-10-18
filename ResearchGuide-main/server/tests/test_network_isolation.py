@@ -13,12 +13,12 @@ import pytest
 APP = Path(__file__).resolve().parents[2]
 
 GUARD = r'''
+import ipaddress
 import json
 import os
 import socket
 
 _OUT = os.environ["NETGUARD_OUT"]
-_LOOP = {None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0", "::"}
 
 
 def _record(kind, target):
@@ -27,9 +27,12 @@ def _record(kind, target):
 
 
 def _loopback(host):
-    if isinstance(host, bytes):
-        host = host.decode("ascii", "replace")
-    return host in _LOOP or (isinstance(host, str) and host.startswith("127."))
+    try:
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+        return ipaddress.ip_address(host).is_loopback
+    except (ValueError, TypeError, UnicodeError):
+        return False
 
 
 _real_getaddrinfo = socket.getaddrinfo
@@ -127,3 +130,52 @@ def test_guard_records_and_refuses_external_targets(tmp_path):
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
     assert records == [{"kind": "dns", "target": "'netguard-probe.invalid'"},
                        {"kind": "connect", "target": "('203.0.113.7', 9)"}]
+
+
+_NON_NUMERIC = ["127.review.invalid", "localhost", "0.0.0.0", "::"]
+
+
+@pytest.mark.parametrize("raw", [False, True], ids=["str", "bytes"])
+@pytest.mark.parametrize("host", _NON_NUMERIC)
+@pytest.mark.parametrize("kind", ["dns", "connect", "connect_ex"])
+def test_guard_rejects_non_numeric_loopback_targets(tmp_path, monkeypatch, kind, host, raw):
+    import socket
+    calls = []
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: calls.append(("dns", a)))
+    monkeypatch.setattr(socket.socket, "connect", lambda self, addr: calls.append(("connect", addr)))
+    monkeypatch.setattr(socket.socket, "connect_ex", lambda self, addr: calls.append(("connect_ex", addr)))
+    out = tmp_path / "net.jsonl"
+    out.write_text("", encoding="utf-8")
+    monkeypatch.setenv("NETGUARD_OUT", str(out))
+    exec(compile(GUARD, "netguard_plugin", "exec"), {"__name__": "netguard_plugin"})
+    target = host.encode("ascii") if raw else host
+    if kind == "dns":
+        with pytest.raises(socket.gaierror) as e:
+            socket.getaddrinfo(target, 80)
+        assert e.value.args == (socket.EAI_NONAME, "netguard: external DNS refused")
+        want = {"kind": "dns", "target": repr(target)}
+    else:
+        with pytest.raises(OSError) as e:
+            getattr(socket.socket, kind)(object(), (target, 80))
+        assert type(e.value) is OSError and e.value.args == ("netguard: external connect refused",)
+        want = {"kind": "connect", "target": repr((target, 80))}
+    assert calls == []
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert records == [want]
+
+
+def test_guard_subprocess_refuses_non_numeric_loopback_dns(tmp_path):
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "test_probe.py").write_text(
+        "import socket\n"
+        "import pytest\n\n"
+        "def test_probe():\n"
+        "    with pytest.raises(socket.gaierror, match='netguard: external DNS refused'):\n"
+        "        socket.getaddrinfo('127.review.invalid', 80)\n"
+        "    assert socket.getaddrinfo('127.0.0.1', 80)\n"
+        "    assert socket.getaddrinfo('127.0.0.2', 80)\n"
+        "    assert socket.getaddrinfo('::1', 80)\n", encoding="utf-8")
+    proc, records = _run_guarded(tmp_path, "test_probe.py", cwd=probe)
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+    assert records == [{"kind": "dns", "target": "'127.review.invalid'"}]
