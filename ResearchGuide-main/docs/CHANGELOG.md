@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 并入 PR #19 后：规则版五问的轮次不再被 gathering 抹掉
+
+- 变更内容：上游 PR #19 的 `dialogue._sync_onboard_state` 每轮把 onboard 的 `phase` 改写成 `gathering`，而模型不可用时的规则版五问（`onboarding.advance`）把当前轮次记在 `phase` 里，结果没模型的新同学被一遍遍问同一句（本分支 `test_degraded_onboarding` 抓到，Codex 第四轮曾复现过同类问题）。现在只有第一轮/空状态记成 `gathering`，已经往后走的轮次与「问完」原样保留，`guide.assess` 判定就绪时仍记 `done`；上游 `test_enter` 对首轮 `gathering` 的期待不变。随上游契约改写了五个本分支测试：对话不再布置任务（接受 → ValueError、拒绝 → abandoned）、开场白是固定文案不调模型（`_voice` 的截断保护单测）、没模型时问完后的提示指向研读模块、`same_user_races` 的 env 桩补 `guidance`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/dialogue.py、server/tests/test_degraded_onboarding.py、server/tests/test_journey_r6.py、server/tests/test_model_output_callers.py、server/tests/test_same_user_races.py
+- 决策来源：陈浩文
+- 登记人：陈浩文
+
 ## [2026-10-18] [FIX] 并入 main（PR #19：对话首次引导、成绩单接话、「我的」页信息层级，本地 w98–w101）
 
 - 变更内容：把上游 b34ca59（Bekzat070101 的 PR #19）并进本分支。7 处冲突的对接：`dialogue.py` 取上游的「对话不再布置任务」（`action_event` 只接受 decline → abandoned，其它事件 ValueError）与新的模型不可用提示；成绩单导入保留本分支「按学期替换」（`store.replace_terms`）并接上游新的 `append` 模式（`store.add_enrollments`）；`test_dialogue.py` 取上游参数化的「模型动作一律丢弃」；`styles.css` 窄屏对话列取上游；app.js 保留本分支登录页与 `openUpgrade`（上游重做的 `renderLogin` 不接入），删掉「我的」页里的成绩单粘贴列（上游已把成绩单改成对话里接话）；chat.js 保留本分支「等待期间切页不写入」的守卫并接上游 `renderGuide/enterCard(history.guide)`。界面 w102（上游 w101 与本分支 w98 内容不同）。

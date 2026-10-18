@@ -38,7 +38,10 @@ def test_switching_portrait_during_a_model_call_waits_for_the_turn(monkeypatch):
     uid = store.create_user("切画像")["uid"]
     old_pid = store.list_portraits(uid)[0]["id"]
     entered, release = threading.Event(), threading.Event()
-    monkeypatch.setattr(dialogue, "build_env", lambda *a: {"active_plan": {"direction": "ai"}, "trace": {}})
+    monkeypatch.setattr(dialogue, "build_env", lambda *a: {
+        "active_plan": {"direction": "ai"}, "trace": {},
+        "guidance": {"entry_ready": False, "profile": {"ready": False, "first_visit": True, "known_count": 0, "areas": [], "missing": []}},
+    })
     monkeypatch.setattr(dialogue.llm, "enabled", lambda: True)
 
     def slow_propose(env):

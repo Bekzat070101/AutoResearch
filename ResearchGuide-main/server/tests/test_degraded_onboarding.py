@@ -36,9 +36,9 @@ def test_a_new_student_gets_through_the_five_questions_without_the_model():
     assert offers[0]  # 前几轮给了可点的选项
     assert "方向" in replies[-1] and "核对" in replies[-1]
     assert store.list_facts(uid)  # 回答记成了待核对的条目
-    # 问完之后再说话：指到方向页，不重新开始五问
+    # 问完之后再说话：不重新开始五问；上游 PR #19 把没模型时的话改成了指向研读模块
     after = dialogue.turn(uid, "然后呢")
-    assert "方向" in after["reply"] and store.get_onboard_state(uid)["phase"] == "done"
+    assert "研读" in after["reply"] and store.get_onboard_state(uid)["phase"] == "done"
 
 
 def test_an_option_that_mentions_a_subject_still_answers_the_question():

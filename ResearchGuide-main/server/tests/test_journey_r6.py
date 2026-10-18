@@ -72,16 +72,18 @@ def _action(uid, payload):
     return store.save_action(uid, conversation_id="c1", action="micro_task", title="读一篇综述", payload=payload)
 
 
-def test_a_loosely_shaped_model_task_still_becomes_a_task():
-    """模型给的「20分钟」、一整段字符串当步骤：照样建出任务。原来 int("20分钟") 报错，学生点「就做这个」拿到 400。"""
+def test_accepting_a_model_action_is_refused_and_creates_no_task():
+    """上游 PR #19：对话不再布置任务。原来这里测「20分钟」这类松散字段也能建出任务；
+    现在接受任何模型动作都要被拒（ValueError），不能悄悄建任务；拒绝则记成 abandoned。"""
     uid = store.create_user("行动")["uid"]
     a = _action(uid, {"time_budget_min": "20分钟", "difficulty": "中等偏难 3", "steps": "先读摘要再读结论",
                       "rubric": "能说清楚结论", "brief": ["不是字符串"]})
-    out = dialogue.action_event(uid, a["action_id"] if "action_id" in a else a["id"], "accept")
-    t = store.get_task(out["task_id"])
-    assert t.time_budget_min == 20 and t.difficulty == 3
-    assert t.steps == ["先读摘要再读结论"] and t.rubric == [{"criterion": "能说清楚结论"}]
-    assert out["status"] == "accepted"
+    aid = a.get("action_id") or a["id"]
+    with pytest.raises(ValueError, match="对话不再布置任务"):
+        dialogue.action_event(uid, aid, "accept")
+    assert store.list_tasks(uid) == []
+    out = dialogue.action_event(uid, aid, "decline")
+    assert out["status"] == "abandoned"
 
 
 def test_a_failed_task_creation_leaves_the_action_unaccepted(monkeypatch):

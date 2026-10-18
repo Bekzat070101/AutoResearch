@@ -1074,9 +1074,19 @@ def onboard_done(uid: str) -> bool:
 
 
 def _sync_onboard_state(uid: str, env: dict[str, Any]) -> None:
-    """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。"""
+    """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。
+
+    规则版五问（模型不可用时 _degraded_proposal 走 onboarding.advance）把当前轮次记在 phase 里：
+    已经往后走的轮次和「问完」要原样保留，不然每一轮都被抹成 gathering，没模型的同学会被一遍遍问同一句
+    （Codex 第四轮复现过，上游 PR #19 并入后又出现）。第一轮和空状态统一记成 gathering（advance 把它当第一轮）。"""
+    import onboarding
     state = store.get_onboard_state(uid)
-    store.set_onboard_state(uid, {**state, "phase": "done" if onboard_done(uid) else "gathering"})
+    phase = str(state.get("phase") or "")
+    if onboard_done(uid):
+        phase = "done"
+    elif not (phase == "done" or onboarding._ROUND_INDEX.get(phase, 0) > 0):
+        phase = "gathering"
+    store.set_onboard_state(uid, {**state, "phase": phase})
 
 
 # ---------- 行动事件（契约 §6）----------

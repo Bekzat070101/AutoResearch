@@ -86,10 +86,14 @@ def test_invented_project_ids_fall_back_to_the_rule_candidates(monkeypatch, item
 
 
 def test_long_model_reply_still_ends_with_the_next_question(monkeypatch):
-    """模型回了一大段没带问题的话：原来先接上下一问、再整段截到 240 字，问题被截掉，存下的助手消息里也没有问题。现在只截模型那段，下一问完整留在末尾。"""
-    monkeypatch.setattr(llm, "chat", lambda *a, **k: "收到。" * 80)
+    """开场白现在是固定文案（上游 PR #19），不调模型；后续轮次 _voice 仍要保证：模型回了一大段没带问题的话时，
+    只截模型那段、下一问原样接上（原来整段截到 240 字，问题被截掉）。"""
+    called = []
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: called.append(1) or "收到。" * 80)
     uid = store.create_user("t")["uid"]
-    ask = onboarding.ROUNDS[0]["ask"]
     out = onboarding.start(uid)
-    saved = store.list_messages(uid)[-1]["text"]
-    assert out["reply"].endswith(ask) and saved.endswith(ask) and len(saved) <= 240
+    assert called == [] and out["reply"] == onboarding.WELCOME_MESSAGE
+    monkeypatch.setattr(llm, "ready", lambda *a, **k: True)
+    ask = onboarding.ROUNDS[1]["ask"]
+    text = onboarding._voice("我大一", ask, "fallback", uid=uid)
+    assert called and text.endswith(ask) and len(text) <= 240
