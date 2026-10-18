@@ -248,7 +248,9 @@ def _item_of(row: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
 
 def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None = None) -> dict[str, Any]:
     topic_ids, unmatched = interests.user_topics(uid)
-    node = interests.direction_node(uid)
+    nodes = interests.direction_nodes(uid)
+    node = nodes[0] if nodes else ""
+    label = interests.direction_label(nodes) or interests.direction_name(node)
     seen = {r["arxiv_id"]: r for r in store.list_triage_all(uid)}
     today = now_iso()[:10]
     done_today = [r for r in seen.values() if r["created_at"][:10] == today]
@@ -258,12 +260,20 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
         "done_today": len(done_today), "kept_total": len(keeps), "triaged_total": len(seen),
         "recent_keeps": sorted(keeps, key=lambda r: r["created_at"], reverse=True)[:5],
         "topics": topic_ids, "unmatched": unmatched, "stale": False, "channels": [],
-        "direction": {"node": node, "name": interests.direction_name(node)} if node else {"node": "", "name": ""},
+        "direction": {"node": node, "name": label, "nodes": nodes} if nodes else {"node": "", "name": "", "nodes": []},
     }
     if not topic_ids:
         return {**empty, "empty_reason": "no_topics"}
-    dir_topics = list(interests.table()["nodes"].get(node) or [])[:2] if node else []
-    catalog = dir_as_papers(node) if node else []
+    # 组合里每个方向各取前两个话题；目录论文按所属方向挂到对应话题桶
+    dir_topics: list[str] = []
+    for n in nodes:
+        for tid in (interests.table()["nodes"].get(n) or [])[:2]:
+            if tid not in dir_topics:
+                dir_topics.append(tid)
+    catalog: list[tuple[str, dict[str, Any]]] = []
+    for n in nodes:
+        for p in dir_as_papers(n):
+            catalog.append((n, p))
     thin_ids = dir_topics or topic_ids
     if not catalog and thin_ids and all(interests.is_thin_topic(t) for t in thin_ids):
         return {**empty, "empty_reason": "thin", "channels": interests.channel_exits(node)}
@@ -271,9 +281,11 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
     error = ""
     buckets: dict[str, list[dict[str, Any]]] = {t: [] for t in topic_ids}
     seen_ids: set[str] = set()
+    node_topics = {n: (interests.table()["nodes"].get(n) or [])[:2] for n in nodes}
     if catalog:
-        for p in catalog:
-            tid = (interests.table()["nodes"].get(node) or [None])[0]
+        for n, p in catalog:
+            tids = node_topics.get(n) or []
+            tid = tids[0] if tids else None
             if not tid:
                 continue
             spec = interests.topic(tid) or {}
@@ -291,7 +303,7 @@ def daily_for_user(uid: str, sources: dict[str, tuple[list, str, bool]] | None =
                     hits.append({"term_zh": zh, "term_en": en})
                     score += s
             buckets[tid].append({
-                "paper": p, "score": score or 1, "hits": hits, "topic": tid,
+                "paper": p, "score": score, "hits": hits, "topic": tid,
                 "published": p.get("published") or "", "arxiv_id": p.get("id") or "",
             })
     for tid in topic_ids:

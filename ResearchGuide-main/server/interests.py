@@ -69,12 +69,38 @@ def l1_of_topic(tid: str) -> str:
     return str(spec.get("l1") or "")
 
 
-def direction_node(uid: str) -> str:
+def direction_nodes(uid: str) -> list[str]:
+    """当前画像勾选的方向（多选）：trail.sel，空列表 = 全没勾（推荐回落到泛兴趣）；
+    没有 sel 键的老数据视为全选 trail.dirs；再退到单个 trail.dir。"""
     trail = store.get_trail(uid, store.active_portrait_id(uid) or "default")
+    nodes = table()["nodes"]
+
+    def as_ids(raw: Any) -> list[str] | None:
+        if not isinstance(raw, list):
+            return None
+        return [str(n or "") for n in raw if str(n or "") in nodes]
+
+    sel = as_ids(trail.get("sel"))
+    if sel is not None:
+        return sel
+    pool = as_ids(trail.get("dirs"))
+    if pool:
+        return pool
     node = str(trail.get("dir") or "")
-    if node and node in table()["nodes"]:
-        return node
-    return ""
+    return [node] if node in nodes else []
+
+
+def direction_node(uid: str) -> str:
+    nodes = direction_nodes(uid)
+    return nodes[0] if nodes else ""
+
+
+def direction_label(nodes: list[str]) -> str:
+    names = [direction_name(n) for n in nodes if direction_name(n)]
+    if not names:
+        return ""
+    head = " + ".join(names[:3])
+    return head + (f" 等{len(names)} 个方向" if len(names) > 3 else "")
 
 
 def direction_name(node: str) -> str:
@@ -135,14 +161,19 @@ def user_topics(uid: str) -> tuple[list[str], list[str]]:
                 unmatched.append(term)
                 UNMATCHED[term] += 1
 
-    node = direction_node(uid)
+    # 选了的方向（多选）：每个方向带前两个话题，总量封顶；推荐论文按所选组合来
+    nodes = direction_nodes(uid)
     dir_ids: list[str] = []
-    if node:
-        for tid in table()["nodes"].get(node) or []:
-            if tid not in dir_ids:
-                dir_ids.append(tid)
-        dir_ids = dir_ids[:2]
-        l1 = l1_of_node(node)
+    if nodes:
+        for node in nodes:
+            for tid in (table()["nodes"].get(node) or [])[:2]:
+                if tid not in dir_ids:
+                    dir_ids.append(tid)
+                if len(dir_ids) >= 6:
+                    break
+            if len(dir_ids) >= 6:
+                break
+        l1 = l1_of_node(nodes[0])
         same: list[str] = []
         for hit in interests:
             if hit in dir_ids:

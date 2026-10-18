@@ -62,6 +62,7 @@ PUBLIC = frozenset({
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
     "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
     "/api/admin/papers/warm", "/api/admin/papers/collect",
+    "/api/admin/feedback", "/api/admin/feedback/status",  # 上游 w97 的反馈管理：同样自己核对管理员口令
 })
 
 _ARXIV_PAPER_PATH = re.compile(r"^/api/papers/\d{4}\.\d{4,5}$")

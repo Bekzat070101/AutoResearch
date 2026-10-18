@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 并入 main（w97：画像内多选方向、画像命名、意见反馈、研读/论文页工具栏）
+
+- 变更内容：把上游 57f4464（Yukinannie 的 w97，经 PR #18 合入 main）并进本分支。3 处冲突的对接：`POST /api/portraits/rename` 加本分支的 `dependencies=SERIAL`（按人串行），`DELETE /api/portraits/{pid}` 保留本分支的 SERIAL + `_model_work`；app.js 的页面分发仍用本分支带 try/catch 的 switch，加 `feedback` 视图；上游新的「画像与方向」面板整体采用，但切换/新建/删除三处改走本分支 `portraitOp`（服务器成功后才改前端画像、换画像时清上一份的方向/项目/定位草稿、防连点），`portraitOp` 加 `after` 钩子；`clearSession` 补清 `portraitName/mePortrait`；界面 w98（上游 w97 与本分支 w84 内容不同）。其余原样并入：`feedback` 表与 `/api/feedback`、`/api/admin/feedback*`、`portraits.name` 迁移、`interests.direction_nodes`（trail.sel 多选）、`daily_for_user` 合并多方向目录、研读 `read-toolbar`、论文页 `paper-tools` 与滚动联动、`test_feedback.py`。
+- 影响文档：docs/CHANGELOG.md、docs/tasks/21-r3-sheet-audit.md（加「w97 之后」一节）
+- 影响模块：server/main.py、server/auth.py（`/api/admin/feedback`、`/api/admin/feedback/status` 补进 PUBLIC，与其它 admin 路由同一约定）、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
 ## [2026-10-17] [FIX] 并入 main（w83：request-10-16 缺陷修复）
 
 - 变更内容：把上游 f4c91f6（w83，按 docs/tasks 15–19 缺陷单修复）并进本分支。本次上游已是 LF；`.gitattributes` 取本分支版本（多列二进制类型）。对接本分支：auth 的 `PER_IP_HOUR` 仍按本分支（环境变量 `AUTH_PER_IP_HOUR`，默认 600）并加上游的 `SIGNIN_USER_LIMIT/WINDOW`，`_allow`/`_recent` 加 `window` 参数；`budget.py` 仍是本分支那份，补上游 `consented()`；`llm.enabled` = 同意检查 + 本分支「服务器 key 要有额度」；`PUT /api/tasks/{tid}/draft` 保留本分支「已完成的作业可清空草稿」的放行，返回上游 `set_draft_row`（带 updated_at）；`deploy_fc.llm_settings()` 取上游形状（key/base_url/model，`test_local_defaults_returns_three_keys` 钉着），`_local_defaults` 只在 DeepSeek 地址下写 `DEEPSEEK_API_KEY` 并透传 `LLM_REASONING_EFFORT`；app.js 会话块仍是本分支的（`setSession/clearSession` 补 `llmKeyInvalid`），任务草稿键仍按人（`rg_draft_${uid}_${tid}`、`rg_draft_meta_${uid}_${tid}`）并接上游的 updated_at/dirty 同步。界面 w84（上游 w83 与本分支 w82 内容不同）。
