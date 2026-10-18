@@ -321,12 +321,26 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 
 所以每条 `add`/`replace` 你必须同时给出两样东西，缺一条就被代码丢掉：
 
-1. `evidence_quote`：**用户原话里的连续片段**，而且它要**撑得住**你写的 value。
+1. `evidence_quote`：**用户原话里的连续片段**，而且它要**撑得住**你写的 value。引整句陈述（连主语、否定、时间一起），
+   别只截值那几个字；代码按整条消息看这句话是不是在说他自己现在的事。
    代码会算「value 的内容有多少能在引文里找到」：
    - 撑得住 → 收
    - 只撑住一部分 → 收，但**降级为 inferred**（区分「他说的」和「你推的」）
    - 大部分撑不住 → **直接拒**。别把别的轮次的内容、你自己的评价塞进 value。
    value 里不要写你的判断（「基础扎实」「能力偏弱」），只写他说了什么。
+
+   下面这几种字段，value 按固定的形状写，代码拿它去原话里逐项核对（对不上就拒）：
+   - `grade`：`{"stage": "本科|硕士|博士|高中", "year": 1-6}`。原话没说第几年 year 填 null；
+     只说「二年级」「second-year」没说阶段，stage 填 null（或本科）。被否定的、以前的、打算的（「想读研」）、说错又改口的不写。
+   - `age`：`{"value": 19, "unit": "岁"}`；`enroll_year`：`{"value": 2024, "unit": "年"}`（「24级」写 2024）；
+     `pace`：`{"value": 10, "unit": "小时", "per": "周"}`（per 填 周/天/月，原话没说就填 null；范围写 `[3, 5]`）。
+     数和单位要和原话那一处对得上：「两个半小时」是 2.5 小时，「一小时二十分钟」是 80 分钟，别把周数、门数当小时。
+   - `school` / `department` / `major`：写名字（院系用环境包里库内认出的规范名），原话里得出现这个名字或它的常见简称
+     （北大、信管、数院）。他说的是「想去」「以前在」「不是」的学校院系，不写。
+   - `interest:*` / `goal:*` / `field:*`：value **直接抄原话里那几个字**（最短、能说清是什么的那段，如「机器学习」「读博」），
+     常见缩写（AI/人工智能、ML/机器学习、读研/读研究生）算同一个。否定的（「不想碰」「没兴趣」「除了X」）、以前的不写。
+   其余字段 value 照旧写一句话，只写原话里有的（数字、英文名词、否定都要和原话一致），别添原话没说的项目、领域或程度。
+   说的是室友、家人、老师的事，或者「假如」「以前」「打算」的事，不要记成他现在的事实。
 
 2. `affects`：**这条记忆改变你未来的哪个决策**。只能从这几个里挑：
    task_difficulty（任务难度）｜task_kind（任务类型）｜direction_choice（方向建议）｜
@@ -337,7 +351,7 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 「默认不写」不等于「尽量不写」。下面这几类只要出现就写：
 - **改口**：他推翻自己说过的（「其实我不是…」「我刚才说错了」）→
   `replace` 或 `retract`，把旧的撤掉。只删不写会留下两条互相矛盾的记忆。
-- **身份**：年级、院系、专业 → `grade` / `department` / `major`，affects=task_difficulty。
+- **身份**：年级、院系、专业 → `grade`（写成 {stage, year}）/ `department` / `major`，affects=task_difficulty。
   他自报的是简称（「信管」「数院」）就按环境包里库内认出的规范名称写（`department`=信息管理系）。
   不要问学校、入学年份、性别、年龄、所在地。
 - **当前实践**：在上的课、在做的项目、卡在哪 → `current:<slug>`。
@@ -430,7 +444,7 @@ def _proposal_system() -> str:
     "corrections": [{{"targets_fact_id": "f_xxx", "why": "为什么这是纠正"}}]
   }},
   "memory_ops": [
-    {{"op": "add|replace|retract|support", "key": "...", "value": "...",
+    {{"op": "add|replace|retract|support", "key": "...", "value": "一句话；grade/age/enroll_year/pace 写成上面说的对象",
       "evidence_quote": "必须是用户原话里逐字存在的片段",
       "affects": "task_difficulty|task_kind|direction_choice|question_next|course_pick|pace|feedback",
       "target_fact_id": "replace/retract/support 时必填",
@@ -637,6 +651,9 @@ def _clean_proposal(data: Any) -> dict[str, Any] | None:
     understanding = data.get("understanding")
     if not isinstance(understanding, dict):
         understanding = {}
+    # gist 在写完事实和助手消息之后才用：原来写成对象/数字/列表，存完了才抛异常、这一轮没有结果（Codex 复现）
+    gist = understanding.get("gist")
+    understanding = {**understanding, "gist": gist if isinstance(gist, str) else ""}
 
     offered = dialogue.get("offered_actions")
     if not isinstance(offered, list):
@@ -657,7 +674,10 @@ def _clean_proposal(data: Any) -> dict[str, Any] | None:
 def _evidence_pool(uid: str, conversation_id: str) -> list[str]:
     """校验引文用的证据池：本画像近期消息（含本轮刚写入的那条）。"""
     msgs = store.list_messages(uid, limit=40)
-    return [m["text"] for m in msgs if m.get("text")]
+    # 只认学生自己的话：原来助手消息也在池里，助手上一轮说的「你擅长 Python」能当学生自述写进画像（Codex 复现）
+    # 只回「前者」「好」这种确认时也不借助手的话：试过把助手上一句拼进来当证据，结果「好」能把助手整段话变成学生自述、
+    # 用户还能伪造拼接的那一段（Codex 第十三轮复现）。宁可这一条不记、下次再问；界面上点选项发的是选项原文，照样有证据
+    return [m["text"] for m in msgs if m.get("text") and m.get("role") == "user"]
 
 
 # ---------- 降级：规则版一轮 ----------
@@ -685,22 +705,25 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
                 "reply": reply, "offered_actions": []}, "next_action": None}
 
     ops: list[dict[str, Any]] = []
-    try:
-        import onboarding
-        state = store.get_onboard_state(uid)
-        round_id = state.get("phase")
-        round_def = next((r for r in onboarding.ROUNDS if r["id"] == round_id), None)
-        if round_def:
-            matched = next((o for o in round_def["options"] if o["label"] == message), None)
-            tag = matched["tag"] if matched else None
-            spec = onboarding._TAG_FACTS.get(tag) if tag else None
-            if spec:
-                ops.append({"op": "add", "key": spec[1], "value": spec[2],
-                            "evidence_quote": message, "source": spec[3]})
-    except Exception:
-        pass
-
     plan = env.get("active_plan") or {}
+    import onboarding
+    if not plan.get("direction") and (not env.get("lib_facts") or onboarding.answers_current_round(uid, message)):
+        # 还没方向、模型又不可用：走规则版五问（会推进、会给可点的选项），不要一遍遍问同一句。
+        # 他这句话里说到了院系/专业时例外：先用本地知识库答他（下面那条分支）——
+        # 但点的是当前这一问的选项（「数学课学过一些」）就还是在答题，照样往下走（Codex 复现：原来卡在这一问）
+        step = onboarding.advance(uid, message)
+        if step is not None:
+            return {
+                "understanding": {"gist": message[:120], "signals": [], "corrections": []},
+                "memory_ops": [],  # 这一轮的回答已经由规则版记成待核对的条目
+                "tool_intent": None,
+                "dialogue": {"move": "clarify", "reason": "规则降级：模型不可用，走固定的五问",
+                             "reply": step["reply"],
+                             "offered_actions": [{"id": f"o{i}", "label": label}
+                                                 for i, label in enumerate(step["options"])]},
+                "next_action": None,
+            }
+
     # 规则版也要过个性化闸门：把依据挂到当前生效的方向事实上。
     dir_id = next((f["id"] for f in env.get("recalled_memory") or []
                    if str(f.get("key", "")).startswith("direction:")), None)
@@ -768,7 +791,7 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
             clean.append({
                 "course": course[:120],
                 "grade": transcript.normalize_grade(it.get("grade")),
-                "credits": max(0.0, float(it.get("credits") or 0)),
+                "credits": store.clean_credits(it.get("credits")),
                 "term": str(it.get("term") or "")[:40],
                 "kind": str(it.get("kind") or "")[:40],
                 "status": (str(it.get("status") or "completed")
@@ -776,10 +799,10 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
                            else "completed"),
             })
         if clean:
-            # 成绩单是**整份替换**：他粘的是当前完整成绩单，
-            # append 会让重复粘贴产生重复课程。
+            # 追加模式（上游 w99 成绩单接话）按原样追加；替换模式按学期替换：贴进来的学期以新为准（重复粘贴不会重复），
+            # 没贴的学期不动。原来整份替换：只贴这学期两门课，以前导入的所有学期都被删光（Codex 复现）。
             written = (store.add_enrollments(uid, clean) if append
-                       else store.replace_enrollments(uid, clean))
+                       else store.replace_terms(uid, clean))
             store.add_event(uid, "transcript_imported", "",
                             {"count": written, "via": "dialogue"})
 
@@ -951,11 +974,14 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         yield ("stage", {"name": "compose"})
         if stream_reply and llm.ready(uid):
             acc: list[str] = []
-            for piece in _stream_reply(env, proposal):
+            status: dict[str, Any] = {}
+            for piece in _stream_reply(env, proposal, status):
                 acc.append(piece)
                 yield ("delta", {"text": piece})
             streamed = "".join(acc).strip()
-            if streamed:
+            # 流正常收尾才用流出来的正文；断在半截就沿用调用①写好的完整回复（结果事件里给的是它，前端会整段换掉）。
+            # 原来半截也当成功回复存下，盖掉了完整的那段（Codex 复现）。调用①本来就是模型的回复，不算降级
+            if status.get("finished") and streamed:
                 reply = streamed[:4000]
             # 流式失败就沿用调用①已经写好的 reply，不额外再发一次请求
 
@@ -1005,15 +1031,15 @@ def turn(uid: str, message: str, conversation_id: str | None = None) -> dict[str
     return result
 
 
-def _stream_reply(env: dict[str, Any], proposal: dict[str, Any]):
-    """调用②（流式）：只产出给用户看的正文。"""
+def _stream_reply(env: dict[str, Any], proposal: dict[str, Any], status: dict[str, Any] | None = None):
+    """调用②（流式）：只产出给用户看的正文。流正常收尾时 status["finished"] 为 True。"""
     import json
     user = (
         f"【本轮环境】\n{_env_for_prompt(env)}\n\n"
         f"【你的判断】{json.dumps(proposal.get('dialogue', {}), ensure_ascii=False)}\n\n"
         "把要对用户说的那段话写出来。"
     )
-    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream",
+    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream", status=status,
                                uid=env.get("uid"))
 
 
@@ -1048,9 +1074,19 @@ def onboard_done(uid: str) -> bool:
 
 
 def _sync_onboard_state(uid: str, env: dict[str, Any]) -> None:
-    """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。"""
+    """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。
+
+    规则版五问（模型不可用时 _degraded_proposal 走 onboarding.advance）把当前轮次记在 phase 里：
+    已经往后走的轮次和「问完」要原样保留，不然每一轮都被抹成 gathering，没模型的同学会被一遍遍问同一句
+    （Codex 第四轮复现过，上游 PR #19 并入后又出现）。第一轮和空状态统一记成 gathering（advance 把它当第一轮）。"""
+    import onboarding
     state = store.get_onboard_state(uid)
-    store.set_onboard_state(uid, {**state, "phase": "done" if onboard_done(uid) else "gathering"})
+    phase = str(state.get("phase") or "")
+    if onboard_done(uid):
+        phase = "done"
+    elif not (phase == "done" or onboarding._ROUND_INDEX.get(phase, 0) > 0):
+        phase = "gathering"
+    store.set_onboard_state(uid, {**state, "phase": phase})
 
 
 # ---------- 行动事件（契约 §6）----------

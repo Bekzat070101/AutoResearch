@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import envfile  # noqa: F401  先读 .env，下面的 QIYAN_DB 才算数
 from schemas import MicroTask, UserFact, new_id, now_iso
 
 # 部署时用 QIYAN_DB 指到持久盘（Dockerfile 指向卷 /data/qiyan.db）；不设就用仓库里的演示库。
@@ -29,13 +31,37 @@ DB_PATH = Path(os.environ.get("QIYAN_DB") or Path(__file__).resolve().parent / "
 _LOCK = threading.Lock()
 
 
+USER_DELETED = "user deleted"  # 触发器拒绝写入时的错误信息；main 把它转成 410
+
+
 def ephemeral() -> bool:
-    """库放在会被清掉的地方：/tmp 下，或者在函数计算上却没设 QIYAN_DB（默认路径在代码包里，实例回收就没了）。
-    只看路径，不碰磁盘。/api/health 把它报出来，线上一眼能看到。"""
+    """库放在会被清掉的地方：/tmp 下；或者在函数计算上，没设 QIYAN_DB（默认路径在代码包里），
+    或者设了、那个目录却没挂盘（镜像自带的 /data 就是实例自己的盘，原来照样报「持久」，Codex 复现）。
+    /api/health 把它报出来，线上一眼能看到。函数计算上会看一眼挂载点（几次 stat）。"""
     path = str(DB_PATH).replace("\\", "/")
     if path.startswith("/tmp/") or path.startswith("/private/tmp/"):
         return True
-    return bool(os.environ.get("FC_FUNCTION_NAME")) and not os.environ.get("QIYAN_DB")
+    if not os.environ.get("FC_FUNCTION_NAME"):
+        return False
+    return not os.environ.get("QIYAN_DB") or not _own_mount(DB_PATH)
+
+
+def db_writable() -> bool:
+    """库所在目录存在且可写；库文件已存在时也要可写。"""
+    parent = DB_PATH.parent
+    if not parent.is_dir() or not os.access(parent, os.W_OK):
+        return False
+    return not DB_PATH.exists() or os.access(DB_PATH, os.W_OK)
+
+
+def _own_mount(path: Path) -> bool:
+    """路径落在单独挂上来的盘（NAS、容器卷）上，不是实例自己的根盘：往上找第一个挂载点，是根目录就不算。"""
+    p = Path(os.path.abspath(path)).parent
+    while not os.path.ismount(p):
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p != Path(p.anchor)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -254,7 +280,23 @@ CREATE TABLE IF NOT EXISTS wechat_tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_wechat_code ON wechat_tickets(code);
 
+-- 模型调用次数：每天每人一行，全站合计记在 user_id='*' 那一行（budget.py）
+CREATE TABLE IF NOT EXISTS llm_usage (
+  day TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, user_id)
+);
+
+-- 删掉的账号留一个 id（随机串，不是个人信息）：触发器据此拒绝再往任何表里写这个人的行。
+-- 删号那一刻还在跑的请求（比如等模型回话的对话）完成后会写库；没有它，删掉的数据会被重新写回来。
+CREATE TABLE IF NOT EXISTS deleted_users (
+  id TEXT PRIMARY KEY,
+  deleted_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(user_id, task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_enroll_user ON enrollments(user_id);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
@@ -289,6 +331,7 @@ CREATE TABLE IF NOT EXISTS drafts (
   user_id TEXT NOT NULL,
   task_id TEXT NOT NULL,
   text TEXT NOT NULL DEFAULT '',
+  rev INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_id, task_id)
 );
@@ -408,6 +451,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # 账号：微信 openid（只对我们的公众号有效的编号）、同意隐私说明的时间与版本；
     # claimed_at 为空的是「有账号之前」的老用户，可以凭 uid 认领一次
     ("users", "wechat_openid", "ALTER TABLE users ADD COLUMN wechat_openid TEXT"),
+    # 配上这次登录的那条微信消息（MsgId）：一条消息只能配一次，防重放
+    ("wechat_tickets", "msg_id", "ALTER TABLE wechat_tickets ADD COLUMN msg_id TEXT"),
+    # 任务反馈记在提交上（原来只在响应里）
+    ("submissions", "feedback", "ALTER TABLE submissions ADD COLUMN feedback TEXT"),
     ("users", "consent_at", "ALTER TABLE users ADD COLUMN consent_at TEXT"),
     ("users", "consent_version", "ALTER TABLE users ADD COLUMN consent_version TEXT NOT NULL DEFAULT ''"),
     ("users", "claimed_at", "ALTER TABLE users ADD COLUMN claimed_at TEXT"),
@@ -417,27 +464,79 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("user_secrets", "key_id", "ALTER TABLE user_secrets ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"),
     # 画像自命名：空串表示还没起过名，展示层会退到「按方向起的默认名 / 画像N」
     ("portraits", "name", "ALTER TABLE portraits ADD COLUMN name TEXT NOT NULL DEFAULT ''"),
+    # 草稿版本：排序只认服务端单调 rev，客户端时钟不参与
+    ("drafts", "rev", "ALTER TABLE drafts ADD COLUMN rev INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
 _AFTER_MIGRATIONS = [
+    # 修老库：无穷大、负数、离谱的学分清零（读出来序列化会 500）
+    "UPDATE enrollments SET credits=0 WHERE NOT (credits BETWEEN 0 AND 50)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wechat ON users(wechat_openid) WHERE wechat_openid IS NOT NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL AND username != ''",
 ]
 
 
+_GATE = threading.Condition()
+_GATE_STATE: dict[str, Any] = {"open": 0, "owner": None}
+
+
+class RestoreBusy(Exception):
+    """恢复闸没在时限内排空连接。"""
+
+
+@contextmanager
+def restore_gate(timeout: float = 5):
+    """恢复换库：阻止新连接，最多等 timeout 秒排空已开的 _conn；排不空 → RestoreBusy。"""
+    me = threading.get_ident()
+    deadline = time.monotonic() + timeout
+    with _GATE:
+        while _GATE_STATE["owner"] is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise RestoreBusy()
+            _GATE.wait(left)
+        _GATE_STATE["owner"] = me
+        try:
+            while _GATE_STATE["open"] > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise RestoreBusy()
+                _GATE.wait(left)
+        except BaseException:
+            _GATE_STATE["owner"] = None
+            _GATE.notify_all()
+            raise
+    try:
+        yield
+    finally:
+        with _GATE:
+            _GATE_STATE["owner"] = None
+            _GATE.notify_all()
+
+
 @contextmanager
 def _conn():
     """一次调用一个连接：成功提交、异常回滚，最后一定关闭（原来只提交不关闭，连接会一直泄漏）。"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA secure_delete=ON")
+    me = threading.get_ident()
+    with _GATE:
+        while _GATE_STATE["owner"] not in (None, me):
+            _GATE.wait()
+        _GATE_STATE["open"] += 1
     try:
-        with conn:
-            yield conn
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA secure_delete=ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        with _GATE:
+            _GATE_STATE["open"] -= 1
+            _GATE.notify_all()
 
 
 def init_db() -> None:
@@ -450,6 +549,11 @@ def init_db() -> None:
                 c.execute(ddl)
         for ddl in _AFTER_MIGRATIONS:
             c.execute(ddl)
+        # 每张带 user_id 的表一个触发器：已删除的账号不能再插入行（以后加的表在下次启动时自动补上）
+        for t in _user_tables(c):
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{t}_not_deleted BEFORE INSERT ON {t} "
+                      "WHEN EXISTS (SELECT 1 FROM deleted_users WHERE id = NEW.user_id) "
+                      f"BEGIN SELECT RAISE(ABORT, '{USER_DELETED}'); END")
     migrate_legacy_secrets()
 
 
@@ -728,15 +832,21 @@ def set_prefs(uid: str, kit_id: str | None = None, extra: dict[str, Any] | None 
     return get_prefs(uid)
 
 
-def get_draft_row(uid: str, task_id: str) -> dict[str, str]:
+class DraftConflict(Exception):
+    def __init__(self, rev: int):
+        super().__init__(rev)
+        self.rev = rev
+
+
+def get_draft_row(uid: str, task_id: str) -> dict[str, Any]:
     with _conn() as c:
         row = c.execute(
-            "SELECT text, updated_at FROM drafts WHERE user_id=? AND task_id=?",
+            "SELECT text, rev, updated_at FROM drafts WHERE user_id=? AND task_id=?",
             (uid, task_id),
         ).fetchone()
     if not row:
-        return {"text": "", "updated_at": ""}
-    return {"text": row["text"] or "", "updated_at": row["updated_at"] or ""}
+        return {"text": "", "rev": 0, "updated_at": ""}
+    return {"text": row["text"] or "", "rev": int(row["rev"] or 0), "updated_at": row["updated_at"] or ""}
 
 
 def get_draft(uid: str, task_id: str) -> str:
@@ -744,23 +854,26 @@ def get_draft(uid: str, task_id: str) -> str:
 
 
 def set_draft(uid: str, task_id: str, text: str) -> str:
-    return set_draft_row(uid, task_id, text)["text"]
+    return set_draft_row(uid, task_id, text, get_draft_row(uid, task_id)["rev"])["text"]
 
 
-def set_draft_row(uid: str, task_id: str, text: str) -> dict[str, str]:
+def set_draft_row(uid: str, task_id: str, text: str, base_rev: int) -> dict[str, Any]:
+    """CAS：base_rev 等于当前 rev 才写，rev+1；清空也留一行 text=""（tombstone），rev 照样递增。"""
     text = text or ""
     if not text.strip():
-        with _LOCK, _conn() as c:
-            c.execute("DELETE FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id))
-        return {"text": "", "updated_at": ""}
+        text = ""
     stamp = now_iso()
     with _LOCK, _conn() as c:
+        old = c.execute("SELECT rev FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id)).fetchone()
+        cur = int(old["rev"] or 0) if old else 0
+        if cur != int(base_rev):
+            raise DraftConflict(cur)
         c.execute(
-            "INSERT INTO drafts(user_id, task_id, text, updated_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
-            (uid, task_id, text, stamp),
+            "INSERT INTO drafts(user_id, task_id, text, rev, updated_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, rev=excluded.rev, updated_at=excluded.updated_at",
+            (uid, task_id, text, cur + 1, stamp),
         )
-    return {"text": text, "updated_at": stamp}
+    return {"text": text, "rev": cur + 1, "updated_at": stamp}
 
 
 def get_trail(uid: str, project_id: str) -> dict[str, Any]:
@@ -934,11 +1047,25 @@ def wechat_ticket_new(ticket: str, code: str, expires_at: float, guest_uid: str 
     return True
 
 
-def wechat_claim_code(code: str, openid: str) -> bool:
-    """公众号收到一个数字：配上还在等的那次登录请求。微信超时会重发同一条消息，所以重复配同一个 openid 也算成功。"""
+def wechat_claim_code(code: str, openid: str, msg_id: str) -> bool:
+    """公众号收到一个数字：配上还在等的那次登录请求。
+    微信超时会重发同一条消息（同一个 MsgId），重发算成功；但同一个 MsgId 不能再去配别的请求：
+    有人拿到一条签过名的旧消息原样重放，只要碰上一个同号的新请求就能把它登进那个微信，现在不行了。"""
+    if not msg_id:
+        return False
     with _LOCK, _conn() as c:
-        cur = c.execute("UPDATE wechat_tickets SET openid=? WHERE code=? AND expires_at>? AND used=0"
-                        " AND (openid IS NULL OR openid=?)", (openid, code, time.time(), openid))
+        row = c.execute("SELECT ticket_hash, openid, msg_id FROM wechat_tickets WHERE code=? AND expires_at>? AND used=0",
+                        (code, time.time())).fetchone()
+        if row is None:
+            return False
+        # 这条消息已经配过别的请求：是重放，不是重发
+        if c.execute("SELECT 1 FROM wechat_tickets WHERE msg_id=? AND ticket_hash<>?",
+                     (msg_id, row["ticket_hash"])).fetchone():
+            return False
+        if row["openid"] is not None:
+            return row["openid"] == openid and row["msg_id"] == msg_id  # 微信重发同一条：还是成功
+        cur = c.execute("UPDATE wechat_tickets SET openid=?, msg_id=? WHERE ticket_hash=? AND openid IS NULL",
+                        (openid, msg_id, row["ticket_hash"]))
     return cur.rowcount == 1
 
 
@@ -958,6 +1085,28 @@ def wechat_use_ticket(ticket: str) -> bool:
     return cur.rowcount == 1
 
 
+def llm_calls(day: str, uid: str) -> int:
+    with _conn() as c:
+        row = c.execute("SELECT calls FROM llm_usage WHERE day=? AND user_id=?", (day, uid)).fetchone()
+    return row["calls"] if row else 0
+
+
+def llm_charge(day: str, caps: dict[str, int]) -> bool:
+    """caps：计数的 key（某个人的 uid、全站 '*'、全体访客 '*guest'）→ 今天的上限。每个都没到上限才扣，一起各加一。
+    查额度和扣一笔在同一个事务里：并发的两个请求不会都看到「还剩一次」然后都调。"""
+    keys = list(caps)
+    with _LOCK, _conn() as c:
+        rows = {r["user_id"]: r["calls"] for r in
+                c.execute(f"SELECT user_id, calls FROM llm_usage WHERE day=? AND user_id IN ({','.join('?' * len(keys))})",
+                          (day, *keys))}
+        if any(rows.get(k, 0) >= cap for k, cap in caps.items()):
+            return False
+        for who in keys:
+            c.execute("INSERT INTO llm_usage(day, user_id, calls) VALUES(?,?,1)"
+                      " ON CONFLICT(day, user_id) DO UPDATE SET calls=calls+1", (day, who))
+    return True
+
+
 def _user_tables(c: sqlite3.Connection) -> list[str]:
     """所有带 user_id 列的表。按列找而不是写死表名：以后加了新表，删号和导出不会漏。"""
     names = [r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")]
@@ -966,6 +1115,7 @@ def _user_tables(c: sqlite3.Connection) -> list[str]:
 
 def export_user(uid: str) -> dict[str, Any]:
     with _conn() as c:
+        c.execute("BEGIN")  # 整个导出看同一个快照：原来逐表查，中途切画像会拼出两份画像的状态（Codex 复现）
         user = c.execute("SELECT id, nickname, username, wechat_openid, created_at, consent_at, consent_version, onboard_state"
                          " FROM users WHERE id=?", (uid,)).fetchone()
         out: dict[str, Any] = {"user": dict(user) if user else None}
@@ -989,6 +1139,8 @@ def delete_user(uid: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     with _LOCK, _conn() as c:
         row = c.execute("SELECT wechat_openid FROM users WHERE id=?", (uid,)).fetchone()
+        # 先立墓碑（同一个事务里）：从这一刻起，还在路上的请求再写这个人的行都会被触发器拒绝
+        c.execute("INSERT OR IGNORE INTO deleted_users(id, deleted_at) VALUES(?, ?)", (uid, now_iso()))
         for t in _user_tables(c):
             counts[t] = c.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,)).rowcount
         if row and row["wechat_openid"]:
@@ -1048,11 +1200,19 @@ _UNSET = object()
 
 
 def update_fact(fid: str, value: str | None = None, status: str | None = None,
-                valid_until: Any = _UNSET, evidence: list[dict[str, Any]] | None = None) -> UserFact | None:
+                valid_until: Any = _UNSET, evidence: list[dict[str, Any]] | None = None,
+                source: str | None = None, confidence: float | None = None,
+                affects: str | None = None) -> UserFact | None:
     """局部更新。valid_until 用哨兵区分「不改」和「清空」，因为 None 是合法值。"""
     f = get_fact(fid)
     if not f:
         return None
+    if source is not None:
+        f.source = source
+    if confidence is not None:
+        f.confidence = confidence
+    if affects is not None:
+        f.affects = affects
     if value is not None:
         f.value = value
     if status is not None:
@@ -1064,9 +1224,10 @@ def update_fact(fid: str, value: str | None = None, status: str | None = None,
     f.updated_at = now_iso()
     with _LOCK, _conn() as c:
         c.execute(
-            "UPDATE facts SET value=?, status=?, valid_until=?, evidence=?, updated_at=? WHERE id=?",
-            (f.value, f.status, f.valid_until,
-             json.dumps(f.evidence, ensure_ascii=False), f.updated_at, fid),
+            "UPDATE facts SET value=?, status=?, valid_until=?, evidence=?, source=?, confidence=?, affects=?,"
+            " updated_at=? WHERE id=?",
+            (f.value, f.status, f.valid_until, json.dumps(f.evidence, ensure_ascii=False),
+             f.source, f.confidence, f.affects or "", f.updated_at, fid),
         )
     return f
 
@@ -1114,6 +1275,19 @@ def list_tasks(uid: str) -> list[MicroTask]:
 
 # ---------- submissions & messages ----------
 
+def save_feedback(submission_id: str, feedback: dict[str, Any]) -> None:
+    """把反馈记在这次提交上：原来反馈只在响应里，刷新或换个任务再回来就没了（Codex 复现）。"""
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE submissions SET feedback=? WHERE id=?", (json.dumps(feedback, ensure_ascii=False), submission_id))
+
+
+def latest_feedback(uid: str, task_id: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT feedback FROM submissions WHERE user_id=? AND task_id=? AND feedback IS NOT NULL"
+                        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (uid, task_id)).fetchone()
+    return json.loads(row["feedback"]) if row else None
+
+
 def save_submission(task_id: str, uid: str, payload: str) -> str:
     sid = new_id()
     with _LOCK, _conn() as c:
@@ -1141,11 +1315,17 @@ def list_messages(uid: str, conversation_id: str | None = None, limit: int | Non
     if conversation_id is not None:
         q += " AND conversation_id=?"
         args.append(conversation_id)
+    if limit:
+        # 只要最近几条：在 SQL 里取再倒回来。原来把整个历史读进内存再切片，一万条长消息取 12 条要 25 MB、近 100 毫秒（Codex 复现）
+        q += " ORDER BY rowid DESC LIMIT ?"
+        args.append(int(limit))
+        with _conn() as c:
+            rows = c.execute(q, args).fetchall()
+        return [dict(r) for r in reversed(rows)]
     q += " ORDER BY rowid"
     with _conn() as c:
         rows = c.execute(q, args).fetchall()
-    out = [dict(r) for r in rows]
-    return out[-limit:] if limit else out
+    return [dict(r) for r in rows]
 
 
 # ---------- portraits（多份画像；当前份的对话和事实仍写在 live 表里） ----------
@@ -1228,9 +1408,10 @@ def _clear_live(c: sqlite3.Connection, uid: str) -> None:
 
 
 # 恢复快照时的列顺序；memory_version / degraded 是整数列，缺省补 0，其余补空串。
+_NULLABLE_COLS = {"feedback"}  # 切画像存取快照时，这些列缺了就是 NULL，不要补成空串
 _RESTORE_COLS: dict[str, tuple[str, ...]] = {
     "tasks": ("id", "user_id", "data"),
-    "submissions": ("id", "task_id", "user_id", "payload", "created_at"),
+    "submissions": ("id", "task_id", "user_id", "payload", "created_at", "feedback"),
     "projects": ("id", "user_id", "data", "status", "created_at", "updated_at"),
     "conversations": ("id", "user_id", "status", "topic_hint", "created_at", "updated_at"),
     "actions": ("id", "user_id", "conversation_id", "action", "title", "direction",
@@ -1255,7 +1436,7 @@ def _restore_rows(c: sqlite3.Connection, table: str, uid: str, items: Any) -> No
                 vals.append(uid)
                 continue
             v = item.get(col)
-            if v is None:
+            if v is None and col not in _NULLABLE_COLS:  # 老快照没有的可空列（如 feedback）保持 NULL
                 v = 0 if col in _NUMERIC_COLS else ""
             vals.append(v)
         c.execute(
@@ -1317,6 +1498,23 @@ def list_portraits(uid: str) -> list[dict[str, Any]]:
             )
             rows = _portrait_rows(c, uid)
         return _portrait_public(rows)
+
+
+def project_in_portrait(uid: str, pid: str) -> tuple[dict[str, Any] | None, str]:
+    """项目和「现在是哪个画像」在同一个读事务里取：切画像是一个写事务，读到的两样一定属于同一个画像。"""
+    with _conn() as c:
+        c.execute("BEGIN")
+        row = c.execute("SELECT * FROM projects WHERE id=? AND user_id=?", (pid, uid)).fetchone()
+        act = c.execute("SELECT id FROM portraits WHERE user_id=? AND active=1", (uid,)).fetchone()
+    project = ({**json.loads(row["data"]), "id": row["id"], "status": row["status"],
+                "created_at": row["created_at"], "updated_at": row["updated_at"]} if row else None)
+    return project, (act["id"] if act else "")
+
+
+def active_portrait_id(uid: str) -> str:
+    with _conn() as c:
+        row = c.execute("SELECT id FROM portraits WHERE user_id=? AND active=1", (uid,)).fetchone()
+    return row["id"] if row else ""
 
 
 def open_new_portrait(uid: str) -> None:
@@ -1811,8 +2009,15 @@ def delete_user_paper(uid: str, pid: str) -> None:
         c.execute("DELETE FROM tutor_sessions WHERE user_id=? AND arxiv_id=?", (uid, pid))
 
 
+def llm_day() -> str:
+    """模型额度按北京时间的「今天」计（budget.py 同一口径）。now_iso() 是 UTC，直接切前 10 位会在北京 0–8 点落到前一天，
+    写（llm_charge 用北京日期）和读（这里）对不上，额度/统计都会错。"""
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
 def bump_llm_usage(user_id: str, n: int = 1, day: str | None = None) -> int:
-    d = day or now_iso()[:10]
+    d = day or llm_day()
     with _LOCK, _conn() as c:
         c.execute(
             "INSERT INTO llm_usage(user_id, day, calls) VALUES(?,?,?) "
@@ -1824,7 +2029,7 @@ def bump_llm_usage(user_id: str, n: int = 1, day: str | None = None) -> int:
 
 
 def llm_usage_today(user_id: str | None = None) -> int:
-    d = now_iso()[:10]
+    d = llm_day()
     with _conn() as c:
         if user_id is None:
             row = c.execute("SELECT COALESCE(SUM(calls),0) FROM llm_usage WHERE day=?", (d,)).fetchone()
@@ -1877,10 +2082,12 @@ def card_history(uid: str, kit_id: str, arxiv_id: str) -> list[dict[str, Any]]:
 
 def latest_cards(uid: str, kit_id: str) -> list[dict[str, Any]]:
     """每篇论文只取最新一版。"""
+    # 每篇只取一行：老库里并发写出过同一最高版本的重复行，原来会全返回，矩阵把一篇论文数成三篇（Codex 复现）
     with _conn() as c:
         rows = c.execute(
-            "SELECT data FROM cards c WHERE user_id=? AND kit_id=? AND version = "
-            "(SELECT MAX(version) FROM cards c2 WHERE c2.user_id=c.user_id AND c2.kit_id=c.kit_id AND c2.arxiv_id=c.arxiv_id) "
+            "SELECT data FROM cards c WHERE user_id=? AND kit_id=? AND rowid = "
+            "(SELECT c2.rowid FROM cards c2 WHERE c2.user_id=c.user_id AND c2.kit_id=c.kit_id AND c2.arxiv_id=c.arxiv_id "
+            " ORDER BY c2.version DESC, c2.created_at DESC, c2.rowid DESC LIMIT 1) "
             "ORDER BY created_at, rowid", (uid, kit_id)).fetchall()
     return _card_rows(rows)
 
@@ -2229,6 +2436,18 @@ def list_decisions(uid: str, limit: int = 20) -> list[dict[str, Any]]:
 # ---------- 成绩单（enrollments）----------
 # 底稿层：一门课一条记录。能力结论由 server/transcript.py 从这里推，不在这里写。
 
+MAX_CREDITS = 50.0
+
+
+def clean_credits(v: Any) -> float:
+    """学分只收 0–50 的有限数。原来 1e309 会存成无穷大，之后读成绩单、导出账号都 500（Codex 复现）。"""
+    try:
+        x = float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return x if math.isfinite(x) and 0 <= x <= MAX_CREDITS else 0.0
+
+
 def replace_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
     """整表替换某个人的成绩单，返回写入条数。
 
@@ -2244,7 +2463,30 @@ def replace_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
                 "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
-                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
+                 str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
+                 str(it.get("status") or "completed"), now, now),
+            )
+    return len(items)
+
+
+def replace_terms(uid: str, items: list[dict[str, Any]]) -> int:
+    """按学期替换：这次贴进来的几个学期以新为准，别的学期不动，返回写入条数。
+
+    成绩单仍是快照（同一学期重贴不会出现重复课程），但快照只覆盖它自己包含的学期。
+    原来一律整表替换：学生在对话里只贴了这学期两门课（还特意说「其他学期保持不变」），
+    以前导入的所有学期就被删光了（Codex 复现）。要删某门课，用逐条删除。
+    """
+    now = now_iso()
+    terms = {str(it.get("term") or "")[:40] for it in items}
+    with _LOCK, _conn() as c:
+        c.executemany("DELETE FROM enrollments WHERE user_id=? AND term=?", [(uid, t) for t in terms])
+        for it in items:
+            c.execute(
+                "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
                  str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
                  str(it.get("status") or "completed"), now, now),
             )
@@ -2271,7 +2513,7 @@ def add_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
                 "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
-                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
                  str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
                  str(it.get("status") or "completed"), now, now),
             )

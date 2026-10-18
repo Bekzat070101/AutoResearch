@@ -1,1 +1,9 @@
+# 统一 LF：有人在 Windows 上以 CRLF 提交过 30 个文件，合并时按此规范化。
 * text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.db binary

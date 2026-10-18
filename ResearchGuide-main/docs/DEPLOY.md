@@ -24,7 +24,7 @@ docker compose build
 docker compose up qiyan
 ```
 
-复制 `.env.example` 为 `.env` 并填 `LLM_API_KEY` 才会走模型。库文件在卷 `/data/qiyan.db`。
+复制 `.env.example` 为 `.env` 并填 `LLM_API_KEY` 才会走模型（compose 用 `env_file` 把它传进容器；`.env` 本身不进镜像，需要 Compose 2.24 以上）。库文件在卷 `/data/qiyan.db`。
 
 回滚：`docker compose down`，换回上一版镜像或 git 标签再 `build`。
 
@@ -32,12 +32,12 @@ docker compose up qiyan
 
 ```
 cd ResearchGuide-main/tools/deploy
-python download_wheels.py
-python deploy_fc.py
-python deploy_fc.py qiyan-test
+uv run --no-project --with pip python download_wheels.py
+uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py
+uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py qiyan-test
 ```
 
-生产函数名 `qiyan`，测试函数名 `qiyan-test`。管理员兜底密钥只在本机 `.env` 和函数环境变量；学生自己的 DeepSeek 存在生产库的 `user_secrets`，不进镜像、不进 git。
+生产函数名 `qiyan`，测试函数名 `qiyan-test`。管理员兜底密钥只在本机 `.env` 和函数环境变量，不入库；学生自己的 DeepSeek 封装后存在生产库的 `user_secrets`，不进镜像、不进 git（生产要设 `QIYAN_SECRET`）。发版时保留函数上已有的环境变量（控制台里配的 `WECHAT_*`、挂了 NAS 之后的 `QIYAN_DB`），只覆盖脚本自己管的几项；轮子里要有 `cryptography`（公众号安全模式），bootstrap 启动时会检查。
 
 ## 账号与数据
 
@@ -54,8 +54,11 @@ python deploy_fc.py qiyan-test
 - 微信要求消息接口五秒内回复，超时会重发两次；处理是幂等的。冷启动太慢的话，学生会看到「该公众号暂时无法提供服务」，重发一次就行。
 - 备份：以 OSS 生命周期为准（`POST /api/admin/backup` → `VACUUM INTO` → gzip → AES-GCM → `BACKUP_DIR` / OSS `daily/`）。隐私说明承诺删号后备份最多留 7 天；生命周期改成 >7 天必须同时改 `PRIVACY_HTML`、`PRIVACY_VERSION`、`PRIVACY_DIGEST` 并记 CHANGELOG。本机 `tools/backup_db.py` 只作开发备用。
 - 上线顺序：前端和接口一起发。旧前端不带令牌，新接口会一律回 401；老用户浏览器里只有 uid 的，新前端会自动认领一次（`/api/auth/legacy`）。
-- 工作线程数默认 128（`QIYAN_THREADS`）。流式对话有总时限和字数封顶，并对 DeepSeek 关掉思考。
-
+- 只跑一个实例（再说一遍，因为下面几样都依赖它）：会话、微信登录的数字、每人一把的改动锁（userlock.py）、按来源限次、模型额度的内存部分，都在这一个进程和这一个库里。多实例时它们各管各的：登录来回失效、同一个人的改动又会互相覆盖。
+- 模型额度（budget.py）：每天北京时间，全站 `LLM_DAILY_TOTAL`（默认 2000 次）、绑微信的人 `LLM_DAILY_USER`（150）、访客 `LLM_DAILY_GUEST`（15），全体访客合计 `LLM_DAILY_GUESTS`（500，刷访客号花不到绑微信的人头上）；上游重试也算一次；没同意隐私说明的人和匿名接口一律不调。超了功能回退到规则版，不报错。全站上限就是每天花费的上限。
+- 线程：普通接口用 Starlette 工作线程 `QIYAN_THREADS`（128）；要等模型的活（对话、流式对话、交任务、方向推荐、项目检索）在 `QIYAN_MODEL_THREADS`（96）里跑，排队超过 `QIYAN_MODEL_QUEUE`（160）回 503「现在用的人太多」。`/api/health` 的 `model_pool` 报在跑和在排队的数目。流式对话开始了就跑完、自己放锁；还在排队时浏览器走了就撤掉、马上放锁。
+- 限频：同一个公网出口一小时最多 `AUTH_PER_IP_HOUR`（600）次微信登录、600 个访客号（机房、宿舍几百人共用一个出口）。按出口地址限频要在代理后面设 `TRUST_PROXY=1`，否则认不出来源、不限。
+- 上线前打开 `/api/health` 看两项：`auth.wechat_login` 是 true（安全模式配好了）、`db.ephemeral` 是 false（库在持久盘上）。
 ## 发版（没有持久盘不准把生产写成已完成）
 
 ```

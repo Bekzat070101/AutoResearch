@@ -42,8 +42,14 @@ def token() -> str:
     return _env("WECHAT_TOKEN")
 
 
+def plaintext_allowed() -> bool:
+    """明文模式消息体没签名、能伪造，只给本机调试：要显式设 WECHAT_ALLOW_PLAINTEXT=1。"""
+    return _env("WECHAT_ALLOW_PLAINTEXT") == "1"
+
+
 def configured() -> bool:
-    return bool(token())
+    """能收微信登录：有 Token，并且是安全模式（或者显式允许了明文）。只设了 Token 不算开通——那样谁都能伪造消息。"""
+    return bool(token()) and (secure() or plaintext_allowed())
 
 
 def secure() -> bool:

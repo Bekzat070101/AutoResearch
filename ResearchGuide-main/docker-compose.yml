@@ -6,6 +6,9 @@ services:
     image: qiyan:dev
     ports:
       - "8100:8100"
+    env_file:  # 模型密钥、公众号配置等（.env 不进镜像）；没有 .env 也能起，只是不走模型、没开微信登录
+      - path: .env
+        required: false
     environment:
       QIYAN_DB: /data/qiyan.db
     volumes:
@@ -16,6 +19,9 @@ services:
     image: qiyan:test
     ports:
       - "8101:8100"
+    env_file:  # 模型密钥、公众号配置等（.env 不进镜像）；没有 .env 也能起，只是不走模型、没开微信登录
+      - path: .env
+        required: false
     environment:
       QIYAN_DB: /data/qiyan.db
     volumes:

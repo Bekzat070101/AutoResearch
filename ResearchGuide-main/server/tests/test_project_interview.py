@@ -116,7 +116,7 @@ def test_search_never_invents_item(monkeypatch):
         "items": [{"id": "fake999", "practices": "x", "todo": "y", "why_fit": "z"}]
     })
     picked = projects._pick_llm([cand], "ai", 1, "", "")
-    assert picked == []
+    assert not picked  # None：一条都对不上候选就退回规则排序的候选（test_model_output_callers），照样不编项目
     r = projects.search(uid, "ai", 1)
     assert all(it.get("id") != "fake999" for it in r["items"])
     assert all("编造" not in (it.get("name") or "") for it in r["items"])

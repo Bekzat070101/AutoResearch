@@ -9,6 +9,7 @@ W1 真实化（刘弘雅）：任务模板库扩充 + rubric 判定换 LLM，sch
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import Any
@@ -22,9 +23,18 @@ _WRITE_FOR_ME = re.compile(r"替我写|直接给我一份|可以交的全文|完
 _HINT_HITS: dict[str, list[float]] = {}
 
 
+def _as_text(v: Any) -> str:
+    """模型给的 brief 可能是列表、数字：原来 .strip() 直接抛错，接受行动时 500（Codex 复现）。"""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list):
+        return " ".join(str(x) for x in v if x is not None)
+    return "" if v is None else str(v)
+
+
 def formal_skeleton(name: str, brief: str = "") -> dict[str, Any]:
     name = (name or "本题").strip()[:40]
-    intro = (brief or "").strip()[:240]
+    intro = _as_text(brief).strip()[:240]
     return {
         "stem": f"本题要求你在约 20 分钟内完成对「{name}」的一次可核对练习。",
         "given": [intro] if intro else [],
@@ -62,16 +72,20 @@ def _valid_formal(data: Any, source: str) -> bool:
 
 def formalize_task(name: str, brief: str = "", direction: str = "", extra: str = "",
                    uid: str | None = None) -> dict[str, Any]:
+    brief = _as_text(brief)
     sk = formal_skeleton(name, brief)
     if not llm.ready(uid):
         return sk
-    data = llm.chat_json(
-        "你把本科科研入门练习写成一道正式题。只输出 JSON："
-        "{stem, given: string[], ask, notes, steps: string[3], deliverable, rubric: [{criterion}]}。"
-        "不许发明课程、论文、数字。没有材料就把 given 留空并写 notes。",
-        f"方向={direction or '未定'}；题目={name}；材料={brief or '无'}；补充={extra or '无'}",
-        timeout=20, tag="task-formal", uid=uid,
-    )
+    try:
+        data = llm.chat_json(
+            "你把本科科研入门练习写成一道正式题。只输出 JSON："
+            "{stem, given: string[], ask, notes, steps: string[3], deliverable, rubric: [{criterion}]}。"
+            "不许发明课程、论文、数字。没有材料就把 given 留空并写 notes。",
+            f"方向={direction or '未定'}；题目={name}；材料={brief or '无'}；补充={extra or '无'}",
+            timeout=20, tag="task-formal", uid=uid,
+        )
+    except Exception:  # 写题是锦上添花：模型那边出错就用骨架，不能让建任务失败
+        data = None
     if not _valid_formal(data, f"{name} {brief}"):
         return sk
     given = data.get("given") if isinstance(data.get("given"), list) else sk["given"]
@@ -395,6 +409,29 @@ _ACTION_TASK_FALLBACK = {
 }
 
 
+def _as_int(v: Any, default: int, lo: int, hi: int) -> int:
+    """模型给的数字：20、20.0、"20"、"20分钟"、"约 20-30 分钟" 都取第一个数；取不到用默认值。"""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int):
+        n = v
+    elif isinstance(v, float) and math.isfinite(v):
+        n = int(v)
+    else:
+        m = re.search(r"\d+", str(v or ""))
+        if not m:
+            return default
+        n = int(m.group()[:6])
+    return min(hi, max(lo, n))
+
+
+def _as_list(v: Any) -> list:
+    """模型给的列表：一个字符串当一项，不是列表的丢掉。"""
+    if isinstance(v, str):
+        return [v] if v.strip() else []
+    return [x for x in v if x not in (None, "")] if isinstance(v, list) else []
+
+
 def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     """把一张对话行动卡变成任务区里能完成的真任务。
 
@@ -410,26 +447,28 @@ def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     kind = (action.get("action") or "").strip()
     sk = _ACTION_TASK_SKELETON.get(kind) or _ACTION_TASK_FALLBACK
     payload = action.get("payload") or {}
-    if isinstance(payload, str):
+    if not isinstance(payload, dict):
         payload = {}
 
-    # 模型若在 payload 里给了更具体的，就用它的；否则用骨架
-    steps = payload.get("steps") or sk["steps"]
-    deliverable = payload.get("deliverable") or sk["deliverable"]
-    rubric = payload.get("rubric") or sk["rubric"]
-
+    # 行动卡自带的步骤、交付、标准是对话模型为这一张卡写的，比按标题重新出的正式题更具体：有就用它的；
+    # 没有才用正式题（formalize_task），正式题也没有才用骨架。模型给的形状不一定对（「20分钟」、一整段字符串当步骤），
+    # 原来直接 int()/逐个迭代：接受行动时报错，行动已经记成「已接受」却没有任务，学生卡在「去任务区完成」（Codex 复现）。
     form = formalize_task(title[:40], payload.get("brief") or title, action.get("direction") or "", uid=uid)
+    steps = _as_list(payload.get("steps")) or form["steps"] or sk["steps"]
+    deliverable = payload.get("deliverable") or form["deliverable"] or sk["deliverable"]
+    rubric = _as_list(payload.get("rubric")) or form["rubric"] or sk["rubric"]
+
     task = MicroTask(
         user_id=uid,
         direction=action.get("direction") or "",
         title=title[:60],
         brief=form["stem"][:240],
-        steps=form["steps"] or [str(s)[:200] for s in steps][:6],
-        deliverable=form["deliverable"] or str(deliverable)[:240],
-        rubric=form["rubric"] or [{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
+        steps=[str(s)[:200] for s in steps][:6],
+        deliverable=str(deliverable)[:240],
+        rubric=[{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
                 else {"criterion": str(r)[:160]} for r in rubric][:6],
-        time_budget_min=int(payload.get("time_budget_min") or 20),
-        difficulty=int(payload.get("difficulty") or 1),
+        time_budget_min=_as_int(payload.get("time_budget_min"), 20, 5, 240),
+        difficulty=_as_int(payload.get("difficulty"), 1, 1, 5),
         status="open",
         origin="dialogue",
         action_id=aid,
@@ -447,11 +486,9 @@ def submit(uid: str, task: MicroTask, payload: str) -> Feedback:
     这就是「在任务区做完 → 回到对话，对话知道你完成了」的那一步。
     少了它，用户做完了任务、回到对话，对话还停在这一步问他要不要做。
     """
-    submission_id = store.save_submission(task.id, uid, payload)
-    task.status = "done"
-    store.save_task(task)
-
+    # 先有反馈再存提交、标完成：原来先标完成再评分，评分一出错任务就成了「已完成、没反馈」（Codex 复现）
     fb = _llm_feedback(task, payload) or _mock_feedback(task, payload)
+    submission_id = store.save_submission(task.id, uid, payload)
 
     # ---- 真实写回：一条 behavior 事实（NEXT_PRE 硬要求）----
     fact_value = (
@@ -470,6 +507,9 @@ def submit(uid: str, task: MicroTask, payload: str) -> Feedback:
     )
     store.add_fact(fact)
     fb["learned_facts"] = [fact.to_dict()]
+    store.save_feedback(submission_id, fb)
+    task.status = "done"
+    store.save_task(task)
 
     if task.action_id:
         a = store.get_action(uid, task.action_id)
@@ -508,18 +548,20 @@ def _llm_feedback(task: MicroTask, payload: str) -> dict[str, Any] | None:
         return None
     judged = []
     for i, item in enumerate(data["rubric"]):
-        if not isinstance(item, dict):
+        # 只认 JSON 的 true/false：原来 bool("false") 为真，三条写着未做到却存成全过、100 分（Codex 复现）
+        if not isinstance(item, dict) or not isinstance(item.get("pass"), bool):
             return None
         judged.append({
             "criterion": criteria[i],
-            "pass": bool(item.get("pass")),
+            "pass": item["pass"],
             "comment": str(item.get("comment") or "已阅读。")[:80],
         })
-    try:
-        score = int(data.get("score"))
-    except (TypeError, ValueError):
-        score = round(sum(1 for j in judged if j["pass"]) / len(judged) * 100)
-    score = max(0, min(100, score))
+    raw = data.get("score")
+    # 分数先查是有限数且在 0–100 再取整：原来 1e309 读成 inf，int(inf) 抛 OverflowError，提交接口 500（Codex 复现）。
+    # 先比范围再查有限：10**309 这样的大整数进 math.isfinite 也会溢出
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= raw <= 100 or not math.isfinite(raw):
+        return None
+    score = int(raw)
     return {
         "score": score,
         "rubric": judged,
@@ -625,12 +667,15 @@ def hint_task(uid: str, task: MicroTask, question: str, draft: str = "") -> dict
     )
     if not llm.ready(uid):
         return {"reply": local, "refused": False}
-    data = llm.chat_json(
-        "你给本科生提示作业。只解释题意、指出下一步、指出草稿缺哪条标准。"
-        "禁止输出可当提交物的整段答案。只输出 JSON {reply}。",
-        f"题：{task.title}\n题干：{form.get('stem') or task.brief}\n求：{form.get('ask') or ''}\n"
-        f"交：{task.deliverable}\n标准：{task.rubric}\n草稿：{(draft or '')[:400]}\n学生问：{q}",
-        timeout=20, tag="task-hint", uid=uid,
-    )
+    try:
+        data = llm.chat_json(
+            "你给本科生提示作业。只解释题意、指出下一步、指出草稿缺哪条标准。"
+            "禁止输出可当提交物的整段答案。只输出 JSON {reply}。",
+            f"题：{task.title}\n题干：{form.get('stem') or task.brief}\n求：{form.get('ask') or ''}\n"
+            f"交：{task.deliverable}\n标准：{task.rubric}\n草稿：{(draft or '')[:400]}\n学生问：{q}",
+            timeout=20, tag="task-hint", uid=uid,
+        )
+    except Exception:  # 模型那边出错就给本地那句，不把 500 甩给学生
+        data = None
     reply = str((data or {}).get("reply") or local)[:600]
     return {"reply": reply, "refused": False}

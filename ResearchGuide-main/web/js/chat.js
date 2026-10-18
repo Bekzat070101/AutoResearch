@@ -13,6 +13,7 @@ const ChatView = (() => {
   let busy = false;      // 正在生成，阻止重复发送
   let abort = null;      // AbortController
   let seq = 0;           // 渲染序号，切走视图后不再写 DOM
+  let turnDone = null;   // 正在生成的那一轮做完时兑现：切走再回来的新视图靠它接上
 
   const STAGE_CN = {
     observe: "正在看你的近况",
@@ -135,6 +136,8 @@ const ChatView = (() => {
 
   async function render($app) {
     const mySeq = ++seq;
+    const resumeFrom = turnDone;  // 打开这一页时上一轮还在生成（在别的页等过）：见最后
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
 
     $app.innerHTML = "";
     $app.appendChild(dialogueHead());
@@ -200,14 +203,17 @@ const ChatView = (() => {
     // 编辑框的唯一保存路径是 blur；元素被 innerHTML = "" 拔掉之后
     // blur 不保证触发，用户敲进去的改动会**无声地丢掉**。
     // 所以编辑期间挂起刷新，编辑结束再补一次。
+    let editingCard = false;
+    let refreshQueued = false;
+    let redrawQueued = false;  // 进行中的那一轮做完了要重画，但正在改记忆：等改完（见最后）
     let history = { messages: [], pending_action: null };
     try {
       history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
     } catch (e) { toast(e.message); }
-    if (mySeq !== seq) return;
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     history.messages.forEach((m) => addBubble(m.role, m.text));
     await refreshFacts();
-    if (mySeq !== seq) return;
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     if (history.guide && !S.entered) renderGuide(history.guide);
     if (history.onboard_done && !S.entered) enterCard(history.guide);
     if (!history.messages.length) {
@@ -218,9 +224,12 @@ const ChatView = (() => {
 
     async function send(text) {
       const msg = (text || "").trim();
-      if (!msg || busy) return;
-      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, msg); } catch (_) { /* ignore */ }
+      if (!msg) return;
+      if (busy) { toast("上一句还在生成，等它好了再发"); return; }
+      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, msg); } catch (_) { /* 无痕模式等 */ }
       busy = true;
+      let finish;
+      turnDone = new Promise((resolve) => { finish = resolve; });
       input.value = ""; autoGrow();
       input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
       actions.innerHTML = "";
@@ -247,7 +256,7 @@ const ChatView = (() => {
             }
           },
         );
-        if (mySeq !== seq) return;
+        if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
 
         if (result) {
           history.conversation_id = result.conversation_id;
@@ -261,10 +270,13 @@ const ChatView = (() => {
         if (mySeq === seq) {
           if (acc) { bubble.innerHTML = mdLite(acc); toast("生成中断：" + e.message); }
           else { bubble.remove(); toast(e.message); }
+        } else if (e.name !== "AbortError") {
+          toast("对话：上一句没生成完（" + e.message + "）");  // 人在别的页：页面上没地方显示，至少说一声
         }
       } finally {
         bubble.classList.remove("streaming");
-        busy = false; abort = null;
+        busy = false; abort = null; turnDone = null;
+        finish();
         if (mySeq === seq) {
           input.disabled = false; sendBtn.disabled = false; stopBtn.hidden = true;
           setStage("");
@@ -361,8 +373,8 @@ const ChatView = (() => {
       box.appendChild(el("summary", "rc-head", "本轮记录 · 展开核对"));
       groups.forEach((g) => {
         const row = el("div", "rc-group");
-        const head = el("p", "rc-label", g.label);
-        if (g.note) head.appendChild(el("span", "rc-count", g.note));
+        const head = el("p", "rc-label", esc(g.label));
+        if (g.note) head.appendChild(el("span", "rc-count", esc(g.note)));
         row.appendChild(head);
         const ul = el("ul", "rc-list");
         g.items.forEach((t) => ul.appendChild(el("li", "", esc(t))));
@@ -382,8 +394,8 @@ const ChatView = (() => {
       const facts = el("div", "ri-facts");
       const cell = (k, v) => {
         const c = el("div", "ri-cell");
-        c.appendChild(el("span", "ri-k", k));
-        c.appendChild(el("span", "ri-v", v));
+        c.appendChild(el("span", "ri-k", esc(k)));
+        c.appendChild(el("span", "ri-v", esc(v)));
         facts.appendChild(c);
       };
       cell(preview ? "识别课程" : "写入课程", `${preview ? (s.total || 0) : imp.written} 门`);
@@ -396,12 +408,12 @@ const ChatView = (() => {
       if (un.length) {
         box.appendChild(el("p", "rc-warn",
           `${un.length} 门是字母等级/五级制，没有算进绩点（教务换算口径未定，不敢替你定）：`
-          + un.map((u) => `${u.course}（${u.grade}）`).join("、")));
+          + un.map((u) => `${esc(u.course)}（${esc(u.grade)}）`).join("、")));
       }
       const cur = s.in_progress || [];
       if (cur.length) {
         box.appendChild(el("p", "rc-note",
-          `${cur.length} 门还在修：` + cur.map((c) => c.course).join("、")));
+          `${cur.length} 门还在修：` + cur.map((c) => esc(c.course)).join("、")));
       }
       const d = imp.derived || [];
       if (d.length) {
@@ -553,6 +565,23 @@ const ChatView = (() => {
     });
     sendBtn.onclick = () => send(input.value);
     stopBtn.onclick = () => { if (abort) abort.abort(); };
+
+    // 上一轮在生成时切走又回来：这个新视图里没有那一轮的气泡和进度，旧视图收到的回复也不会画到这里。
+    // 还在生成就锁住输入、给停止键；做完（不管在这之前还是之后）从服务器重取一遍历史重画。
+    // 原来发送键看着能点、点了没反应，做完的回复也不显示，要手动刷新（Codex 复现）。
+    if (resumeFrom) {
+      if (busy) {
+        input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
+        stageLine.textContent = "上一句还在生成，好了会自动显示…";
+        stageLine.classList.add("on");
+      }
+      resumeFrom.then(() => {
+        if (mySeq !== seq || S.view !== "dialogue") return;
+        // 正在改一条记忆：重画会把输入框拔掉，失焦保存不一定触发，改动就没了（Codex 复现）。改完再画
+        if (editingCard) { redrawQueued = true; return; }
+        render($app);
+      });
+    }
   }
 
   return { render, mdLite };

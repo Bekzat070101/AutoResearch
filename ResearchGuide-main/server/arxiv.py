@@ -260,6 +260,10 @@ RETRY_TRANSIENT = 10 * 60
 
 
 _RECENT = TTLCache(60, 16)  # 刚读过的几篇：一次交卡要取三次原文，不必每次都从磁盘读、解析几百 KB 的 JSON
+CACHE_MAX_FILES = int(os.environ.get("ARXIV_CACHE_MAX_FILES", "2000"))
+CACHE_MAX_BYTES = int(os.environ.get("ARXIV_CACHE_MAX_BYTES", str(512 * 1024 * 1024)))
+_QUOTA_LOCK = threading.Lock()
+_QUOTA: dict[str, Any] = {"dir": None, "sizes": {}, "bytes": 0}  # 本进程记的缓存目录文件数、总字节；换目录或首次用时扫一遍
 
 
 def search(q: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -353,9 +357,10 @@ def _save_disk(aid: str, result: dict[str, Any]) -> None:
     """先写临时文件再原子替换：别的请求读到的要么是旧版、要么是新版，不会是写了一半的。"""
     path = CACHE_DIR / f"{aid}.json"
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    body = json.dumps(result, ensure_ascii=False)
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(body, encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         print(json.dumps({"warn": "paper_cache_write", "aid": aid}, ensure_ascii=False))
@@ -366,6 +371,48 @@ def _save_disk(aid: str, result: dict[str, Any]) -> None:
         _RECENT.set(str(path), result)
         return
     _RECENT.set(str(path), result)
+    _enforce_quota(path, len(body.encode("utf-8")))
+
+
+def _enforce_quota(path: Path, size: int) -> None:
+    """每篇论文落一个文件、从不删，线上磁盘会无限涨：超过文件数或总字节上限就按修改时间删最旧的，刚写的那篇不删。"""
+    with _QUOTA_LOCK:
+        q = _QUOTA
+        if q["dir"] != CACHE_DIR:
+            sizes = {}
+            for p in CACHE_DIR.glob("*.json"):
+                try:
+                    sizes[p.name] = p.stat().st_size
+                except FileNotFoundError:
+                    pass
+            q.update(dir=CACHE_DIR, sizes=sizes, bytes=sum(sizes.values()))
+        else:
+            q["bytes"] += size - q["sizes"].get(path.name, 0)
+            q["sizes"][path.name] = size
+        if len(q["sizes"]) <= CACHE_MAX_FILES and q["bytes"] <= CACHE_MAX_BYTES:
+            return
+        files = []
+        for p in CACHE_DIR.glob("*.json"):
+            try:
+                st = p.stat()
+            except FileNotFoundError:
+                continue
+            files.append((st.st_mtime, p.name, p, st.st_size))
+        files.sort(key=lambda f: (f[0], f[1]))
+        sizes = {name: s for _, name, _, s in files}
+        total = sum(sizes.values())
+        for _, name, p, s in files:
+            if len(sizes) <= CACHE_MAX_FILES and total <= CACHE_MAX_BYTES:
+                break
+            if name == path.name:
+                continue
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass  # 别的进程刚删掉
+            del sizes[name]
+            total -= s
+        q.update(sizes=sizes, bytes=total)
 
 
 def _needs_reparse(got: dict[str, Any]) -> bool:

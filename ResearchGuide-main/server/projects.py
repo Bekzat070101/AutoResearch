@@ -305,6 +305,9 @@ def _pick_llm(cands: list[dict[str, Any]], direction: str, stage: int, keywords:
         out.append(c)
         if len(out) >= 6:
             break
+    # 非空列表一条都对不上候选就退回规则：原来全是编的 id 也当成「模型说没有」，学生看到 0 个项目（Codex 复现）
+    if items and not out:
+        return None
     return out
 
 

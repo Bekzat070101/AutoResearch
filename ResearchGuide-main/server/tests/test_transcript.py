@@ -759,3 +759,37 @@ def test_rejecting_one_area_does_not_silence_the_others():
     assert "experience:<slug>" not in doc.split("你**写不了**")[0]
     assert "transcript:<slug>" in doc, "但要说清它写不了、以及为什么"
     assert "derived_from" in doc
+
+
+
+# ---------- Codex 审计：挂科、半学分、只贴一个学期 ----------
+
+def test_failed_five_level_course_is_kept_and_not_passed():
+    r = transcript.parse_transcript("25-26学年度1学期\n3\n学分\n数学分析\n专业必修\n不及格\n")
+    assert [c["course"] for c in r["courses"]] == ["数学分析"] and not r["warnings"]
+    s = transcript.summarize(r["courses"])
+    assert s["passed_credits"] == 0 and s["total"] == 1  # 挂了：在单子上，但不算通过学分
+
+
+def test_fractional_credits_count_exactly():
+    text = "25-26学年度1学期\n0.5\n学分\n实验课程\n专业必修\n100\n3\n学分\n理论课程\n专业必修\n80\n"
+    s = transcript.summarize(transcript.parse_transcript(text)["courses"])
+    assert s["passed_credits"] == 3.5 and s["gpa_credits"] == 3.5
+    expected = (0.5 * transcript.gpa_of("100") + 3 * transcript.gpa_of("80")) / 3.5
+    assert abs(s["gpa"] - expected) < 1e-9
+
+
+def test_pasting_one_term_keeps_the_other_terms():
+    uid = make_user()
+    old = [{"course": c, "grade": "90", "credits": 3, "term": "24-25学年度1学期"} for c in ("高等数学", "线性代数", "大学英语")]
+    store.replace_terms(uid, old)
+    new = transcript.parse_transcript("25-26学年度1学期\n3\n学分\n概率统计\n专业必修\n88\n")["courses"]
+    store.replace_terms(uid, new)
+    names = sorted(c["course"] for c in store.list_enrollments(uid))
+    assert names == sorted(["高等数学", "线性代数", "大学英语", "概率统计"])
+    # 同一学期重贴：以新为准，不重复
+    store.replace_terms(uid, new)
+    assert len(store.list_enrollments(uid)) == 4
+    fixed = [{"course": "概率统计", "grade": "92", "credits": 3, "term": "25-26学年度1学期"}]
+    store.replace_terms(uid, fixed)
+    assert [c["grade"] for c in store.list_enrollments(uid) if c["course"] == "概率统计"] == ["92"]

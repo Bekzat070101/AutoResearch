@@ -13,7 +13,7 @@ https://chengcanwu.github.io/AutoResearch/
 
 ## 发布
 
-在 `ResearchGuide-main/tools/deploy`：
+在 `ResearchGuide-main/tools/deploy`（发布脚本要阿里云 SDK，用 uv 临时带上，不装进项目）：
 
 ```
 python download_wheels.py

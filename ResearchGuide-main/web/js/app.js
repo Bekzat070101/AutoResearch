@@ -6,9 +6,9 @@
 /* ---------- 状态 ---------- */
 
 const S = {
-  uid: "",
-  token: "",
-  nickname: "",
+  uid: localStorage.getItem("rg_uid") || "",
+  token: localStorage.getItem("rg_token") || "",
+  nickname: localStorage.getItem("rg_nick") || "",
   wechat: false,
   guest: true,
   username: "",
@@ -32,6 +32,57 @@ const S = {
   mePortrait: "",
   portraitId: "",
   portraitName: "",
+};
+
+/* ---------- 进 HTML 之前先消毒 ----------
+   页面里大约一百六十处把字符串当 HTML 塞进去（innerHTML、el() 的第三个参数）。里面有模型写的理由、
+   学生粘的成绩单课名、外面抓来的论文标题。Codex 用一个 <img onerror> 课名就让脚本跑起来了。
+   逐处 esc 是本分（下面也逐处补了），这里再兜一层：所有写 innerHTML 的地方都先在一个不会执行的
+   <template> 里解析，删掉脚本类元素、on* 事件属性、javascript: 之类的链接，再放进页面。
+   我们没有第三方前端库，所以直接接管 Element 的 innerHTML 写入是安全的。 */
+const HTML_BLOCK = new Set(["SCRIPT", "IFRAME", "FRAME", "OBJECT", "EMBED", "LINK", "META", "BASE", "STYLE", "FORM", "NOSCRIPT", "TEMPLATE"]);
+const URL_ATTRS = new Set(["href", "src", "xlink:href", "action", "formaction", "poster", "background", "srcset"]);
+const SAFE_URL = /^(?:https?:|mailto:|#|\/(?!\/)|\.{0,2}\/|data:image\/(?:png|jpe?g|gif|webp);)/i;
+const _htmlSetter = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML").set;
+
+function sanitizeInto(holder, html) {
+  const t = document.createElement("template");
+  _htmlSetter.call(t, String(html ?? ""));  // template 的内容是惰性的：脚本不跑、图片不加载
+  t.content.querySelectorAll("*").forEach((n) => {
+    if (HTML_BLOCK.has(n.tagName.toUpperCase())) { n.remove(); return; }
+    for (const a of [...n.attributes]) {
+      const name = a.name.toLowerCase();
+      const value = a.value.replace(/[\u0000- ]/g, "");
+      if (name.startsWith("on") || name === "srcdoc" || name === "formaction"
+        || (URL_ATTRS.has(name) && value && !SAFE_URL.test(value))) {
+        n.removeAttribute(a.name);
+      }
+    }
+  });
+  return t.content;
+}
+
+Object.defineProperty(Element.prototype, "innerHTML", {
+  configurable: true,
+  get: Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML").get,
+  set(html) {
+    // template 本身、SVG 里的元素（模板按 HTML 解析会把 <path> 变成普通元素）走原生写法；页面里的 SVG 都是 createElementNS 画的
+    if (this instanceof HTMLTemplateElement || this.namespaceURI !== "http://www.w3.org/1999/xhtml") {
+      _htmlSetter.call(this, html);
+      return;
+    }
+    if (html === "" || html == null) { this.textContent = ""; return; }
+    this.replaceChildren(sanitizeInto(this, html));
+  },
+});
+Element.prototype.insertAdjacentHTML = function (where, html) {
+  const frag = sanitizeInto(this, html);  // 直接放消过毒的节点，不再序列化后重新解析
+  const at = String(where).toLowerCase();
+  if (at === "beforebegin") this.before(frag);
+  else if (at === "afterbegin") this.prepend(frag);
+  else if (at === "beforeend") this.append(frag);
+  else if (at === "afterend") this.after(frag);
+  else throw new SyntaxError(`insertAdjacentHTML: ${where}`);
 };
 
 const $app = document.getElementById("app");
@@ -59,8 +110,14 @@ function errText(data, status) {
 
 function authHeaders(extra) {
   const h = Object.assign({}, extra || {});
-  if (S.token) h.Authorization = `Bearer ${S.token}`;
+  if (S.token && !h.Authorization) h.Authorization = `Bearer ${S.token}`;  // 调用方指定了就用调用方的（吊销旧令牌时）
   return h;
+}
+
+/* 吊销一个已经不用的令牌（比如访客令牌换成微信登录的新令牌之后）。失败也无所谓：它最多三十天后自己过期。 */
+function revokeToken(token) {
+  if (!token) return;
+  apiFetch("/api/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
 }
 
 /* 改了这段就把 server/auth.py 的 PRIVACY_VERSION 换成当天日期 */
@@ -92,72 +149,8 @@ function lostUser(err) {
   return /user not found|请先登录/i.test(m);
 }
 
-function setSession(r) {
-  S.uid = r.uid;
-  if (r.token) S.token = r.token;
-  S.nickname = r.nickname || S.nickname;
-  S.wechat = !!r.wechat;
-  S.username = r.username || "";
-  S.guest = r.guest !== false && !r.wechat && !S.username;
-  S.hasLlmKey = !!r.has_llm_key;
-  S.llmKeyTail = r.llm_key_tail || "";
-  S.llmKeyInvalid = !!r.llm_key_invalid;
-  if (r.entered !== undefined) S.entered = !!r.entered;
-  persistSession();
-  const chip = document.getElementById("userNickname");
-  if (chip) chip.textContent = S.nickname;
-}
-
-function persistSession() {
-  try {
-    if (S.uid) localStorage.setItem("rg_uid", S.uid);
-    if (S.token) localStorage.setItem("rg_token", S.token);
-    if (S.nickname) localStorage.setItem("rg_nick", S.nickname);
-  } catch (_) { /* ignore */ }
-}
-
-function loadPersistedSession() {
-  try {
-    S.uid = localStorage.getItem("rg_uid") || "";
-    S.token = localStorage.getItem("rg_token") || "";
-    S.nickname = localStorage.getItem("rg_nick") || "";
-  } catch (_) { /* ignore */ }
-}
-
-function dropPersistedSession() {
-  ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
-    try { localStorage.removeItem(k); } catch (_) { /* ignore */ }
-  });
-}
-
-function clearSession() {
-  S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
-  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
-  S.nickname = "";
-  S.entered = false;
-  S.myDir = undefined;
-  S.kitId = "";
-  S.portraitId = "";
-  S.portraitName = "";
-  S.mePortrait = "";
-  try { localStorage.removeItem("rg_kit"); } catch (_) { /* ignore */ }
-  dropPersistedSession();
-}
-
 function sessionGoneMsg() {
   return "登录已失效，请重新登录；提示用户名不存在的话，说明服务器数据被重置过，需要重新注册";
-}
-
-function reloadInto(view, msg) {
-  clearSession();
-  if (msg) toast(msg, 6000);
-  setView(view);
-}
-
-function signedOut(msg) {
-  clearSession();
-  if (msg) toast(msg, 6000);
-  setView("login");
 }
 
 async function recoverUser(err) {
@@ -205,10 +198,10 @@ async function api(method, path, body) {
   try { data = await res.json(); } catch (_) { /* no body */ }
   if (!res.ok) {
     const msg = errText(data, res.status);
-    if (res.status === 404 && /user not found/i.test(msg)) {
-      if (await recoverUser(new Error(msg))) throw new Error(msg);
-    }
-    throw new Error(msg);
+    if (res.status === 404 && /user not found/i.test(msg)) await recoverUser(new Error(msg));
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -256,6 +249,11 @@ const WORKSPACE = {
 };
 
 /* ---------- 视图切换 ---------- */
+
+/* 刷新停在原来那一栏：记在这个标签页的 sessionStorage（新开标签页照样从首页进）。
+   原来已登录的学生一刷新就回到粒子首页（Codex 复现）。要 id 的详情页回到它所在的栏目。 */
+const RESUMABLE = { today: "today", workbench: "workbench", projects: "projects", project: "projects", read: "read",
+  card: "read", position: "position", dialogue: "dialogue", confirm: "me", me: "me", cards: "cards" };
 
 function firstView() {
   return S.entered ? "today" : "dialogue";
@@ -320,6 +318,7 @@ function setView(name) {
     return;
   }
   S.view = name;
+  try { if (S.uid && RESUMABLE[name]) sessionStorage.setItem("rg_last_view", RESUMABLE[name]); } catch (_) { /* 无痕模式等 */ }
   document.body.dataset.view = name;
   const home = name === "home";
   const inApp = !home && name !== "login" && !!S.uid;
@@ -353,24 +352,31 @@ function stale(seq) {
 }
 
 async function render() {
-  S.renderSeq = (S.renderSeq || 0) + 1;
+  const seq = S.renderSeq = (S.renderSeq || 0) + 1;
   if (S.view === "home") { renderHome(); return; }
   if (!S.uid && S.view !== "login") { renderLogin(); return; }
-  switch (S.view) {
-    case "login": renderLogin(); break;
-    case "dialogue": ChatView.render($app); break;
-    case "confirm": await renderMe(); break;
-    case "cards": await renderCards(); break;
-    case "workbench": await renderWorkbench(); break;
-    case "projects":
-    case "project": renderProjectsSoon(); break;
-    case "position": renderPositionSoon(); break;
-    case "read": await renderRead(); break;
-    case "card": await renderCard(); break;
-    case "feedback": await renderFeedback(); break;
-    case "me": await renderMe(); break;
-    case "today":
-    default: await renderToday(); break;
+  try {
+    switch (S.view) {
+      case "login": renderLogin(); break;
+      case "dialogue": await ChatView.render($app); break;  // 要 await：不然它取画像失败时绕过下面的提示
+      case "confirm": await renderMe(); break;
+      case "cards": await renderCards(); break;
+      case "workbench": await renderWorkbench(); break;
+      case "projects":
+      case "project": renderProjectsSoon(); break;
+      case "position": renderPositionSoon(); break;
+      case "read": await renderRead(); break;
+      case "card": await renderCard(); break;
+      case "feedback": await renderFeedback(); break;
+      case "me": await renderMe(); break;
+      case "today":
+      default: await renderToday(); break;
+    }
+  } catch (e) {
+    // 这一页要的数据没取到：原来变成没人接的 Promise 错误，菜单关了、页面却还停在上一页，也没有提示（Codex 复现）
+    if (stale(seq)) return;
+    $app.innerHTML = "";
+    $app.appendChild(emptyPanel(`这一页没打开：${esc((e && e.message) || e)}`, "再试一次", S.view));
   }
 }
 
@@ -1423,20 +1429,414 @@ function roomGuide(room, hasProgress) {
   return box;
 }
 
+/* ---------- 账号：微信登录（公众号发数字）、访客、隐私说明 ---------- */
+
+/* 换人（退出、删号、登录过期、登进另一个账号）一律整页重载：S 里有几十个字段、对话视图里有进行中的流，
+   逐个清容易漏，上一个人没发的草稿就会出现在下一个人的表单里。要去哪一页、要提示什么，经 sessionStorage 带过去。 */
+const PARK_KEY = "rg_parked";  // 停在这台浏览器上的另一个会话，见 parkedSession
+
+function reloadInto(view, msg) {
+  try {
+    sessionStorage.setItem("rg_next_view", view || "home");
+    if (msg) sessionStorage.setItem("rg_toast", msg);
+  } catch (_) { /* 存不了就回首页、不提示 */ }
+  location.reload();
+}
+
+/* 会话写进这台浏览器：刷新、新标签页照样是同一个人（30 天不用才失效）。 */
+function persistSession() {
+  try {
+    localStorage.setItem("rg_uid", S.uid);
+    localStorage.setItem("rg_token", S.token);
+    localStorage.setItem("rg_nick", S.nickname);
+  } catch (_) { /* 存不了就只在这一页有效 */ }
+}
+
+/* 记下会话。原来是另一个人（uid 变了）就返回 true，并且已经开始重载：调用方要立刻停手。 */
+function setSession(r, nextView, msg) {
+  ++directionEpoch;
+  const switching = !!S.uid && r.uid !== S.uid;
+  S.uid = r.uid;
+  if (r.token) S.token = r.token;
+  S.nickname = r.nickname || S.nickname;
+  S.wechat = !!r.wechat;
+  S.guest = !!r.guest;
+  S.username = r.username || "";
+  S.hasLlmKey = !!r.has_llm_key;
+  S.llmKeyTail = r.llm_key_tail || "";
+  S.llmKeyInvalid = !!r.llm_key_invalid;  // 换过 QIYAN_SECRET 后解不开的个人密钥：提示重存（16-F03）
+  if (r.entered !== undefined) S.entered = !!r.entered;  // 进入按人记在服务端（上游 w72），刷新后照它恢复
+  persistSession();
+  if (switching) {
+    // 上一个人的草稿不留给这个人；这个人自己的、停在这台浏览器上的另一个号（parkedSession）的留着
+    let parked = "";
+    try { parked = (JSON.parse(localStorage.getItem(PARK_KEY) || "null") || {}).uid || ""; } catch (_) { /* 坏数据当没有 */ }
+    clearLocalDrafts(["rg_uid", "rg_token", "rg_nick", PARK_KEY], [S.uid, parked]);
+    reloadInto(nextView || "today", msg);
+    return true;
+  }
+  const chip = document.getElementById("userNickname");
+  if (chip) chip.textContent = S.guest ? `${S.nickname} · 访客` : S.nickname;
+  applyLlmPill(S.llmInfo || { enabled: false });  // 能找回的账号看到的是「我的 DeepSeek」，访客看到的还是服务器的模型
+  return false;
+}
+
+/* 这台浏览器里存的个人草稿（任务草稿、阅读卡草稿、教程进度）。退出、删号、换人时清掉：
+   公用电脑上，上一个人没交的阅读卡草稿原来会出现在下一个人的表单里。keep 是要留下的键（界面偏好、新登录的身份）。 */
+function clearLocalDrafts(keep, owners) {
+  try {
+    const drop = [];
+    const mine = (k) => (owners || []).some((u) => u && k.includes(u));  // 草稿的键都带着 uid
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("rg_") && k !== "rg_kit" && !(keep || []).includes(k) && !mine(k)) drop.push(k);
+    }
+    drop.forEach((k) => localStorage.removeItem(k));
+  } catch (_) { /* 无痕模式等 */ }
+}
+
+/* purge：连这台浏览器里这个人的草稿一起清。只在明确退出、删号时清；登录过期（401）不清——
+   草稿的键带着 uid，别人看不到，同一个人重新登录还能接着写。 */
+function clearSession(purge) {
+  ++directionEpoch;
+  S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
+  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
+  S.entered = false;
+  S.myDir = undefined; S.portraitId = ""; S.portraitName = ""; S.mePortrait = "";
+  S.kitId = "";
+  try { localStorage.removeItem("rg_kit"); } catch (_) { /* 无痕模式等 */ }
+  if (purge) clearLocalDrafts();
+  else ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
+    try { localStorage.removeItem(k); } catch (_) { /* 无痕模式等 */ }
+  });
+}
+
+function signedOut(msg) {
+  clearSession();
+  reloadInto("login", msg);
+}
+
+/* gate=true：老用户或说明更新后必须先同意才能继续用 */
+function openPrivacy(gate) {
+  document.querySelectorAll(".connect-mask").forEach((n) => n.remove());
+  const mask = el("div", "connect-mask");
+  const box = el("div", "connect-box privacy-box");
+  box.appendChild(el("p", "hero-kicker", "PRIVACY"));
+  box.appendChild(el("h3", "", gate ? "继续之前，看一眼我们存什么" : "我们存什么"));
+  box.appendChild(el("div", "privacy-body", PRIVACY_HTML));
+  const acts = el("div", "connect-actions");
+  if (gate) {
+    const out = el("button", "btn secondary", "退出登录");
+    out.type = "button";
+    out.onclick = async () => { mask.remove(); await logout(); };
+    const ok = el("button", "btn", "同意并继续");
+    ok.type = "button";
+    ok.onclick = async () => {
+      try {
+        await api("POST", "/api/auth/consent", { version: S.auth ? S.auth.privacy_version : "" });
+        mask.remove();
+      } catch (e) { toast(e.message); }
+    };
+    acts.append(out, ok);
+  } else {
+    const ok = el("button", "btn", "知道了");
+    ok.type = "button";
+    ok.onclick = () => mask.remove();
+    acts.appendChild(ok);
+    mask.addEventListener("click", (e) => { if (e.target === mask) mask.remove(); });
+  }
+  box.appendChild(acts);
+  mask.appendChild(box);
+  document.body.appendChild(mask);
+}
+
+function consentRow() {
+  const row = el("label", "consent-row");
+  const box = el("input");
+  box.type = "checkbox";
+  const read = el("button", "linkish", "我们存什么");
+  read.type = "button";
+  read.onclick = (e) => { e.preventDefault(); openPrivacy(false); };
+  row.append(box, document.createTextNode("我读过"), read, document.createTextNode("，同意按这个方式保存我的记录"));
+  return { row, ok: () => box.checked };
+}
+
+let wxPoll = 0;  // 微信登录的轮询；离开登录页或换数字时停掉
+
+let wxAttempt = 0;  // 第几次微信登录尝试；旧尝试的响应回来时编号对不上就丢掉
+
+function stopWxPoll() {
+  clearTimeout(wxPoll);
+  wxPoll = 0;
+  wxAttempt += 1;  // 清掉定时器拦不住已经发出去的请求：靠编号让它回来时作废
+}
+
+/* 微信登录：网页拿一个 6 位数字，学生在公众号里发它，网页轮询到了就登进去 */
+async function startWechat(box, opts) {
+  stopWxPoll();
+  const attempt = wxAttempt;
+  const live = () => attempt === wxAttempt && box.isConnected;
+  box.innerHTML = "";
+  box.hidden = false;
+  let r;
+  try {
+    r = await api("POST", "/api/auth/wechat/start", { nickname: opts.nickname, consent: true });
+  } catch (e) { if (live()) { box.hidden = true; toast(e.message); } return; }
+  if (!live()) return;
+  const name = r.account_name ? `「${esc(r.account_name)}」` : "启研";
+  if (r.qr_url) {
+    const qr = el("img", "wx-qr");
+    qr.src = r.qr_url;
+    qr.alt = "公众号二维码";
+    box.appendChild(qr);
+  }
+  const steps = el("ol", "wx-steps");
+  steps.appendChild(el("li", "", `微信扫码关注${name}公众号（已经关注的，直接打开它）`));
+  const li = el("li", "", "在公众号里发送这个数字：");
+  li.appendChild(el("b", "wx-code", `${r.code.slice(0, 3)} ${r.code.slice(3)}`));
+  steps.appendChild(li);
+  box.appendChild(steps);
+  const status = el("p", "wx-status", "等你在微信里发送…");
+  box.appendChild(status);
+  const acts = el("div", "account-actions");
+  const again = el("button", "btn small secondary", "换一个数字");
+  again.type = "button";
+  again.onclick = () => startWechat(box, opts);
+  acts.appendChild(again);
+  if (S.auth && S.auth.dev) {  // 本机开发没有公众号：假装从微信发了这个数字
+    const dev = el("button", "btn small ghost", "（开发）模拟微信发送");
+    dev.type = "button";
+    dev.onclick = () => api("POST", "/api/auth/wechat/dev-send", { code: r.code }).catch((e) => toast(e.message));
+    acts.appendChild(dev);
+  }
+  box.appendChild(acts);
+
+  const deadline = Date.now() + r.expires_in * 1000;
+  const tick = async () => {
+    if (!live()) return;  // 换了数字、走了访客、离开了登录页
+    let res;
+    try {
+      res = await api("POST", "/api/auth/wechat/poll", { ticket: r.ticket });
+    } catch (e) {
+      if (live()) status.textContent = `${e.message}`;
+      return;  // 过期或用过了：不再轮询，等学生点「换一个数字」
+    }
+    if (!live()) return;  // 请求在路上时用户已经换了别的登录方式：这个结果不能再生效
+    if (res.pending) {
+      const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      status.textContent = `等你在微信里发送…（还剩 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}）`;
+      wxPoll = setTimeout(tick, 2000);
+      return;
+    }
+    stopWxPoll();
+    if (res.left_guest && S.uid && S.guest && res.uid !== S.uid) { askLeaveGuest(box, res); return; }
+    const previous = S.token;  // 采用新令牌之后再吊销旧的；被当成过期尝试丢掉的结果不会走到这里
+    if (previous && previous !== res.token) revokeToken(previous);
+    if (setSession(res, "today")) return;
+    if (res.bound) { toast("绑定好了，记录都在"); setView("me"); return; }
+    await afterEnter();
+  };
+  wxPoll = setTimeout(tick, 2000);
+}
+
+/* 访客来绑微信，这个微信却已经有账号：访客的记录不会合并过去。先问；要登进微信账号，访客号的会话停在这台浏览器上，
+   「记录」页可以切回去。原来直接切走、吊销访客令牌、清掉草稿，访客的记录再也进不去（Codex 复现）。 */
+function askLeaveGuest(box, res) {
+  box.innerHTML = "";
+  box.appendChild(el("p", "wx-status",
+    `这个微信已经有账号「${esc(res.nickname)}」了。访客号「${esc(S.nickname)}」的记录不会合并过去。`));
+  const acts = el("div", "account-actions");
+  const go = el("button", "btn small", "登进微信账号");
+  const stay = el("button", "btn small secondary", "留在访客号");
+  go.type = "button"; stay.type = "button";
+  go.onclick = () => {
+    parkCurrent(res.uid);
+    setSession(res, "me", "已登进微信账号。访客号的记录还在，在这一页可以切回去看");
+  };
+  stay.onclick = () => {
+    revokeToken(res.token);
+    box.hidden = true;
+    toast("还在访客号里");
+  };
+  acts.append(go, stay);
+  box.appendChild(acts);
+}
+
+/* 停在这台浏览器上的另一个会话（目前只有上面这种情况会停）。只给停放它的那个账号看：
+   公用电脑上，下一个人登进自己的号看不到、也切不过去。退出、删号时跟着清掉。键 PARK_KEY 在 reloadInto 上面。 */
+function parkedSession() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PARK_KEY) || "null");
+    return p && p.owner === S.uid && p.uid && p.token && p.uid !== S.uid ? p : null;
+  } catch (_) { return null; }
+}
+function parkCurrent(owner) {
+  try {
+    localStorage.setItem(PARK_KEY, JSON.stringify({
+      uid: S.uid, token: S.token, nickname: S.nickname, guest: S.guest, wechat: S.wechat, owner }));
+  } catch (_) { /* 存不了：切过去之后就切不回来了，和原来一样 */ }
+}
+
+function renderLogin() {
+  $nav.hidden = true; $header.hidden = true;
+  $app.innerHTML = "";
+  stopWxPoll();
+  const binding = !!(S.uid && S.guest);  // 访客来绑微信：start 时带着访客会话，记录跟着走
+  const wxOn = !S.auth || S.auth.wechat_login;
+  const hero = el("section", "hero stagger");
+  hero.appendChild(el("p", "hero-kicker", binding ? "启研 · 绑定微信" : "启研 · 登录"));
+  hero.appendChild(el("h2", "", binding ? "绑定微信" : "登录"));
+  hero.appendChild(el("p", "hero-lead", binding
+    ? "绑定后换设备、清了浏览器也能接着用，访客期间的记录都会带过去。"
+    : "换手机、清了浏览器也能接着用。微信不用密码、不要手机号；没有微信的设备用用户名和密码。"));
+  const consent = consentRow();
+  const need = () => { if (consent.ok()) return true; toast("先勾选同意隐私说明"); return false; };
+  const onEnter = (btn) => (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); };
+
+  // 微信：昵称（选填）+ 开一次登录，等学生在公众号里发数字
+  const wxStep = el("div", "login-step");
+  const nick = el("input", "login-nick");
+  nick.placeholder = "怎么称呼你（选填，新账号用）"; nick.maxLength = 24;
+  nick.setAttribute("aria-label", "昵称");
+  const go = el("button", "btn", binding ? "绑定微信" : "用微信登录");
+  go.type = "button";
+  const wxBox = el("div", "wx-box");
+  wxBox.hidden = true;
+  go.onclick = () => { if (need()) startWechat(wxBox, { nickname: nick.value.trim() }); };
+  if (!binding) wxStep.appendChild(nick);
+  wxStep.append(go, wxBox);
+
+  // 用户名密码（上游 w68 加的注册登录）：和微信并列。登录不重复要同意——隐私说明更新过的，登进去后闸门会再问一次
+  const signinStep = el("div", "login-step login-body");
+  const suser = el("input"); suser.placeholder = "用户名"; suser.autocomplete = "username"; suser.maxLength = 24;
+  suser.setAttribute("aria-label", "用户名");
+  const spass = el("input"); spass.type = "password"; spass.placeholder = "密码"; spass.autocomplete = "current-password";
+  spass.setAttribute("aria-label", "密码");
+  const sbtn = el("button", "btn", "登录");
+  sbtn.type = "button";
+  sbtn.onclick = async () => {
+    if (!suser.value.trim() || !spass.value) { toast("先填用户名和密码"); return; }
+    sbtn.disabled = true; sbtn.textContent = "登录中…";
+    stopWxPoll();  // 走密码就作废正在等的微信登录，免得它的结果回来盖掉这次会话
+    try {
+      const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value });
+      const previous = S.token;  // 访客登进自己的账号：采用新令牌之后再吊销访客的
+      if (previous && previous !== r.token) revokeToken(previous);
+      if (setSession(r, "today")) return;
+      await afterEnter();
+      if (!r.consent_ok) openPrivacy(true);
+    } catch (e) { toast(e.message); sbtn.disabled = false; sbtn.textContent = "登录"; }
+  };
+  spass.addEventListener("keydown", onEnter(sbtn));
+  signinStep.append(suser, spass, sbtn);
+
+  const registerStep = el("div", "login-step login-body");
+  const ruser = el("input"); ruser.placeholder = "用户名，例如 xiaobei（2–24 个字母、数字、下划线）"; ruser.autocomplete = "username"; ruser.maxLength = 24;
+  ruser.setAttribute("aria-label", "用户名");
+  const rnick = el("input"); rnick.placeholder = "怎么称呼你（可与用户名相同）"; rnick.maxLength = 24;
+  rnick.setAttribute("aria-label", "昵称");
+  const rpass = el("input"); rpass.type = "password"; rpass.placeholder = "密码，至少 8 位"; rpass.autocomplete = "new-password";
+  rpass.setAttribute("aria-label", "密码");
+  const rbtn = el("button", "btn", "注册并进入");
+  rbtn.type = "button";
+  rbtn.onclick = async () => {
+    if (!need()) return;
+    if (!ruser.value.trim() || rpass.value.length < 8) { toast("用户名和至少 8 位密码"); return; }
+    rbtn.disabled = true; rbtn.textContent = "注册中…";
+    stopWxPoll();
+    try {
+      const r = await api("POST", "/api/auth/register", {
+        username: ruser.value.trim(), password: rpass.value,
+        nickname: rnick.value.trim() || ruser.value.trim(), consent: true,
+      });
+      if (setSession(r, "dialogue")) return;
+      await afterEnter();
+    } catch (e) { toast(e.message); rbtn.disabled = false; rbtn.textContent = "注册并进入"; }
+  };
+  rpass.addEventListener("keydown", onEnter(rbtn));
+  registerStep.append(ruser, rnick, rpass, rbtn);
+
+  // 访客：只要昵称，记录只能在这台浏览器里找回；之后可以绑微信或设用户名密码
+  const guestBox = el("div", "login-step");
+  const guestRow = el("div", "login-row");
+  const gname = el("input");
+  gname.placeholder = "你的昵称，例如：小北"; gname.maxLength = 24;
+  gname.setAttribute("aria-label", "访客昵称");
+  const gbtn = el("button", "btn", "以访客进入");
+  gbtn.type = "button";
+  gbtn.onclick = async () => {
+    if (!need()) return;
+    const n = gname.value.trim();
+    if (!n) { toast("先起个昵称吧"); gname.focus(); return; }
+    gbtn.disabled = true;
+    stopWxPoll();  // 走访客就作废正在等的微信登录，免得它的结果回来盖掉访客会话
+    try {
+      if (setSession(await api("POST", "/api/auth/login", { nickname: n, consent: true }), "dialogue")) return;
+      await afterEnter();
+    } catch (e) { toast(e.message); gbtn.disabled = false; }
+  };
+  gname.addEventListener("keydown", onEnter(gbtn));
+  guestRow.append(gname, gbtn);
+  guestBox.append(guestRow, el("p", "form-note", "访客的记录只能在这台浏览器里找回，之后可以在「记录」页绑定微信或设用户名密码。"));
+
+  const steps = { wechat: wxStep, signin: signinStep, register: registerStep };
+  let mode = wxOn ? "wechat" : "signin";
+  const tabs = el("div", "login-tabs");
+  const paint = () => {
+    tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+    Object.entries(steps).forEach(([k, node]) => { node.hidden = k !== mode; });
+    if (mode !== "wechat") { stopWxPoll(); wxBox.hidden = true; }  // 离开微信这一栏就作废正在等的数字
+  };
+  [["wechat", "微信"], ["signin", "账号登录"], ["register", "注册"]].forEach(([id, label]) => {
+    if (id === "wechat" && !wxOn) return;
+    const b = el("button", "login-tab", label);
+    b.type = "button";
+    b.dataset.mode = id;
+    b.onclick = () => { mode = id; paint(); };
+    tabs.appendChild(b);
+  });
+
+  if (binding) {
+    hero.append(consent.row, wxStep);
+  } else {
+    guestBox.hidden = true;
+    if (!wxOn) hero.appendChild(el("p", "login-note", "微信登录还没开通：用用户名密码，或先以访客进入。"));
+    hero.append(consent.row, tabs, wxStep, signinStep, registerStep, guestBox);
+    paint();
+  }
+
+  const links = el("div", "hero-links");
+  if (!binding) {
+    const asGuest = el("button", "linkish", "先不登录，以访客进入");
+    asGuest.type = "button";
+    asGuest.onclick = () => { guestBox.hidden = false; asGuest.remove(); gname.focus(); };
+    links.appendChild(asGuest);
+  }
+  const link = el("button", "linkish", "服务器共用模型（管理员）");
+  link.type = "button";
+  link.onclick = () => openConnect();
+  const back = el("button", "linkish", binding ? "返回" : "返回首页");
+  back.type = "button";
+  back.onclick = () => setView(binding ? "me" : "home");
+  links.append(link, back);
+  hero.appendChild(links);
+  $app.appendChild(hero);
+}
+
 function confirmLeave() {
   return window.confirm("退出后需要重新登录。确定？");
 }
 
 function clearChatDraft() {
-  try { if (S.uid) sessionStorage.removeItem("rg_chat_draft_" + S.uid); } catch (_) { /* ignore */ }
+  try { if (S.uid) sessionStorage.removeItem("rg_chat_draft_" + S.uid); } catch (_) { /* 无痕模式等 */ }
 }
 
 async function logout(next) {
-  if (!confirmLeave()) return;
   clearChatDraft();
-  try { await api("POST", "/api/auth/logout"); } catch (_) { /* 已经没会话也照样退 */ }
-  clearSession();
-  setView(next === "login" ? "login" : "home");
+  stopWxPoll();
+  try { await api("POST", "/api/auth/logout"); } catch (_) { /* 会话已经没了也照样退 */ }
+  clearSession(true);
+  reloadInto(next === "login" ? "login" : "home");
 }
 
 function accountPanel() {
@@ -1446,7 +1846,7 @@ function accountPanel() {
     ? `已登录：${esc(S.username)}（${esc(S.nickname)}）`
     : S.wechat
       ? `已用微信登录：${esc(S.nickname)}`
-      : `访客「${esc(S.nickname)}」。换设备找不回，请退出后注册一个账号。`;
+      : `访客「${esc(S.nickname)}」。记录只在这台浏览器里；绑定微信或设一个用户名密码，换设备也能找回。`;
   box.appendChild(el("p", "panel-sub", who));
   if (S.llmKeyInvalid) {
     box.appendChild(el("p", "panel-sub warn", "你的 DeepSeek 密钥无法解开，请重新保存。"));
@@ -1458,128 +1858,87 @@ function accountPanel() {
     b.onclick = fn;
     acts.appendChild(b);
   };
+  if (S.guest && (!S.auth || S.auth.wechat_login)) add("绑定微信", "btn small", () => setView("login"));
+  if (!S.username) add("设用户名密码", "btn small", () => openUpgrade());  // 上游 w68：有了用户名密码，没有微信的设备也能登回来
   if (!S.guest) add("我的 DeepSeek", "btn small", () => openMineKey());
-  add("导出数据", "btn small secondary", async () => {
-    try {
-      const data = await api("GET", "/api/me/export");
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `qiyan-export-${S.username || S.uid}.json`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      toast("已下载导出文件");
-    } catch (e) { toast(e.message); }
+  const parked = parkedSession();
+  if (parked) {
+    box.appendChild(el("p", "form-note", parked.guest
+      ? `这台浏览器上还有访客号「${esc(parked.nickname)}」的记录（绑微信时这个微信已经有账号，没有合并过去）。`
+      : `这台浏览器上还登着账号「${esc(parked.nickname)}」。`));
+    add(parked.guest ? "切回访客号" : "切回那个账号", "btn small secondary", () => {
+      parkCurrent(parked.uid);
+      setSession(parked, "me", parked.guest ? "已切回访客号" : "已切回那个账号");
+    });
+  }
+  add("我们存什么", "btn small ghost", () => openPrivacy(false));
+  add("导出我的数据", "btn small secondary", async () => {
+    const res = await apiFetch("/api/me/export");
+    if (!res.ok) { toast("导出失败"); return; }
+    downloadBlob(await res.blob(), "启研-我的数据.json");
   });
-  add("退出", "btn small secondary", async () => { await logout(); });
-  add("删除账号", "btn small ghost", async () => {
-    const typed = window.prompt("删除后记录立刻清掉。确定的话输入「删除」：");
+  add("退出登录", "btn small secondary", async () => {
+    if (S.guest && !window.confirm("访客退出后，这些记录就找不回来了（除非先绑定微信或设用户名密码）。确定退出？")) return;
+    if (parked && parked.guest && !window.confirm(`退出后，访客号「${parked.nickname}」的记录就找不回来了。确定退出？`)) return;
+    if (parked) revokeToken(parked.token);
+    await logout();
+  });
+  add("删除账号", "btn small ghost danger", async () => {
+    const back = parked && parked.guest ? `删的只是这个账号；这台浏览器上停着的访客号「${parked.nickname}」不受影响，删完切回它。` : "";
+    const typed = window.prompt(`删除后，库里你的所有记录会立刻清掉，不能恢复。${back}确定的话输入「删除」两个字：`);
     if (typed === null) return;
     if (typed.trim() !== "删除") { toast("没有删除"); return; }
     try {
       await api("DELETE", "/api/me");
-      clearSession();
-      toast("账号和记录都删了");
-      setView("home");
+      if (back) {
+        // 停着的访客号是它唯一的凭证：原来跟着一起清掉，访客的记录还在库里却再也进不去（Codex 复现）
+        try { localStorage.removeItem(PARK_KEY); } catch (_) { /* 无痕模式等 */ }
+        setSession(parked, "me", `账号删了，已切回访客号「${parked.nickname}」`);
+        return;
+      }
+      clearSession(true);
+      reloadInto("home", "账号和记录都删了");
     } catch (e) { toast(e.message); }
   });
   box.appendChild(acts);
   return box;
 }
 
-function renderLogin() {
-  $nav.hidden = true; $header.hidden = true;
-  $app.innerHTML = "";
-  const hero = el("section", "hero auth-hero stagger");
-  hero.appendChild(el("p", "hero-kicker", "启研"));
-  hero.appendChild(el("h2", "", "从一篇论文开始"));
-  hero.appendChild(el("p", "hero-lead", "登录启研，继续你的文献阅读。还没有账号，可以先注册。"));
-  const tabs = el("div", "login-tabs");
-  let mode = "signin";
-  const body = el("div", "login-body");
-  const notice = () => {
-    const details = el("details", "login-privacy");
-    details.append(el("summary", "", "隐私与数据说明（展开查看）"), privacyBox());
-    return details;
-  };
-  const field = (input, title, hint = "") => {
-    const box = el("div", "login-field");
-    const label = el("label", "", title);
-    input.id = "auth-" + mode + "-" + (input.autocomplete || "nickname");
-    label.htmlFor = input.id;
-    box.append(label, input);
-    if (hint) {
-      const note = el("p", "login-note", hint);
-      note.id = input.id + "-hint";
-      input.setAttribute("aria-describedby", note.id);
-      box.appendChild(note);
-    }
-    return box;
-  };
-  const paint = () => {
-    body.innerHTML = "";
-    tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
-    tabs.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
-    if (mode === "signin") {
-      const user = el("input"); user.placeholder = "用户名"; user.autocomplete = "username";
-      const pass = el("input"); pass.type = "password"; pass.placeholder = "密码"; pass.autocomplete = "current-password";
-      const btn = el("button", "btn", "登录");
-      btn.type = "button";
-      btn.onclick = async () => {
-        if (!user.value.trim() || !pass.value) { toast("先填用户名和密码"); return; }
-        btn.disabled = true; btn.textContent = "登录中…";
-        try {
-          setSession(await api("POST", "/api/auth/signin", { username: user.value.trim(), password: pass.value }));
-          S.myDir = undefined;
-          await afterEnter();
-        } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "登录"; }
-      };
-      pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
-      body.append(field(user, "用户名"), field(pass, "密码"), notice(), btn);
-    } else if (mode === "register") {
-      const user = el("input"); user.placeholder = "用户名，例如 xiaobei"; user.autocomplete = "username";
-      const nick = el("input"); nick.placeholder = "怎么称呼你（可与用户名相同）"; nick.maxLength = 24;
-      const pass = el("input"); pass.type = "password"; pass.placeholder = "密码，至少 8 位"; pass.autocomplete = "new-password";
-      const btn = el("button", "btn", "注册并进入");
-      btn.type = "button";
-      const consent = el("input"); consent.type = "checkbox";
-      const row = el("label", "consent-row");
-      row.append(consent, document.createTextNode(" 我已阅读并同意上述说明"));
-      btn.onclick = async () => {
-        if (!user.value.trim() || pass.value.length < 8) { toast("用户名和至少 8 位密码"); return; }
-        if (!consent.checked) { toast("请先阅读并同意隐私说明"); return; }
-        btn.disabled = true; btn.textContent = "注册中…";
-        try {
-          setSession(await api("POST", "/api/auth/register", {
-            username: user.value.trim(), password: pass.value,
-            nickname: nick.value.trim() || user.value.trim(), consent: consent.checked,
-          }));
-          S.myDir = undefined;
-          await afterEnter();
-        } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "注册并进入"; }
-      };
-      pass.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); });
-      body.append(field(user, "用户名", "2–24 个字母、数字或下划线"), field(nick, "称呼（选填）"), field(pass, "密码", "至少 8 位"), notice(), row, btn);
+/* 访客或微信账号补一个用户名和密码（上游 w68 的 /api/auth/upgrade）：同一个号，换设备也能用密码登回来。 */
+function openUpgrade() {
+  document.querySelectorAll(".connect-mask").forEach((n) => n.remove());
+  const mask = el("div", "connect-mask");
+  const box = el("form", "connect-box");
+  box.innerHTML = `
+    <p class="hero-kicker">ACCOUNT</p>
+    <h3>设用户名密码</h3>
+    <p class="panel-sub">还是这个账号，记录都在。之后在没有微信的设备上也能用用户名和密码登录。用户名 2–24 个字母、数字、下划线；密码至少 8 位，只存哈希。</p>
+    <label>用户名<input name="user" autocomplete="username" maxlength="24" /></label>
+    <label>密码<input name="pass" type="password" autocomplete="new-password" /></label>
+    <div class="connect-actions">
+      <button type="button" class="btn secondary" id="upCancel">取消</button>
+      <button type="submit" class="btn" id="upGo">保存</button>
+    </div>`;
+  mask.appendChild(box);
+  document.body.appendChild(mask);
+  box.querySelector("#upCancel").onclick = () => mask.remove();
+  mask.addEventListener("click", (e) => { if (e.target === mask) mask.remove(); });
+  box.onsubmit = async (e) => {
+    e.preventDefault();
+    const go = box.querySelector("#upGo");
+    if (!box.user.value.trim() || box.pass.value.length < 8) { toast("用户名和至少 8 位密码"); return; }
+    go.disabled = true; go.textContent = "保存中…";
+    try {
+      const r = await api("POST", "/api/auth/upgrade", { username: box.user.value.trim(), password: box.pass.value });
+      setSession(r);
+      mask.remove();
+      toast(`好了，之后可以用「${S.username}」登录`);
+      if (S.view === "me") setView("me");  // 账号面板上的按钮和说明跟着变
+    } catch (err) {
+      toast(err.message);
+      go.disabled = false; go.textContent = "保存";
     }
   };
-  [["signin", "登录"], ["register", "注册"]].forEach(([id, label]) => {
-    const b = el("button", "login-tab" + (id === mode ? " on" : ""), label);
-    b.type = "button";
-    b.dataset.mode = id;
-    b.onclick = () => { mode = id; paint(); };
-    tabs.appendChild(b);
-  });
-  const links = el("div", "hero-links");
-  const admin = el("button", "linkish", "服务器共用模型（管理员）");
-  admin.type = "button";
-  admin.onclick = () => openConnect();
-  const back = el("button", "linkish", "返回首页");
-  back.type = "button";
-  back.onclick = () => setView("home");
-  links.append(admin, back);
-  hero.append(tabs, body, links);
-  $app.appendChild(hero);
-  paint();
 }
 
 async function afterEnter() {
@@ -1596,6 +1955,7 @@ async function afterEnter() {
     }
     toast(`你好，${S.nickname}`);
   } else {
+    await ensurePortrait().catch(() => {});
     toast(`欢迎回来，${S.nickname}`);
   }
   setView(firstView());
@@ -1635,7 +1995,8 @@ function openConnect() {
       let r = null;
       try { r = await res.json(); } catch (_) { /* no body */ }
       if (!res.ok) throw new Error((r && r.detail) || `请求失败 (${res.status})`);
-      applyLlmPill({ enabled: true, model: r.model });
+      S.llmInfo = { enabled: true, model: r.model };
+      applyLlmPill(S.llmInfo);
       toast(`已连接 ${r.model}`);
       mask.remove();
     } catch (err) {
@@ -1760,9 +2121,11 @@ function paintChrome() {
   chip.classList.toggle("empty", !name);
 }
 
+let menuSeq = 0;  // 菜单每开、关一次加一：画像列表回来时菜单已经关了（或者换了一个），就别再往里塞
+
 function closeUserMenu() {
-  const menu = document.getElementById("userMenu");
-  if (menu) menu.remove();
+  menuSeq += 1;
+  document.querySelectorAll("#userMenu").forEach((m) => m.remove());
   const btn = document.getElementById("userMenuBtn");
   if (btn) btn.setAttribute("aria-expanded", "false");
 }
@@ -1778,6 +2141,7 @@ async function openUserMenu() {
   const btn = document.getElementById("userMenuBtn");
   if (!wrap || !btn || !S.uid) return;
   if (document.getElementById("userMenu")) { closeUserMenu(); return; }
+  const mine = ++menuSeq;
   btn.setAttribute("aria-expanded", "true");
   const menu = el("div", "user-menu");
   menu.id = "userMenu";
@@ -1792,29 +2156,32 @@ async function openUserMenu() {
   };
   menu.appendChild(go("我的", () => setView("me")));
   if (!S.guest) menu.appendChild(go("我的 DeepSeek", () => openMineKey()));
-  menu.appendChild(go("退出", () => logout("home")));
-  menu.appendChild(go("换账号", () => logout("login")));
-  wrap.appendChild(menu);
+  menu.appendChild(go("退出", () => { if (confirmLeave()) logout("home"); }));
+  menu.appendChild(go("换账号", () => { if (confirmLeave()) logout("login"); }));
+  wrap.appendChild(menu);  // 画像切换不再放菜单里（11 号：在「我的」页）
 }
 
-async function loadPrefs() {
+async function loadPrefs(c) {
   try {
-    const p = await api("GET", "/api/me/prefs");
+    const run = () => api("GET", "/api/me/prefs");
+    const p = await (c ? dirAwait(c, run) : run());
     S.myDirs = Array.isArray(p.directions) ? p.directions : [];
     if (p.kit_id) useKit(p.kit_id);
     return true;
-  } catch (_) {
+  } catch (e) {
+    if (e === STALE_DIR) throw e;
+    S.myDirs = undefined;  // 渲染缓存不是写入授权：读失败就当不知道
     return false;
   }
 }
 
 async function ensureMyDirs() {
-  if (Array.isArray(S.myDirs)) return true;
-  return loadPrefs();
+  return loadPrefs();  // 全量 PUT 之前每次都重新读
 }
 
-async function putPrefs(patch) {
-  const r = await api("PUT", "/api/me/prefs", patch);
+async function putPrefs(patch, c) {
+  const run = () => api("PUT", "/api/me/prefs", patch);
+  const r = await (c ? dirAwait(c, run) : run());
   S.myDirs = Array.isArray(r.directions) ? r.directions : (S.myDirs || []);
   return r;
 }
@@ -1844,65 +2211,115 @@ async function toggleDirSel(nodeId) {
   paintChrome();
 }
 
+/* 方向操作绑定发起时的会话/画像/纪元：切画像、换人、退出后，旧操作的回包不得写进新画像（R5-01） */
+const STALE_DIR = Symbol("stale-direction");
+let directionEpoch = 0;
+function directionContext() {
+  const c = { uid: S.uid, token: S.token, pid: S.portraitId || "default", key: trailStorageKey(), epoch: directionEpoch };
+  c.check = () => {
+    if (portraitBusy || c.epoch !== directionEpoch || c.uid !== S.uid || c.token !== S.token
+      || c.pid !== (S.portraitId || "default") || c.key !== trailStorageKey()) throw STALE_DIR;
+  };
+  return c;
+}
+
+async function dirAwait(c, run) {
+  c.check();
+  try { return await run(); }
+  finally { c.check(); }
+}
+
+async function readTrailForWrite(c) {
+  try {
+    const t = await dirAwait(c, () => api("GET", "/api/projects/" + c.pid + "/trail"));
+    localStorage.setItem(c.key, JSON.stringify(t));
+    return t;
+  } catch (e) {
+    if (e === STALE_DIR) throw e;
+    toast("没读到已收藏的方向，这次没有改"); return null;
+  }
+}
+
 async function addMyDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
-  const prev = trail();
-  if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
-  await saveTrail(portraitDirsAdd(nodeId));
-  if (await ensureMyDirs()) {
-    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
-  }
-  paintChrome();
-  toast("已添加到我的方向");
-  if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    const prev = trail();
+    if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
+    if (!(await loadPrefs(c))) { toast("没读到已收藏的方向，这次没有改"); return; }
+    await saveTrail(portraitDirsAdd(nodeId), false, c);
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) }, c);
+    c.check();
+    paintChrome();
+    toast("已添加到我的方向");
+    if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 async function removeMyDirection(nodeId) {
-  const t = trail();
-  const dirs = t.dirs.filter((x) => x !== nodeId);
-  const sel = selectedDirs(t).filter((x) => x !== nodeId);
-  const next = { ...t, dirs, sel };
-  if (t.dir === nodeId) {
-    const fallback = dirs[0];
-    if (fallback && window.RG_DIR) {
-      // 教程/这一步要有一条路可走：切到剩下的第一个，进度从 byDir 里接回来
-      const saved = (t.byDir || {})[fallback] || { done: [], tasks: {} };
-      next.code = RG_DIR.backendCode(fallback);
-      next.dir = fallback;
-      next.done = saved.done || [];
-      next.tasks = saved.tasks || {};
-    } else {
-      next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    if (!(await loadPrefs(c))) { toast("没读到已收藏的方向，这次没有改"); return; }
+    const t = trail();
+    const dirs = t.dirs.filter((x) => x !== nodeId);
+    const sel = selectedDirs(t).filter((x) => x !== nodeId);
+    const next = { ...t, dirs, sel };
+    if (t.dir === nodeId) {
+      const fallback = dirs[0];
+      if (fallback && window.RG_DIR) {
+        // 教程/这一步要有一条路可走：切到剩下的第一个，进度从 byDir 里接回来
+        const saved = (t.byDir || {})[fallback] || { done: [], tasks: {} };
+        next.code = RG_DIR.backendCode(fallback);
+        next.dir = fallback;
+        next.done = saved.done || [];
+        next.tasks = saved.tasks || {};
+      } else {
+        next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
+      }
     }
-  }
-  await saveTrail(next, true);
-  if (await ensureMyDirs()) {
+    await saveTrail(next, true, c);
+    c.check();
     const kept = S.myDirs.filter((x) => x !== nodeId);
-    if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept });
-  }
-  S.myDir = undefined;
-  paintChrome();
+    if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept }, c);
+    c.check();
+    S.myDir = undefined;
+    paintChrome();
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 async function chooseDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
-  const backend = RG_DIR.backendCode(nodeId);
-  await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
-  const withDirs = portraitDirsAdd(nodeId);
-  const prev = trail();
-  const byDir = Object.assign({}, prev.byDir || {});
-  if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
-  const nxt = byDir[nodeId] || { done: [], tasks: {} };
-  await saveTrail({
-    code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
-    dirs: withDirs.dirs, sel: withDirs.sel,
-  }, true);
-  if (await ensureMyDirs()) {
-    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
-  }
-  S.myDir = undefined;
-  paintChrome();
-  toast(`已确认「${dirTitle(nodeId)}」`);
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    const backend = RG_DIR.backendCode(nodeId);
+    await dirAwait(c, () => api("POST", "/api/directions/choose", { uid: c.uid, code: backend }));
+    const withDirs = portraitDirsAdd(nodeId);
+    const prev = trail();
+    const byDir = Object.assign({}, prev.byDir || {});
+    if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
+    const nxt = byDir[nodeId] || { done: [], tasks: {} };
+    await saveTrail({
+      code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
+      dirs: withDirs.dirs, sel: withDirs.sel,
+    }, true, c);
+    if (!(await loadPrefs(c))) {
+      S.myDir = undefined;
+      paintChrome();
+      toast("方向已确认，收藏列表没读到，没有改「我的」");
+      return;
+    }
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) }, c);
+    c.check();
+    S.myDir = undefined;
+    paintChrome();
+    toast(`已确认「${dirTitle(nodeId)}」`);
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 /* ---------- 画像 × 方向（我的页） ----------
@@ -1950,16 +2367,13 @@ async function portraitSection() {
   });
   const add = el("button", "portrait-add", "新建画像");
   add.type = "button";
-  add.onclick = async () => {
-    const created = await api("POST", "/api/portraits", { uid: S.uid });
-    const next = (created.portraits || []).find((i) => i.active);
-    S.portraitId = next ? next.id : "";
+  add.onclick = () => portraitOp(() => api("POST", "/api/portraits", { uid: S.uid }), "dialogue", false, async (r) => {
+    const next = (r.portraits || []).find((item) => item.active);
     S.portraitName = (next && next.name) || "";
     S.mePortrait = "";
     await pullTrail();
     paintChrome();
-    setView("dialogue");
-  };
+  });
   bar.appendChild(add);
   box.appendChild(bar);
 
@@ -2012,7 +2426,13 @@ async function portraitSection() {
     return (hit && hit.name) || dirTitle(nodeId) || nodeId;
   };
 
-  if (!localIds.length) {
+  if (S.myDirs === undefined) {
+    card.appendChild(el("p", "panel-sub", "收藏未加载，请重试"));
+    const b = el("button", "btn small", "收藏未加载，请重试");
+    b.onclick = async () => { if (await loadPrefs()) { await pullTrail(); setView("me"); } };
+    card.appendChild(b);
+  }
+  if (!localIds.length && S.myDirs !== undefined) {
     const empty = el("p", "panel-sub",
       "这份画像还没有加方向。换一份画像，或先回到当前画像去方向树添加。");
     card.appendChild(empty);
@@ -2022,7 +2442,7 @@ async function portraitSection() {
       go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
       card.appendChild(go);
     }
-  } else {
+  } else if (localIds.length) {
     const list = el("div", "my-dir-list");
     const selSet = new Set(isActive ? selectedDirs(t) : (shown.sel || []).map((x) => x.node || x));
     localIds.forEach((nodeId) => {
@@ -2033,7 +2453,10 @@ async function portraitSection() {
       if (isActive) {
         const drop = el("button", "btn small ghost", "移出");
         drop.type = "button";
-        drop.onclick = async () => { await removeMyDirection(nodeId); setView("me"); };
+        drop.onclick = async () => {
+          const c = directionContext();
+          try { await removeMyDirection(nodeId); c.check(); setView("me"); } catch (e) { if (e !== STALE_DIR) throw e; }
+        };
         row.appendChild(drop);
       }
       list.appendChild(row);
@@ -2053,19 +2476,15 @@ async function portraitSection() {
     const swapRow = el("div", "submit-actions");
     const swap = el("button", "btn", "更换到该画像");
     swap.type = "button";
-    swap.onclick = async () => {
-      try {
-        const r = await api("POST", "/api/portraits/activate", { uid: S.uid, id: shown.id });
-        const next = (r.portraits || []).find((i) => i.id === shown.id);
-        S.portraitName = (next && next.name) || "";
-      } catch (err) { toast(err.message); return; }
-      S.portraitId = shown.id;
+    swap.onclick = () => portraitOp(() => api("POST", "/api/portraits/activate", { uid: S.uid, id: shown.id }), "me", false, async (r) => {
+      // 服务器切成功了才改前端记着的画像（portraitOp 里做）；换了画像要清掉上一份的方向/项目/定位草稿（Codex 复现）
+      const next = (r.portraits || []).find((item) => item.id === shown.id);
+      S.portraitName = (next && next.name) || "";
       S.mePortrait = "";
       await pullTrail();
       paintChrome();
       toast(`已换到「${shown.label}」`);
-      setView("me");
-    };
+    });
     swapRow.appendChild(swap);
     card.appendChild(swapRow);
   } else if (portraits.length > 1) {
@@ -2074,15 +2493,12 @@ async function portraitSection() {
     del.type = "button";
     del.onclick = async () => {
       if (!window.confirm(`删除「${shown.label}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
-      try {
-        await api("DELETE", `/api/portraits/${shown.id}?uid=${S.uid}`);
-      } catch (err) { toast(err.message); return; }
-      S.portraitId = "";
-      S.mePortrait = "";
-      await ensurePortrait();
-      paintChrome();
-      toast("已删除，换到剩下的画像");
-      setView("me");
+      await portraitOp(() => api("DELETE", `/api/portraits/${encodeURIComponent(shown.id)}?uid=${S.uid}`), "me", true, async () => {
+        S.mePortrait = "";
+        await ensurePortrait();
+        paintChrome();
+        toast("已删除，换到剩下的画像");
+      });
     };
     delRow.appendChild(del);
     card.appendChild(delRow);
@@ -2552,6 +2968,37 @@ function trailStorageKey() {
   return "rg_trail_" + S.uid + (S.portraitId ? "_" + S.portraitId : "");
 }
 
+/* 新建、切换、删除画像一次只做一件：连点 B 再点 C，两个请求的响应可能倒着回来，
+   原来按回来的顺序记，前端停在 B、服务器在 C，任务区就拿 B 的教程在 C 里建任务（Codex 复现）。
+   做完以服务器回的「哪一份是当前的」为准，不以点了哪个为准。 */
+let portraitBusy = false;
+async function portraitOp(run, nextView, wasActive = false, after = null) {
+  if (portraitBusy) { toast("正在切换画像，稍等"); return; }
+  portraitBusy = true;
+  ++directionEpoch;
+  try {
+    const r = await run();
+    if (r === null) return;
+    const active = ((r && r.portraits) || []).find((item) => item.active);
+    const before = S.portraitId;
+    S.portraitId = active ? active.id : "";
+    // 只有当前画像真的换了（切换、新建、删掉的正是当前那份）才清：删一份不在用的画像，当前这份没写完的定位陈述不能跟着丢（Codex 复现）
+    if (wasActive || S.portraitId !== before || !before) {  // 删的是当前那份（最后一份删掉是原地清空、id 不变）也算换了
+      S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
+      // 下面这些也都属于上一份画像：项目表单（方向、阶段、关键词）和搜到的项目、打开的项目和任务、定位陈述草稿、
+      // 方向树上点着的节点。原来切到数学画像，项目表单还停在 AI、第 6 步和旧关键词（Codex 复现）
+      Object.assign(S, { projectForm: null, projectResult: null, projectKeywords: "", projectId: "",
+        openTaskId: "", posDraft: null, dirPicked: null });
+    }
+    if (after) await after(r);  // 上游 w97 的画像面板要在切完之后刷画像名、拉 trail
+    setView(nextView);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    portraitBusy = false;
+  }
+}
+
 async function ensurePortrait() {
   if (S.portraitId) return S.portraitId;
   try {
@@ -2564,14 +3011,15 @@ async function ensurePortrait() {
     S.portraitName = "";
   }
   if (S.portraitId) adoptLegacyTrail(S.portraitId);
-  await pullTrail();
+  const state = await pullTrail();
   // 老数据迁移：方向原来存在全局 prefs 里，第一次进画像时收进这份画像的 trail
+  // 只有成功读到、且远端同时缺 dirs/sel 的旧 schema 才迁移；读失败是未知，空数组是明确选择
   const t = trail();
-  if (!t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
+  if (state.loaded && !state.modern && !t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
     const dirs = S.myDirs.filter((id) => !window.RG_DIR || RG_DIR.byId[id]);
     if (dirs.length) await saveTrail({ ...t, dirs, sel: dirs });
   }
-  ensureSelKey();
+  if (state.loaded) ensureSelKey();
   return S.portraitId;
 }
 
@@ -2616,7 +3064,8 @@ function trail() {
   return { code: "", dir: "", done: [], tasks: {}, byDir: {}, dirs: [], sel: [] };
 }
 
-function saveTrail(t, force) {
+function saveTrail(t, force, c) {
+  if (c) c.check();
   const prev = trail();
   const code = t.code || "";
   let done = t.done || [];
@@ -2638,27 +3087,30 @@ function saveTrail(t, force) {
     dirs: Array.isArray(t.dirs) ? t.dirs.map(String) : prev.dirs,
     sel: Array.isArray(t.sel) ? t.sel.map(String) : prev.sel,
   };
-  localStorage.setItem(trailStorageKey(), JSON.stringify(packed));
-  if (S.token) {
-    const pid = S.portraitId || "default";
-    return api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
+  localStorage.setItem(c ? c.key : trailStorageKey(), JSON.stringify(packed));
+  if (c ? c.token : S.token) {
+    const pid = c ? c.pid : (S.portraitId || "default");
+    const run = () => api("PUT", `/api/projects/${pid}/trail`, { data: packed });
+    return (c ? dirAwait(c, run) : run()).catch((e) => { if (e === STALE_DIR) throw e; });
   }
   return Promise.resolve();
 }
 
 async function pullTrail() {
-  if (!S.token) return;
+  if (!S.token) return { loaded: true, modern: false };
   const pid = S.portraitId || "default";
   try {
     const remote = await api("GET", `/api/projects/${pid}/trail`);
-    if (remote && remote.code) {
+    const modern = Array.isArray(remote?.dirs) || Array.isArray(remote?.sel);
+    if (modern || remote?.code) {
       localStorage.setItem(trailStorageKey(), JSON.stringify(remote));
     } else {
       const local = trail();
       if (local.code) await api("PUT", `/api/projects/${pid}/trail`, { data: local });
     }
-  } catch (_) { /* 先用本地 */ }
-  ensureSelKey();
+    ensureSelKey();
+    return { loaded: true, modern };
+  } catch (_) { return { loaded: false, modern: false }; /* 先用本地，不迁移、不补 sel */ }
 }
 
 function inferredDone(code, tasks) {
@@ -2988,10 +3440,14 @@ function openDirSheet(node, ctx) {
   const add = el("button", "btn secondary", dirAdded ? "取消添加" : "添加到我的方向");
   add.type = "button";
   add.onclick = async () => {
-    if (dirAdded) await removeMyDirection(node.id);
-    else await addMyDirection(node.id);
-    // 重建浮层：对勾和按钮当场换过来，树也跟着重画
-    ctx.onPick(node.id);
+    const c = directionContext();
+    try {
+      if (dirAdded) await removeMyDirection(node.id);
+      else await addMyDirection(node.id);
+      c.check();
+      // 重建浮层：对勾和按钮当场换过来，树也跟着重画
+      ctx.onPick(node.id);
+    } catch (e) { if (e !== STALE_DIR) throw e; }
   };
   sheet.appendChild(add);
   sheet.querySelector(".sheet-x").focus({ preventScroll: true });
@@ -3075,8 +3531,10 @@ async function renderCards() {
   const chooseFocus = async () => {
     if (!window.RG_DIR || !RG_DIR.byId[focus]) { toast("先点树上的一个方向"); return; }
     const hadSheet = !!document.getElementById("nodeSheet");
+    const c = directionContext();
     try {
       await chooseDirection(focus);
+      c.check();
       chosenCode = RG_DIR.backendCode(focus);
       chosenDir = focus;
       picked = null;
@@ -3084,7 +3542,7 @@ async function renderCards() {
       paint();
       // 浮层本来开着就刷它：确认即已添加，对勾和「取消添加」当场可见
       if (hadSheet) showDir(focus);
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (e !== STALE_DIR) toast(e.message); }
   };
 
   const paintRec = () => {
@@ -3099,7 +3557,7 @@ async function renderCards() {
       const id = window.RG_DIR && RG_DIR.legacyDir[code];
       return (id && RG_DIR.displayName(id)) || (FIELD_TREES[code] && FIELD_TREES[code].name) || (c.direction && c.direction.name) || "";
     }).filter(Boolean);
-    recLine.appendChild(el("p", "", `按你刚说的，更贴近${names.join("、")}。${cards[0].why_you || ""}`));
+    recLine.appendChild(el("p", "", `按你刚说的，更贴近${names.map(esc).join("、")}。${esc(cards[0].why_you || "")}`));
     if (window.innerWidth < 920) {
       recLine.classList.add("clamp");
       recLine.onclick = () => recLine.classList.remove("clamp");
@@ -3306,7 +3764,7 @@ async function loadCourses(box, query) {
     const head = box.querySelector("h4");
     if (head) head.dataset.source = mark;
     if (!r.items || !r.items.length) {
-      box.appendChild(el("div", "course-status", `「${query}」没有对上的课。查的是本学期公开课快照，对不上就空着。`));
+      box.appendChild(el("div", "course-status", `「${esc(query)}」没有对上的课。查的是本学期公开课快照，对不上就空着。`));
       return;
     }
     r.items.forEach((it) => {
@@ -3365,7 +3823,7 @@ async function showTeacher(name) {
     }
     if (r.bio) sheet.appendChild(el("p", "sheet-intro", esc(r.bio)));
     else sheet.appendChild(el("p", "sheet-intro", "没有对上北京大学的公开学者简介，这里只列出本学期教的课。"));
-    sheet.appendChild(el("p", "sheet-label", `本学期课程 · ${r.term || ""}`));
+    sheet.appendChild(el("p", "sheet-label", `本学期课程 · ${esc(r.term || "")}`));
     (r.courses || []).forEach((c) => {
       sheet.appendChild(el("div", "course-item", `${esc(c.name || "")}<br><span class="meta">${esc([c.department, c.credits].filter(Boolean).join(" · "))}</span>`));
     });
@@ -3377,50 +3835,116 @@ async function showTeacher(name) {
 /* ---------- ⑤⑥ 工作台 ---------- */
 
 function readDraft(tid) {
-  try { return localStorage.getItem("rg_draft_" + tid) || ""; } catch (_) { return ""; }
+  try {
+    const key = `rg_draft_${S.uid}_${tid}`;
+    const cur = localStorage.getItem(key);
+    if (cur !== null) { localStorage.removeItem("rg_draft_" + tid); return cur; }  // 新键在就以它为准，旧键别留着日后冒出来
+    // 升级前的草稿存在不带 uid 的键里：能打开这道任务的就是它的主人（任务 id 是这个人的），搬到新键、删掉旧键。
+    // 原来升级之后没交的草稿就看不见了（Codex 复现）。搬不过去（存储满了）也照样显示，旧键留着
+    const old = localStorage.getItem("rg_draft_" + tid);
+    if (old) {
+      try { localStorage.setItem(key, old); localStorage.removeItem("rg_draft_" + tid); } catch (_) { /* 存不了：下次再搬 */ }
+    }
+    return old || "";
+  } catch (_) { return ""; }
 }
 function readDraftMeta(tid) {
-  try { return JSON.parse(localStorage.getItem("rg_draft_meta_" + tid) || "{}"); } catch (_) { return {}; }
+  let m = null;
+  try { m = JSON.parse(localStorage.getItem(`rg_draft_meta_${S.uid}_${tid}`) || "null"); } catch (_) { m = null; }
+  if (m && typeof m === "object" && typeof m.base_rev === "number" && typeof m.edit_seq === "number") {
+    return { base_rev: m.base_rev, edit_seq: m.edit_seq, dirty: !!m.dirty, conflict: !!m.conflict };
+  }
+  // 升级前的本地稿没有 rev：当作未同步的冲突稿先展示，不静默上传（排序只认服务端 rev，客户端时钟不算数）
+  const legacy = !!readDraft(tid) || !!(m && typeof m === "object" && m.dirty);  // 旧 dirty 空稿是没同步上去的清空
+  return { base_rev: 0, edit_seq: 0, dirty: legacy, conflict: legacy };
 }
 function writeDraftMeta(tid, meta) {
-  try { localStorage.setItem("rg_draft_meta_" + tid, JSON.stringify(meta || {})); } catch (_) { /* ignore */ }
+  try { localStorage.setItem(`rg_draft_meta_${S.uid}_${tid}`, JSON.stringify(meta || {})); } catch (_) { /* ignore */ }
 }
+/* 本地记录 {text, base_rev, edit_seq, dirty}；每任务最多一个 PUT 在途。
+   text 为 undefined 时只把 dirty 的本地稿推上去（hydrate、冲突按钮用）。 */
 function writeDraft(tid, text) {
-  const at = new Date().toISOString();
-  try {
-    if (text) localStorage.setItem("rg_draft_" + tid, text);
-    else localStorage.removeItem("rg_draft_" + tid);
-    writeDraftMeta(tid, { updated_at: at, dirty: true });
-  } catch (_) { /* 存不了就算了，不影响提交 */ }
-  if (S.token) {
-    api("PUT", `/api/tasks/${tid}/draft`, { text: text || "", updated_at: at }).then((r) => {
-      writeDraftMeta(tid, { updated_at: (r && r.updated_at) || at, dirty: false });
-    }).catch(() => {
-      writeDraftMeta(tid, { updated_at: at, dirty: true });
-    });
+  const sync = (S.draftSync = S.draftSync || {});
+  const st = sync[tid] || (sync[tid] = { flight: null, onConflict: null });
+  if (text !== undefined) {
+    const prev = readDraftMeta(tid);
+    try {
+      localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text || "");  // 空稿也存：清空也要同步上去
+      localStorage.removeItem("rg_draft_" + tid);
+    } catch (_) { /* 存不了就算了，不影响提交 */ }
+    writeDraftMeta(tid, { base_rev: prev.base_rev, edit_seq: prev.edit_seq + 1, dirty: true, conflict: prev.conflict });
   }
+  if (!S.token) return Promise.resolve();
+  if (st.flight) return st.flight;  // 在途那笔回来后会接着发最新稿
+  const run = async () => {
+    for (;;) {
+      const sent = readDraftMeta(tid);
+      if (!sent.dirty || sent.conflict) return;
+      let r;
+      try {
+        r = await api("PUT", `/api/tasks/${tid}/draft`, { text: readDraft(tid), base_rev: sent.base_rev });
+      } catch (e) {
+        if (e && e.status === 409) {
+          writeDraftMeta(tid, Object.assign(readDraftMeta(tid), { conflict: true }));
+          if (st.onConflict) st.onConflict();
+        } else if (typeof toast === "function") toast("草稿未同步，联网后重试");
+        return;  // 断网：dirty 留着，下次输入或打开再试
+      }
+      const cur = readDraftMeta(tid);
+      const rev = r && typeof r.rev === "number" ? r.rev : sent.base_rev + 1;
+      if (rev < cur.base_rev) continue;  // 更新的 GET 已确认过更高 rev：旧 ack 不降版本
+      // 旧 ack 只推进 base_rev；这期间又改过就不清 dirty，接着发
+      writeDraftMeta(tid, { base_rev: rev, edit_seq: cur.edit_seq, dirty: cur.edit_seq !== sent.edit_seq, conflict: cur.conflict });
+      if (cur.edit_seq === sent.edit_seq) return;
+    }
+  };
+  st.flight = run().finally(() => { st.flight = null; });
+  return st.flight;
 }
 async function hydrateDraft(tid, ta) {
   if (!S.token) return;
-  const local = readDraft(tid);
-  const meta = readDraftMeta(tid);
-  const localAt = Date.parse(meta.updated_at || "") || 0;
-  try {
-    const r = await api("GET", `/api/tasks/${tid}/draft`);
-    const remoteAt = Date.parse(r.updated_at || "") || 0;
-    if (r.text && remoteAt > localAt) {
-      try { localStorage.setItem("rg_draft_" + tid, r.text); } catch (_) { /* ignore */ }
-      writeDraftMeta(tid, { updated_at: r.updated_at, dirty: false });
-      if (ta && document.activeElement !== ta) ta.value = r.text;
-      else if (ta && !ta.value) ta.value = r.text;
-    } else if (local && (meta.dirty || !r.text)) {
+  const sync = (S.draftSync = S.draftSync || {});
+  const st = sync[tid] || (sync[tid] = { flight: null, onConflict: null });
+  const url = `/api/tasks/${tid}/draft`;
+  if (st.ta !== ta) { st.btn?.remove(); st.btn = null; st.ta = ta; }  // 按钮属于当前表单
+  st.onConflict = () => {
+    if (!ta || st.btn || !document.createElement) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn ghost small";
+    b.textContent = "用本地稿覆盖云端";
+    b.title = "草稿已在别处更新，本地稿已保留";
+    b.onclick = async () => {
+      b.disabled = true;
       try {
-        const saved = await api("PUT", `/api/tasks/${tid}/draft`, { text: local, updated_at: meta.updated_at || new Date().toISOString() });
-        writeDraftMeta(tid, { updated_at: (saved && saved.updated_at) || meta.updated_at, dirty: false });
-      } catch (_) { /* 下次再试 */ }
+        const r = await api("GET", url);
+        const cur = readDraftMeta(tid);
+        writeDraftMeta(tid, { base_rev: r && typeof r.rev === "number" ? r.rev : 0, edit_seq: cur.edit_seq, dirty: true, conflict: false });
+        await writeDraft(tid);
+      } catch (_) { /* 断网：按钮留着再点 */ }
+      const after = readDraftMeta(tid);
+      if (after.conflict || after.dirty) { b.disabled = false; return; }
+      b.remove();
+      st.btn = null;
+    };
+    st.btn = b;
+    if (ta.insertAdjacentElement) ta.insertAdjacentElement("afterend", b);
+  };
+  const seq0 = readDraftMeta(tid).edit_seq;
+  let r;
+  try { r = await api("GET", url); } catch (_) { return; }  // 断网先用本地
+  const local = readDraftMeta(tid);
+  const text = (r && r.text) || "";
+  const rev = r && typeof r.rev === "number" ? r.rev : 0;
+  if (rev >= local.base_rev && local.edit_seq === seq0) {  // 比本地旧的快照、GET 等待期间有编辑，都不碰输入框
+    if (!local.dirty || readDraft(tid) === text) {
+      try { localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text); } catch (_) { /* 存不了就只填进框里 */ }
+      writeDraftMeta(tid, { base_rev: rev, edit_seq: local.edit_seq, dirty: false, conflict: false });
+      if (ta) ta.value = text;
     }
-    if (ta && !ta.value && readDraft(tid)) ta.value = readDraft(tid);
-  } catch (_) { /* 断网先用本地 */ }
+  }
+  if (readDraftMeta(tid).conflict) st.onConflict();
+  await writeDraft(tid);
 }
 
 function renderProjectsSoon() {
@@ -3681,28 +4205,44 @@ function taskPanelDone(p, task, opts) {
   p.appendChild(head);
   p.appendChild(el("p", "task-origin", taskOriginLine(task)));
   p.appendChild(taskStemBlock(task, opts));
-  const folds = [
-    { key: "how", label: "题目说明", node: () => taskHowNode(task) },
-    { key: "rubric", label: "怎样算做到", node: () => taskRubricNode(task) },
-  ];
-  if (S.lastFeedback && S.lastFeedbackTaskId === task.id) {
-    folds.push({ key: "fb", label: "评阅", node: () => {
-      const box = el("div");
-      renderFeedbackInto(box, { hideNext: true });
-      return box;
-    } });
-    if (S.lastFeedback.next_hint) {
-      folds.push({ key: "next", label: "下一步", node: () => el("div", "why-box", `<b>下一步　</b>${esc(S.lastFeedback.next_hint)}`) });
+  const foldsNode = el("div");
+  p.appendChild(foldsNode);
+  const hasFb = () => !!(S.lastFeedback && S.lastFeedbackTaskId === task.id);
+  const paintFolds = () => {
+    const folds = [
+      { key: "how", label: "题目说明", node: () => taskHowNode(task) },
+      { key: "rubric", label: "怎样算做到", node: () => taskRubricNode(task) },
+    ];
+    if (hasFb()) {
+      folds.push({ key: "fb", label: "评阅", node: () => {
+        const box = el("div");
+        renderFeedbackInto(box, { hideNext: true });
+        return box;
+      } });
+      if (S.lastFeedback.next_hint) {
+        folds.push({ key: "next", label: "下一步", node: () => el("div", "why-box", `<b>下一步　</b>${esc(S.lastFeedback.next_hint)}`) });
+      }
     }
+    if (opts.note) {
+      folds.push({
+        key: "path",
+        label: "路径说明",
+        node: () => opts.note() || el("p", "form-note", "这一题不挂在路径步骤上。"),
+      });
+    }
+    foldsNode.innerHTML = "";
+    foldsNode.appendChild(taskFolds(folds, hasFb() ? "fb" : ""));
+  };
+  paintFolds();
+  if (!hasFb()) {
+    // 这次会话里没有这条反馈（刷新过、或从别的任务切回来）：从服务器取最近一次提交的反馈，到了再把「评阅」折叠画上。原来就看不到了（Codex 复现）
+    api("GET", `/api/tasks/${encodeURIComponent(task.id)}`).then((t) => {
+      if (!t || !t.feedback || !foldsNode.isConnected) return;
+      S.lastFeedback = t.feedback;
+      S.lastFeedbackTaskId = task.id;
+      paintFolds();
+    }).catch(() => { /* 取不到就不显示，不挡任务页 */ });
   }
-  if (opts.note) {
-    folds.push({
-      key: "path",
-      label: "路径说明",
-      node: () => opts.note() || el("p", "form-note", "这一题不挂在路径步骤上。"),
-    });
-  }
-  p.appendChild(taskFolds(folds, S.lastFeedback && S.lastFeedbackTaskId === task.id ? "fb" : ""));
   if (opts.onDone) p.appendChild(opts.onDone());
 }
 
@@ -3740,8 +4280,9 @@ async function renderWorkbench() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;
+  let tasksFailed = false;
   const [taskRes, onboard] = await Promise.all([
-    api("GET", `/api/tasks?uid=${S.uid}`).catch(() => ({ tasks: [] })),
+    api("GET", `/api/tasks?uid=${S.uid}`).catch(() => { tasksFailed = true; return { tasks: [] }; }),
     api("GET", `/api/onboard/result?uid=${S.uid}`).catch(() => null),
   ]);
   if (stale(seq)) return;
@@ -3749,6 +4290,11 @@ async function renderWorkbench() {
   const wrap = el("div", "stagger");
   wrap.appendChild(workspaceHead("这一步", "先看题。做完再对。"));
   $app.appendChild(wrap);
+  if (tasksFailed) {
+    // 没取到不等于没有：原来当成空列表往下走，进度被对成「没做过」、当前节点又生成一份新作业，做完的变回没做（Codex 复现）
+    wrap.appendChild(emptyPanel("作业列表这次没取到（网络或服务器忙），已经做过的都还在。", "再试一次", "workbench"));
+    return;
+  }
 
   const listed = taskRes.tasks || [];
   wrap.appendChild(roomGuide("workbench", listed.some((tk) => tk.status === "open" || tk.status === "done")));
@@ -5047,7 +5593,8 @@ async function renderCard() {
     agent.appendChild(el("summary", "", `你的 Agent（可选）· 决策日志 ${state.log.length} 条`));
     agent.appendChild(el("p", "form-note", "下载简报放进你的 Agent（Claude Code / Codex 放项目目录；DeepSeek 等网页版就复制内容）。它只能挑错和提问，不能替你写「主张」「假设」「我会改什么」。它的每条建议在这里登记，并逐条决定采纳、修改还是拒绝——拒绝要写理由。"));
     const dl = el("a", "btn small secondary", "交给你的 Agent ↓ AGENTS.md");
-    dl.href = `/api/brief?kit=${kitId}&arxiv_id=${aid}`;
+    // 走接口地址：页面在 GitHub Pages 时，相对路径会去 Pages 上找，下载不到（Codex 复现）
+    dl.href = apiUrl(`/api/brief?kit=${encodeURIComponent(kitId)}&arxiv_id=${encodeURIComponent(aid)}`);
     agent.appendChild(dl);
     const table = el("div", "log-rows");
     const paintLog = () => {
@@ -5185,6 +5732,7 @@ async function dailyBlock(seq) {
     return box;
   }
   if (stale(seq)) return box;
+  if (d.day) box.dataset.day = d.day;
   const dirName = d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣";
   const head = el("div", "daily-head");
   head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
@@ -5236,14 +5784,29 @@ async function dailyBlock(seq) {
     const why = el("input");
     why.placeholder = "留下／跳过的理由（4–80 字）：碰到了什么 / 离你的问题多远";
     why.maxLength = 80;
+    let sending = false;
     const send = async (verdict) => {
+      // 请求回来之前这一行只算一次；今天分拣了几篇用服务器回的数，不自己加。
+      // 原来慢的时候双击「留」显示完成 2 篇，库里只有 1 篇（Codex 复现）
+      if (sending || row.classList.contains("done")) return;
+      sending = true;
+      keep.disabled = true; skip.disabled = true;
       try {
-        await api("POST", "/api/daily/triage", { uid: S.uid, kit: "", arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
+        const r = await api("POST", "/api/daily/triage", { uid: S.uid, kit: "", arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
-        if (n) n.textContent = String(Number(n.textContent) + 1);
-      } catch (e) { toast(e.message); why.focus(); }
+        // 几行同时交时回来的顺序不定：同一天里只往大里改，旧的那个数不能把新的盖小；
+        // 过了零点就照新一天的数来（原来一律取大，跨天还显示昨天的 5/3，Codex 复现）
+        // 跨零点倒着回来的那种：比现在显示的日期早的回包不用（原来昨天的 6 盖掉了今天的 1，Codex 复现）
+        const shownDay = box.dataset.day || "";
+        if (n && r && typeof r.done_today === "number" && !(r.day && shownDay && r.day < shownDay)) {
+          const sameDay = r.day && r.day === shownDay;
+          n.textContent = String(sameDay ? Math.max(Number(n.textContent) || 0, r.done_today) : r.done_today);
+          if (r.day) box.dataset.day = r.day;
+        }
+      } catch (e) { toast(e.message); keep.disabled = false; skip.disabled = false; why.focus(); }
+      sending = false;
     };
     const keep = el("button", "btn small", "留");
     keep.type = "button";
@@ -5338,13 +5901,16 @@ async function _deadRenderPosition() {
   }
 }
 
-/* 学生的方向：本机轨迹优先，没有就问服务端（直接打开定位 / 研读时本机可能还没记） */
+/* 学生的方向：本机轨迹优先，没有就问服务端（直接打开定位 / 研读时本机可能还没记）。
+   问到的按画像记：问的时候切了画像，这个结果不记；没问到也不记，下次再问。 */
 async function myDirection() {
   if (trail().code) return trail().code;
-  if (S.myDir === undefined) {
-    try { S.myDir = (await api("GET", `/api/projects/context?uid=${S.uid}`)).direction || ""; } catch (_) { S.myDir = ""; }
-  }
-  return S.myDir;
+  if (S.myDir !== undefined) return S.myDir;
+  const portrait = S.portraitId;
+  let dir;
+  try { dir = (await api("GET", `/api/projects/context?uid=${S.uid}`)).direction || ""; } catch (_) { return ""; }
+  if (S.portraitId === portrait) S.myDir = dir;
+  return dir;
 }
 
 /* 学生的方向还没有工具包时如实说，并指向不依赖工具包的「信息源」 */
@@ -5380,7 +5946,7 @@ async function paintEdges(seq, body) {
     const li = el("li", "", `<span>${edgeChip(e)}<small>${esc(d.kinds[e.kind] || e.kind)}${e.evidence_url ? ` · <a href="${esc(e.evidence_url)}" target="_blank" rel="noopener">凭据 ↗</a>` : ""}</small></span>`);
     const x = el("button", "linkish danger", "删");
     x.type = "button";
-    x.onclick = async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); setView("position"); } catch (err) { toast(err.message); } };
+    x.onclick = once(x, async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); backToPosition(seq); } catch (err) { toast(err.message); } });
     li.appendChild(x);
     ml.appendChild(li);
   });
@@ -5403,9 +5969,9 @@ async function paintEdges(seq, body) {
   const add = el("button", "btn small", "加一条");
   add.type = "button";
   const submit = async (k, t, u) => {
-    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); setView("position"); } catch (err) { toast(err.message); }
+    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); backToPosition(seq); } catch (err) { toast(err.message); }
   };
-  add.onclick = () => submit(kind.value, text.value, url.value);
+  add.onclick = once(add, () => submit(kind.value, text.value, url.value));
   text.addEventListener("keydown", (ev) => { if (ev.key === "Enter") add.click(); });
   form.append(kind, text, url, add);
   intro.appendChild(form);
@@ -5473,7 +6039,7 @@ async function paintSources(seq, body) {
         const t = el("button", c.read ? "btn small" : "btn small secondary", c.read ? "✓ 我常看" : "我常看");
         t.type = "button";
         t.onclick = async () => {
-          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); setView("position"); } catch (e) { toast(e.message); }
+          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); backToPosition(seq); } catch (e) { toast(e.message); }
         };
         card.appendChild(t);
         list.appendChild(card);
@@ -5617,12 +6183,15 @@ async function paintStatement(seq, body) {
   body.appendChild(panel);
 
   let timer = null;
+  let checkGen = 0;  // 每次编辑加一；回来的检查结果编号不是最新的就丢掉
   async function check() {
     clearTimeout(timer);
+    const gen = ++checkGen;
     timer = setTimeout(async () => {
       let r;
       try { r = await api("POST", "/api/statement", { uid: S.uid, kit: S.kitId, x_ref: state.x_ref, x_text: state.x_text, y: state.y, dry_run: true }); } catch (_) { return; }
-      if (stale(seq)) return;
+      // 旧的检查可能比新的晚回来（服务器按到达先后排队），原来会用旧结果把「保存」又禁掉（Codex 复现）
+      if (stale(seq) || gen !== checkGen) return;
       checks.innerHTML = "";
       r.checks.forEach((c) => {
         const mark = c.pass ? "✓" : c.level === "hint" ? "·" : "!";
@@ -5636,14 +6205,30 @@ async function paintStatement(seq, body) {
   sel.addEventListener("change", () => { state.x_ref = sel.value; keep(); paintQuote(); check(); });
   save.onclick = async () => {
     save.disabled = true;
+    const sent = JSON.stringify(state);  // 这次交的是哪一版
     try {
       await api("POST", "/api/statement", { uid: S.uid, kit: S.kitId, x_ref: state.x_ref, x_text: state.x_text, y: state.y });
-      S.posDraft = null;
-      toast("已保存");
-      setView("position");
-    } catch (e) { toast(e.message); save.disabled = false; }
+      // 保存期间离开再回来接着改了：只清掉这次交的那一版，后来写的留着；人已经去了别的页就别拉回来（原来两样都直接做，Codex 复现）
+      const later = S.posDraft && JSON.stringify(S.posDraft) !== sent;
+      if (!later) S.posDraft = null;
+      toast(later ? "已保存；之后改的还在草稿里" : "已保存");
+      if (!stale(seq)) setView("position");
+    } catch (e) { toast(e.message); if (!stale(seq)) save.disabled = false; }
   };
   check();
+}
+
+/* 定位页里的写操作做完重画定位页——只在还是发起它的那一次渲染时。人去了别的页、或者在定位页里换了一栏
+   （比如去「下注组合」正在填），就不重画：原来一律 setView，刚输入的内容被清掉（Codex 复现） */
+function backToPosition(seq) { if (!stale(seq)) setView("position"); }
+
+/* 按钮的点击在请求回来之前只算一次：原来双击「加上」会建两个同名目标，三个名额一下占满（Codex 复现） */
+function once(btn, run) {
+  return async (...args) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try { await run(...args); } finally { btn.disabled = false; }
+  };
 }
 
 async function paintBets(seq, body) {
@@ -5681,7 +6266,7 @@ async function paintBets(seq, body) {
       why.placeholder = "一句原因：以后的你和后来的同学都用得上";
       const ok = el("button", "btn small", "记下");
       ok.type = "button";
-      ok.onclick = async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); setView("position"); } catch (e) { toast(e.message); } };
+      ok.onclick = once(ok, async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); backToPosition(seq); } catch (e) { toast(e.message); } });
       f.append(out, why, ok);
       row.appendChild(f);
     };
@@ -5710,7 +6295,7 @@ async function paintBets(seq, body) {
     niche.innerHTML = '<option value="">子方向（可选）</option>' + kit.open_problems.map((o) => `<option value="${o.id}">${esc(o.niche)}</option>`).join("");
     const add = el("button", "btn small", "加上");
     add.type = "button";
-    add.onclick = async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); setView("position"); } catch (e) { toast(e.message); } };
+    add.onclick = once(add, async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); backToPosition(seq); } catch (e) { toast(e.message); } });
     f.append(name, kind, tier, niche, add);
     panel.appendChild(f);
   }
@@ -6027,9 +6612,10 @@ async function _deadRenderProjects() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;
+  let mineFailed = false;
   const [ctx, mine] = await Promise.all([
     api("GET", `/api/projects/context?uid=${S.uid}`).catch(() => null),
-    api("GET", `/api/projects/mine?uid=${S.uid}`).catch(() => ({ projects: [] })),
+    api("GET", `/api/projects/mine?uid=${S.uid}`).catch(() => { mineFailed = true; return { projects: [] }; }),
   ]);
   if (stale(seq)) return;
   const tab = S.projectTab || "find";
@@ -6037,6 +6623,11 @@ async function _deadRenderProjects() {
   $app.appendChild(workspaceHead("项目", "先说你想碰哪一类，再找公开真题。"));
   $app.appendChild(roomGuide("projects", (mine.projects || []).length > 0));
   $app.appendChild(projectTabs(tab, (mine.projects || []).length));
+  if (tab === "mine" && mineFailed) {
+    // 没取到不是没有：原来显示成「还没选项目」，选过的项目像是丢了（Codex 复现）
+    $app.appendChild(emptyPanel("「我的项目」这次没取到（网络或服务器忙），选过的都还在。", "再试一次", "projects"));
+    return;
+  }
   if (tab === "mine") { renderMine(mine.projects || []); return; }
   if (tab === "sources") { renderSources(); return; }
 
@@ -6475,6 +7066,7 @@ async function renderProject() {
   up.appendChild(result);
   $app.appendChild(up);
 
+  const shownIn = S.portraitId;  // 这个项目页属于哪份画像：交的时候带上，期间切走了服务器就不收
   const send = async (f) => {
     if (!f) return;
     if (!/\.zip$/i.test(f.name)) { toast("只收 .zip 文件"); return; }
@@ -6482,13 +7074,19 @@ async function renderProject() {
     drop.classList.add("busy");
     drop.querySelector("span").textContent = `正在看「${f.name}」…`;
     try {
-      const res = await apiFetch(`/api/projects/${p.id}/submit?uid=${S.uid}`, {
+      const at = shownIn ? `&portrait=${encodeURIComponent(shownIn)}` : "";
+      const res = await apiFetch(`/api/projects/${p.id}/submit?uid=${S.uid}${at}`, {
         method: "POST", headers: { "Content-Type": "application/zip" }, body: f,
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error((data && data.detail) || `提交失败 (${res.status})`);
       paintReview(result, data, false, (p.reviews || [])[0]);
-      p.reviews = [data].concat(p.reviews || []);
+      if (data.recorded === false) {
+        // 评阅做完了但没记进项目（比如评阅期间在别的页面切了画像）：照样给看结果，但说清楚没保存
+        result.prepend(el("div", "note-box", esc(data.note || "这次评阅没有保存。") + "要保存的话，切回原来的画像再交一次。"));
+      } else {
+        p.reviews = [data].concat(p.reviews || []);
+      }
       result.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
       result.innerHTML = "";
@@ -6625,6 +7223,14 @@ function factCard(f, editable = false, isNew = false) {
   return card;
 }
 
+/* 同一个浏览器的另一个标签页退出或换了人：这一页手里的会话和画面都已经不对，跟着重载 */
+window.addEventListener("storage", (e) => {
+  if (e.key !== null && e.key !== "rg_token") return;
+  let now = "";
+  try { now = localStorage.getItem("rg_token") || ""; } catch (_) { return; }
+  if (now !== S.token) location.reload();
+});
+
 /* ---------- 导航 & 启动 ---------- */
 
 document.querySelectorAll(".nav-btn").forEach((b) => {
@@ -6706,35 +7312,56 @@ document.addEventListener("keydown", (e) => {
 
 (async function boot() {
   const t0 = performance.now();
-  loadPersistedSession();
   try {
     const [h, paths] = await Promise.all([api("GET", "/api/health"), api("GET", "/api/paths").catch(() => null)]);
+    S.llmInfo = h.llm || null;  // 服务器那把兜底密钥的状态，登录、退出时重画侧栏的模型钮要用
     applyLlmPill(h.llm);
     S.auth = h.auth || null;
     if (paths) applyPaths(paths.paths);
   } catch (_) { /* 健康检查失败不挡页面 */ }
   buildTutorials();
+  let needConsent = false;
+  if (S.uid && !S.token) {
+    // 有账号之前，浏览器里只存了 uid：凭它认领一次，换成会话
+    try {
+      setSession(await api("POST", "/api/auth/legacy", { uid: S.uid }));
+    } catch (e) {
+      if (e.status === 401) clearSession();  // 认领过或不存在；网络错误时 uid 是这个人唯一的凭证，不能扔
+    }
+  }
   if (S.token) {
     try {
-      const res = await apiFetch("/api/auth/me");
-      if (res.status === 401 || res.status === 404 || res.status === 410) {
-        reloadInto("login", sessionGoneMsg());
-      } else if (res.ok) {
-        setSession(await res.json());
-        await loadPrefs();
-        await ensurePortrait();
-        setView(firstView());
-      } else {
+      const me = await api("GET", "/api/auth/me");
+      setSession(me);
+      needConsent = !me.consent_ok;
+      await loadPrefs();  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
+      await ensurePortrait();
+    } catch (e) {
+      if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么
         clearSession();
-        setView("home");
+        reloadInto("login", sessionGoneMsg());
+        return;
+      } else {
+        // 网络断了、服务器在重启：会话和草稿都留着，原来这里一律清掉，草稿就永久没了（Codex 复现）
+        setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
       }
-    } catch (_) {
-      clearSession();
-      setView("home");
     }
-  } else {
-    setView("home");
+  } else if (S.uid) {
+    // 只有 uid、认领没成（网络错误）：先去登录页，但 uid 留着，下次打开再认领——它是这个人唯一的凭证
+    setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
   }
+  let next = "home", note = "";
+  try {
+    next = sessionStorage.getItem("rg_next_view") || sessionStorage.getItem("rg_last_view") || "home";
+    note = sessionStorage.getItem("rg_toast") || "";
+    sessionStorage.removeItem("rg_next_view");
+    sessionStorage.removeItem("rg_toast");
+  } catch (_) { /* 无痕模式等 */ }
+  let landing = next === "login" && !S.uid ? "login" : next !== "home" && S.uid ? next : "home";
+  if (S.uid && !S.entered && !["home", "me", "login", "dialogue"].includes(landing)) landing = "dialogue";  // 还没进入：先把开场聊完或点「进入启研」
+  setView(landing);
+  if (note) toast(note);
+  if (needConsent) openPrivacy(true);
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒
   const splash = document.getElementById("boot");
   setTimeout(() => {

@@ -135,4 +135,9 @@ def test_health_says_whether_the_db_will_survive_a_restart(monkeypatch):
     assert TestClient(main.app).get("/api/health").json()["db"]["ephemeral"] is True
     monkeypatch.setenv("QIYAN_DB", "/mnt/nas/qiyan.db")
     monkeypatch.setattr(store, "DB_PATH", Path("/mnt/nas/qiyan.db"))
+    monkeypatch.setattr(store.os.path, "ismount", lambda p: str(p) in ("/", "/mnt/nas"))
     assert TestClient(main.app).get("/api/health").json()["db"]["ephemeral"] is False
+    # 设了 QIYAN_DB，但 /data 没挂盘（镜像自带的目录，实例自己的盘）：照样会没
+    monkeypatch.setenv("QIYAN_DB", "/data/qiyan.db")
+    monkeypatch.setattr(store, "DB_PATH", Path("/data/qiyan.db"))
+    assert TestClient(main.app).get("/api/health").json()["db"]["ephemeral"] is True

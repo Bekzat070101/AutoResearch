@@ -39,7 +39,7 @@ _SEMESTER_RE = re.compile(r"^(\d{2}-\d{2})学年度([123])学期$")
 # 原来的正则一个都不认，于是那几门课连同学分被整条丢掉。
 _GRADE_RE = re.compile(
     r"^(?:W|I|P|F|IP|NP|合格|不合格|缓考|退课|在修|进行中|"
-    r"优秀|良好|中等|及格|"
+    r"优秀|良好|中等|及格|不及格|"  # 原来漏了「不及格」：挂的课连同学分整条消失
     r"[A-Fa-f][+-]?|"
     r"\d+(?:\.\d+)?)$")
 
@@ -322,7 +322,7 @@ def summarize(courses: list[dict[str, Any]]) -> dict[str, Any]:
     in_progress: list[dict[str, Any]] = []
 
     for c in courses:
-        credits = max(0.0, round(float(c.get("credits") or 0)))
+        credits = max(0.0, float(c.get("credits") or 0))  # 不取整：0.5 学分的实验课原来被 round 成 0，绩点和学分都算错
         grade = normalize_grade(c.get("grade"))
         if grade in IN_PROGRESS:
             # 成绩还没出：既不算通过学分，也不算绩点，但要单独报出来

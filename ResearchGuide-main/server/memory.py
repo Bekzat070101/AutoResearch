@@ -9,10 +9,12 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
+import evidence
 import store
 import transcript
 from schemas import DECISION_STATUSES, UserFact, now_iso
@@ -42,7 +44,9 @@ def canon_key(key: str) -> str:
     if ":" not in k:
         return k
     ns, slug = k.split(":", 1)
-    return f"{ns}:{_SEP_RE.sub('-', slug.strip()).strip('-. ')}"
+    k = f"{ns}:{_SEP_RE.sub('-', slug.strip()).strip('-. ')}"
+    # 在册的精确 key 带下划线（base:math_code）：规范化后要认回原样，原来变成 base:math-code 查不到（Codex 复现）
+    return next((e for e in _EXACT if ":" in e and _SEP_RE.sub("-", e) == k), k)
 
 
 class KeySpec(NamedTuple):
@@ -423,6 +427,297 @@ def support_ratio(value: str, quote: str) -> float:
     return len(v & _content_chars(quote)) / len(v)
 
 
+# ---------- 按字段核对：模型给结构化的值，代码去原话里对（evidence.py） ----------
+# 原来是一串字面启发式（年级正则、否定窗口、数字正则），审了十七轮还在补：「不想碰」「not a graduate student」
+# 「我没学过Python」→「会」「北京大学」撑「清华大学」都能混过去。现在每种字段一个确定的核对办法：
+#   grade        {stage, year}：原话里按固定的表认出同一个（阶段, 第几年），说的是现在；
+#   age/enroll_year/pace  {value, unit, per}：原话里有同一个数、同一量纲的单位（小时和分钟、年和月可以换算）；
+#   school/department/major：库里的名字或简称在原话里作为学籍出现、说的是现在；
+#   interest/goal/field：值就是原话的一段（或常见缩写），不在否定、过去、假设、改口、别人的事里；
+#   其余字段（direction 的值常是库里的方向名，不一定是原话）：照旧按支撑度，另外查数字、英文词，和原话在共有片段上的说法要一致。
+# 范围都按引文所在的整条消息算（evidence.scan），只认引文那一段里的说法。
+_QTY_KEYS = {"age": ("age", "岁"), "enroll_year": ("calyear", "年"), "pace": ("clock", "小时")}
+_ENTITY_KEYS = ("school", "department", "major")
+_SPAN_KEYS = ("interest", "goal", "field")
+# 值外面包着的「对…感兴趣」「想学…」不是值本身：「对机器学习感兴趣」按「机器学习」去原话里找
+_FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$", re.S)
+_PER_CN = {"w": "周", "d": "天", "mo": "月", "y": "年", "term": "学期"}
+# 年龄、每周时间说的是现在（「我打算每周投入九小时」不算，Codex 复现）；入学年份本来就是过去的事（「我去年2025年入学」，Codex 复现）
+_QTY_SCOPES = {"enroll_year": evidence.STATE - {evidence.PAST}}
+# 本来就是「想」的自由文字字段，原话在打算里不算不一致
+_TEXT_WISH = ("career", "direction")
+# 能力类允许「只撑住一部分 → 降成 inferred」（docs/DIALOGUE_CONTRACT.md §3.3）；方向值常是库里的方向名。别的自由文字字段不许多出原话没有的东西
+_TEXT_LOOSE = ("base", "capability", "direction")
+# 值里不算「多出来的东西」的词：包装、程度、时间指代
+_FILLER_WORDS = re.compile(r"研究|兴趣|方向|领域|相关|应用|方面|内容|正在|在做|在修|在上|目前|现在|这学期|本学期|已经|还|很|比较|主要|大概|一些|一点|"
+                           r"最多|至少|不到|以上|以内|左右|大约|约|只有|只能")
+# 入学年份要连着入学说（「2021年我参加了竞赛」不是入学，Codex 复现）；每周时间不能是上课、通勤这类占掉的时间（Codex 复现）
+_NOT_FREE_TIME = re.compile(r"课|体育|通勤|睡|上班|兼职|打工|家教|坐车")
+# 数量字符串里除了这个量只许有这些：「19岁，计算机基础扎实」不是一个年龄（Codex 复现）
+_QTY_FILLER = re.compile(r"(?:每[ \t]?个?(?:周|星期|礼拜|天|日|月|年|学期)|[一1][ \t]?个?(?:周|星期|礼拜|天|月)|今年|周岁|虚岁|入学|入校|级|届|约|大约|大概|"
+                         r"左右|差不多|上下|能|可以|投入|学习|时间|per|a|an|week|day|month|weekly|daily|about|"
+                         r"around|roughly|hours?|[\s,，。.;；~～:：/])*")
+_UNIT_SHOWN = {u: "小时" for u in ("h", "hr", "hrs", "hour", "hours", "钟头", "钟")} | \
+              {u: "分钟" for u in ("min", "mins", "minute", "minutes", "分")} | {"周岁": "岁", "years old": "岁", "year old": "岁"}
+
+
+class _Ctx(NamedTuple):
+    text: str                             # 引文所在的整条消息（prep 过）
+    windows: evidence.Windows             # 引文在这条消息里的每一处位置
+    quote: str                            # 引文原样（比内容字、支撑度用）
+
+
+def _context(quote: str, pool: list[str] | None = None) -> _Ctx:
+    """引文按它所在的整条消息核对范围：模型只引「大四」，「我不是大四」的「不是」照样算（原来只看引文，否定、过去、主语都被裁在外面，Codex 复现）。
+    同一句话出现在几条消息里，用最近的那条。"""
+    q = evidence.prep(quote).strip()
+    for msg in reversed(pool or []):
+        t = evidence.prep(msg)
+        wins, i = [], t.find(q) if q else -1
+        while i != -1 and len(wins) < 64:  # 不重叠地找、最多 64 处：原来逐位找重叠的长引文，几万字是平方级（Codex 复现）
+            wins.append((i, i + len(q)))
+            i = t.find(q, i + max(1, len(q)))
+        if wins:
+            return _Ctx(t, evidence.Windows(tuple(a for a, _ in wins), len(q)), quote)
+    return _Ctx(q, evidence.Windows((0,), len(q)), quote)
+
+
+def _inside(ctx: _Ctx, s: int, e: int) -> bool:
+    return ctx.windows.contain(s, e)
+
+
+def _kind(key: str) -> str:
+    if key == "grade":
+        return "grade"
+    if key in _QTY_KEYS:
+        return "quantity"
+    if key in _ENTITY_KEYS:
+        return "entity"
+    return "span" if ":" in key and key.split(":")[0] in _SPAN_KEYS else "text"
+
+
+def _num(x: Any) -> float | None:
+    if isinstance(x, bool):
+        return None
+    try:
+        n = float(x)
+    except (TypeError, ValueError, OverflowError):  # 10**400 是合法 JSON，原来 float() 抛出来整轮校验中断（Codex 复现）
+        return None
+    return n if math.isfinite(n) and abs(n) < 1e7 else None
+
+
+def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str, bool] | str | None | object:
+    """{value, unit, per} 或者一段写着数的字符串 →（这个量, 存库的写法）。字符串里没有数 → None（按普通文字核对）；
+    字典形状不对、或者字符串不只是一个这种量（「19岁，已发表论文」「五周」「3」门课）→ BAD 或拒。
+    字典先拼成「每周10小时」再交给同一个解析，免得两套单位规则。"""
+    dim, unit0 = _QTY_KEYS[key]
+    if isinstance(value, dict):
+        if not value or set(value) - {"value", "unit", "per"}:
+            return evidence.BAD
+        n, unit, per = value.get("value"), value.get("unit") or unit0, value.get("per")
+        lo, hi = (n[0], n[1]) if isinstance(n, list) and len(n) == 2 else (n, n)
+        lo, hi = _num(lo), _num(hi)
+        if lo is None or hi is None or not isinstance(unit, str) or not isinstance(per, (str, type(None))):
+            return evidence.BAD
+        unit = re.sub(r"^个", "", evidence.prep(unit).strip())
+        unit = _UNIT_SHOWN.get(unit, unit)
+        per_code = ""
+        if per:
+            p = evidence.prep(per).strip().removeprefix("每").removeprefix("per ").strip()
+            per_code = p if p in _PER_CN else evidence._PER_WORD.get(p, "")
+            if not per_code:
+                return evidence.BAD
+        text = (f"每{_PER_CN[per_code]}" if per_code else "") + evidence.dec(lo) + (f"到{evidence.dec(hi)}" if hi != lo else "") + unit
+    else:
+        text = str(value or "").strip()
+    qs = evidence.quantities(text)
+    if not qs:
+        return evidence.BAD if isinstance(value, dict) else None
+    q = qs[0]
+    t = evidence.prep(text)
+    if len(qs) != 1 or not _QTY_FILLER.fullmatch(t[:q.start] + " " + t[q.end:]):
+        return evidence.BAD if isinstance(value, dict) else "number_not_in_evidence"
+    if not q.dim:  # 光一个数：按这个字段本来的单位（年龄 20 = 20 岁，入学 24 = 2024 年）
+        lo, hi = q.lo, q.hi
+        if dim == "calyear" and lo < 100:
+            lo, hi = lo + 2000, hi + 2000
+        q = q._replace(dim=dim, lo=lo, hi=hi, base_lo=lo * (60 if dim == "clock" else 1), base_hi=hi * (60 if dim == "clock" else 1))
+    if q.dim != dim or (key == "enroll_year" and q.lo != q.hi):
+        return evidence.BAD if isinstance(value, dict) else "number_not_in_evidence"
+    if not isinstance(value, dict):
+        # 带单位的字符串和结构化的值一样严格比：原来「每周7小时」绕过了上下限、per 和入学关系的检查（Codex 复现）；光一个数照旧只比数
+        return q, text, bool(qs[0].dim)
+    span = evidence.dec(q.lo) + (f"到{evidence.dec(q.hi)}" if q.hi != q.lo else "")  # 范围两头都留（原来只存低的那头，Codex 复现）
+    return q, {"age": f"{span}岁", "enroll_year": span}.get(key, text), True
+
+
+def _qty_reason(key: str, q: evidence.Qty, ctx: _Ctx, strict: bool) -> str | None:
+    hits = [h for h in evidence.quantities(ctx.text) if _inside(ctx, h.start, h.end) and evidence.qty_match(q, h, strict=strict)]
+    if strict and key == "enroll_year":  # 年份后面紧跟着入学：「2024年入学」「24年进的北大」「2025年我来北大报到」
+        hits = [h for h in hits if h.label in ("级", "届") or evidence._ENROLL_AFTER.match(ctx.text, h.end)
+                or re.search(r"入学[^，。,；;]{0,6}$", ctx.text[max(0, h.start - 8):h.start])]  # 「入学年份2023」「入学那会是两千零二十三年」
+    if strict and key == "pace":  # 「课余」「课后」「课题组」不是课（Codex 复现）；同一分句只看一次
+        sc, busy = evidence.scan(ctx.text), {}
+        for h in hits:
+            a, b = sc.clause(h.start)
+            if a not in busy:
+                busy[a] = bool(_NOT_FREE_TIME.search(re.sub(r"课[余外后间题]", "", ctx.text[a:b])))
+        hits = [h for h in hits if not busy[sc.clause(h.start)[0]]]
+    if not hits:
+        return "number_not_in_evidence"
+    sc = evidence.scan(ctx.text)
+    kinds = _QTY_SCOPES.get(key, evidence.STATE)
+    return None if any(evidence.is_current(sc, h.start, h.end, kinds) for h in hits) else "negated_in_evidence"
+
+
+def _occurrence_reason(occ: list[tuple[int, int]], ctx: _Ctx, kinds: frozenset[str]) -> str | None:
+    occ = [o for o in occ if _inside(ctx, *o)]
+    if not occ:
+        return "short_value_not_in_evidence"
+    sc = evidence.scan(ctx.text)
+    return None if any(evidence.is_current(sc, s, e, kinds) for s, e in occ) else "negated_in_evidence"
+
+
+def _scope_mismatch(key: str, value: str, ctx: _Ctx) -> bool:
+    """自由文字的值和原话在共有片段上说法不一致：原话是否定、过去、打算、假设、别人的事、改口，值却当成他现在的事
+    （「我没学过Python」→「会Python」、「我上学期在上概率论」→「在上概率论」、「我朋友在上计量」→ 他在上，Codex 复现）；
+    值里有否定原话却没有也不行（「我会 SQL」→「不会 SQL」）。英文词是具体的东西，一个不一致就算；中文片段要全不一致才算。"""
+    kinds = evidence.STATE - ({evidence.IRREALIS} if key.split(":")[0] in _TEXT_WISH else set())
+    sc = evidence.scan(ctx.text)
+    if evidence.has_negation(value) and not evidence.has_negation(ctx.quote) \
+            and not any(evidence.kinds_at(sc, a, a + ctx.windows.length, frozenset({evidence.NEG})) for a in ctx.windows.starts):
+        return True
+    vt = evidence.prep(value)
+    verdicts = []
+    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（Codex 复现）；片段在值里的说法按换过缩写的那一版找，
+    # 原来在原值里找「ml」找不到，「不会机器学习」的否定就丢了（Codex 复现）
+    pairs = {(a, form) for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}
+    for a, form in sorted(pairs):
+        occ = [o for o in evidence.span_occurrences(a, ctx.text) if _inside(ctx, *o)]
+        if not occ:
+            continue
+        own = evidence._find(form, a)
+        v = evidence.kinds_at(evidence.scan(form), *own[0], kinds) if own else set()
+        if _PERFECTIVE.search(vt):  # 「学过高等数学」本来就是说以前的事，原话里的「以前」不算不一致（Codex 复现）
+            v = v | {evidence.PAST}
+        ok = any(not (q - v) and (evidence.NEG in q) == (evidence.NEG in v)
+                 for q in (evidence.kinds_at(sc, s, e, kinds) for s, e in occ))
+        if not ok and (a.isascii() or len(a) >= 3):  # 三个字以上的片段对不上就算：「线性代数和实分析都学过」里的「实分析」（Codex 复现）
+            return True
+        verdicts.append(not ok)
+    return bool(verdicts) and all(verdicts)
+
+
+_PERFECTIVE = re.compile(r"(?:接触|参加|学|修|做|用|写|上|读|看|碰|练|跑)过|曾经|曾|完成了|做完了?|学完了?|写完了?")
+
+
+def _extra_claims(value: str, ctx: _Ctx) -> bool:
+    """值里有原话没说的东西：去掉和原话共有的片段（两个字以上）、数字、虚词和包装词后还剩两个字以上的内容。
+    「正在开发大型推荐系统」对「我在看推荐系统入门教程」多出了「开发大型」，「机器学习和量子化学」多出了「量子化学」（Codex 复现）。"""
+    rest = evidence.prep(value)
+    for a in sorted({a for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}, key=len, reverse=True):
+        rest = rest.replace(a, " ")
+    rest = _FILLER_WORDS.sub(" ", rest)
+    return len(_content_chars(re.sub(r"[0-9.]+", " ", rest)) - _content_chars(evidence.prep(ctx.quote))) >= 2
+
+
+def _words_missing(value: str, ctx: _Ctx) -> bool:
+    """值里的英文词（Java、PyTorch）原话里得有同一个词：原来按字母重合，「我会 JavaScript」撑住了「精通 Java」（Codex 复现）。"""
+    q = evidence.prep(ctx.quote)
+    return any(w.isascii() and not any(evidence._has(q, f) for f in evidence.span_forms(w)) for w in evidence.runs(value))
+
+
+def _typed_value(key: str, value: Any, ctx: _Ctx) -> tuple | None | object:
+    """结构化字段的核对：（存库的值, 拒绝理由或 None[, 只撑住一部分时的支撑度]）。
+    不是结构化字段、或者字符串里认不出结构 → None；字典形状不对 → BAD。"""
+    kind = _kind(key)
+    if kind == "grade":
+        g = evidence.parse_grade(value)
+        if g is evidence.BAD:
+            return g
+        if g is None:  # 「本科二年级，GPA4.0」：年级后面夹带了别的，整条不收
+            return str(value), "grade_not_in_evidence"
+        shown = evidence.render_grade(*g) if isinstance(value, dict) else str(value).strip()
+        return shown, (None if evidence.grade_supported(g[0], g[1], ctx.text, ctx.windows) else "grade_not_in_evidence")
+    if isinstance(value, dict) and kind != "quantity":
+        return evidence.BAD
+    if kind == "quantity":
+        parsed = _parse_qty(key, value)
+        if parsed is None or parsed is evidence.BAD:
+            return parsed
+        if isinstance(parsed, str):
+            return str(value), parsed
+        q, shown, strict = parsed
+        return shown, _qty_reason(key, q, ctx, strict=strict)
+    text = str(value).strip()
+    if kind == "entity":
+        return text, _occurrence_reason(evidence.entity_occurrences(key, text, ctx.text, ctx.windows), ctx, evidence.STATE)
+    if kind == "span":
+        occ = [o for o in evidence.span_occurrences(text, ctx.text) if _inside(ctx, *o)]
+        core = _FRAMING.match(text)
+        if not occ and core and core.group(1) != text:
+            occ = [o for o in evidence.span_occurrences(core.group(1), ctx.text) if _inside(ctx, *o)]
+        if occ:
+            return text, _occurrence_reason(occ, ctx, evidence.WISH)
+        # 不是原话：值里得有原话的一大段（四个字以上的中文或一个英文词）当锚，锚说的是现在；收下也只算我们推的
+        anchors = [o for a in evidence.anchors(text, ctx.quote) for o in evidence.span_occurrences(a, ctx.text)]
+        ratio = support_ratio(text, ctx.quote)
+        # 值里带换行时原来 _FRAMING 匹配不上、.group 抛异常，整轮对话中断（Codex 复现）
+        if not anchors or ratio < _SUPPORT_FLOOR or _words_missing(text, ctx) or _extra_claims(core.group(1) if core else text, ctx):
+            return text, "short_value_not_in_evidence"
+        if not _numbers_supported(text, ctx.quote):  # 「每周读5篇」不能借「每周读2篇机器学习论文」的锚混进来（Codex 复现）
+            return text, "number_not_in_evidence"
+        return text, _occurrence_reason(anchors, ctx, evidence.WISH), min(ratio, _SUPPORT_OK - 0.001)
+    return None
+
+
+# 下面几个是老接口，测试和调用方还在用，都落到 evidence 上（只有引文、没有整条消息时按引文本身算）
+def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
+    return [(g.stage, g.year) for g in evidence.current_grades(text)]
+
+
+def _quantities(text: str) -> set[tuple[float, str]]:
+    return {(q.lo, q.label) for q in evidence.quantities(text)}
+
+
+def _numbers_supported(value: str, quote: str) -> bool:
+    return evidence.numbers_supported(value, quote)
+
+
+def _negated_in(value: str, quote: str) -> bool:
+    ctx = _context(quote)
+    occ = evidence.span_occurrences(value, ctx.text)
+    return bool(occ) and _occurrence_reason(occ, ctx, evidence.WISH) == "negated_in_evidence"
+
+
+def _grade_supported(value: str, quote: str) -> bool | None:
+    g = evidence.parse_grade(value)
+    if g is None or g is evidence.BAD:
+        return None if not evidence.grade_mentions(evidence.prep(value)) else False
+    ctx = _context(quote)
+    return evidence.grade_supported(g[0], g[1], ctx.text, ctx.windows)
+
+
+def _with_aliases(text: str) -> str:
+    low = evidence.prep(text)
+    extra = [b for group in evidence.ALIAS_GROUPS for a in group if evidence._has(low, a) for b in group if b != a]
+    return low + " " + " ".join(extra)
+
+
+def _short_value_supported(key: str, value: str, quote: str, ctx: _Ctx | None = None) -> bool:
+    """短值也得撑得住：结构化字段按上面的核对；别的短值至少要有一个内容字（算上常见缩写）出现在引文里，
+    英文词要整个出现，说法要和原话一致。全是虚词的值（「会」）原来算作撑得住，「我没学过Python」→ base:code=会 就这么混进去。"""
+    ctx = ctx or _context(quote)
+    typed = _typed_value(key, value, ctx)
+    if typed is not None and typed is not evidence.BAD:
+        return typed[1] is None
+    v = _content_chars(_with_aliases(value))
+    if not v:
+        raw = {c for c in str(value) if not c.isspace()}
+        return bool(raw) and raw <= set(quote)
+    return bool(v & _content_chars(_with_aliases(quote))) and not _words_missing(value, ctx) and not _scope_mismatch(key, value, ctx)
+
+
 # 这条记忆改变未来的哪个决策。填不出就没资格进画像。
 # 依据是「写入代价不对称」：少记一条只是下次再问一遍，记错一条会静默污染之后每个决策，
 # 而且没人会发现——所以默认不写，要写就举证。
@@ -441,6 +736,9 @@ AFFECT_KEYS = set(AFFECT_LABELS)
 # 只有这些 op 需要举证「改变了什么决策」；retract/support 是对已有事实的操作。
 _AFFECT_REQUIRED = ("add", "replace")
 
+# 模型 op 里这些字段只能是字符串或不填。
+_OP_FIELDS = ("op", "key", "value", "category", "source", "evidence_quote", "target_fact_id", "affects", "valid_until")
+
 
 def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) -> tuple[list[dict], list[dict]]:
     """逐条校验。返回 (accepted, rejected)，rejected 带 reason 以便前端和日志展示。
@@ -454,6 +752,23 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
     for raw in ops or []:
         if not isinstance(raw, dict):
             rejected.append({"op": None, "reason": "not_an_object"})
+            continue
+        # 值是数字（入学年份 2024、年龄 20）先转成字符串：原来一律当类型不对拒掉，年份就记不下来（Codex 复现）
+        num = raw.get("value")
+        if isinstance(num, int) and not isinstance(num, bool) and abs(num) < 10 ** 12:
+            raw = {**raw, "value": str(num)}
+        elif isinstance(num, float) and math.isfinite(num) and abs(num) < 1e12:
+            raw = {**raw, "value": f"{num:g}"}
+        # 字段只收字符串（或不填）：原来 key 是列表就 .strip() 抛异常、整轮 500，valid_until 是 [] / {} 过了校验到 SQLite 才炸（Codex 复现）
+        bad = next((f for f in _OP_FIELDS if not isinstance(raw.get(f), (str, type(None)))), None)
+        # 年级和数量字段的值可以是结构化的对象（{stage, year} / {value, unit, per}），形状对不对在下面按字段查
+        if bad == "value" and isinstance(raw.get("value"), dict) and isinstance(raw.get("key"), str) \
+                and _kind(canon_key(raw["key"])) in ("grade", "quantity") \
+                and not any(not isinstance(raw.get(f), (str, type(None))) for f in _OP_FIELDS if f != "value"):
+            bad = None
+        if bad:
+            rejected.append({"op": raw.get("op"), "key": raw.get("key"), "value": raw.get("value"), "raw": raw,
+                             "reason": f"bad_type:{bad}"})
             continue
         op = str(raw.get("op") or "").strip().lower()
         key = canon_key(raw.get("key") or "")
@@ -498,27 +813,68 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
                 continue
 
         target = None
+        changed_key = False
+        retire_id = None
         if op in ("replace", "retract", "support"):
             tid = str(raw.get("target_fact_id") or "").strip()
             target = facts_by_id.get(tid)
             if target is None:
                 rejected.append({**item, "reason": "target_fact_not_found"})
                 continue
+            if op == "replace" and str(target.key) != key:
+                # 「把 direction:ai 改成 direction:math」：原来会存成 direction:ai = 数学，显示改了、规划和选项目还按 AI（Codex 复现）。
+                # 键变了就不是改一条，是换一条：新值按 add 写，被替换的那条明确撤掉——
+                # 不能只靠 add 的同类覆盖：goal:phd → goal:work 这种可多值的键不会被覆盖，两个目标会同时留着。
+                retire_id = target.id
+                op, target, changed_key = "add", None, True
 
-        value = str(raw.get("value") or "").strip()
-        if op in ("add", "replace") and not value:
+        raw_value = raw.get("value")
+        value = "" if isinstance(raw_value, dict) else str(raw_value or "").strip()
+        if op in ("add", "replace") and not value and not isinstance(raw_value, dict):
             rejected.append({**item, "reason": "empty_value"})
             continue
         if len(value) > 200:
             value = value[:200]
 
-        # 闸门②：引文得撑得住这个值。
+        # 闸门②：引文得撑得住这个值。结构化字段按字段核对，别的按支撑度。
         quote = str(raw.get("evidence_quote") or "").strip()
-        substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
-        ratio = support_ratio(value, quote) if (op in ("add", "replace") and substantive) else 1.0
-        if op in ("add", "replace") and substantive and ratio < _SUPPORT_FLOOR:
-            rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
-            continue
+        ratio = 1.0
+        if op in ("add", "replace"):
+            ctx = _context(quote, evidence_pool)
+            typed = _typed_value(key, raw_value if isinstance(raw_value, dict) else value, ctx)
+            if typed is evidence.BAD:
+                rejected.append({**item, "reason": "bad_type:value"})
+                continue
+            if typed is not None:
+                value, why = typed[:2]
+                ratio = typed[2] if len(typed) > 2 else 1.0
+                if why:
+                    rejected.append({**item, "reason": why})
+                    continue
+            else:
+                substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
+                # 短值也算支撑度（算上缩写）：原来一个字对上就收，「编程能力非常扎实」被「我刚开始学编程」撑住（Codex 复现）
+                v = _content_chars(evidence.prep(value))
+                ratio = support_ratio(value, quote) if substantive else (len(v & _content_chars(_with_aliases(quote))) / len(v) if v else 1.0)
+                if v and ratio < _SUPPORT_FLOOR:
+                    rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}" if substantive else "short_value_not_in_evidence"})
+                    continue
+                if key.split(":")[0] not in _TEXT_LOOSE and _extra_claims(value, ctx):
+                    rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
+                    continue
+                if _words_missing(value, ctx):
+                    rejected.append({**item, "reason": "short_value_not_in_evidence"})
+                    continue
+                if _scope_mismatch(key, value, ctx):
+                    rejected.append({**item, "reason": "negated_in_evidence"})  # 「我没学过Python」撑不住「会Python」
+                    continue
+                if not substantive and not _short_value_supported(key, value, quote, ctx):
+                    # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
+                    rejected.append({**item, "reason": "short_value_not_in_evidence"})
+                    continue
+                if not _numbers_supported(value, quote):
+                    rejected.append({**item, "reason": "number_not_in_evidence"})
+                    continue
 
         valid_until = raw.get("valid_until")
         if spec.requires_valid_until:
@@ -528,7 +884,7 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         elif valid_until and _parse_when(valid_until) is None:
             valid_until = None
 
-        notes: list[str] = []
+        notes: list[str] = ["replace_key_changed_as_add"] if changed_key else []
         # 引文只撑住一部分 → 说明值里有模型的推断成分。不丢，但降级成 inferred，
         # 免得「用户说的」和「模型推的」在画像里长得一样（这是 base:code 那次事故的根因）。
         if op in ("add", "replace") and ratio < _SUPPORT_OK:
@@ -557,6 +913,7 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
             "support_ratio": round(ratio, 3),
             "evidence_quote": str(raw.get("evidence_quote") or "").strip()[:300],
             "target_fact_id": target.id if target else None,
+            "retire_fact_id": retire_id,
             "notes": notes,
         })
 
@@ -585,6 +942,19 @@ def _supersede_existing(uid: str, key: str, spec: KeySpec, keep: str | None,
     return changed
 
 
+def _retire(uid: str, fid: str | None, evidence: list[dict], decision_id: str, keep: str | None = None) -> list[dict]:
+    """改键的 replace：把被替换的那条撤掉（已经不在用的、或者正好就是要留下的那条，不动）。"""
+    if not fid or fid == keep:
+        return []
+    old = store.get_fact(fid)
+    if not old or old.status not in DECISION_STATUSES:
+        return []
+    store.update_fact(old.id, status="superseded")
+    store.add_revision(uid, fact_id=old.id, operation="retract", old_value=old.value,
+                       new_value=None, evidence=evidence, decision_id=decision_id)
+    return [{"id": old.id, "key": old.key, "status": "superseded", "value": old.value, "retracted": True}]
+
+
 def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[dict], list[dict]]:
     """把校验通过的操作写库。返回 (added, changed)。每条都留 revision。
 
@@ -605,6 +975,7 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
         if kind == "add":
             dup = next((f for f in live_by_key.get(op["key"], []) if f.value == op["value"]), None)
             if dup is not None:
+                changed += _retire(uid, op.get("retire_fact_id"), evidence, decision_id, keep=dup.id)
                 store.update_fact(dup.id, evidence=list(dup.evidence) + evidence)
                 store.add_revision(uid, fact_id=dup.id, operation="support", old_value=dup.value,
                                    new_value=dup.value, evidence=evidence, decision_id=decision_id)
@@ -624,6 +995,7 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
                                new_value=fact.value, evidence=evidence, decision_id=decision_id)
             live_by_key.setdefault(op["key"], []).append(fact)
             added.append({**fact.to_dict(), "notes": op["notes"]})
+            changed += _retire(uid, op.get("retire_fact_id"), evidence, decision_id)
 
         elif kind == "replace":
             target = store.get_fact(op["target_fact_id"] or "")
@@ -631,8 +1003,11 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
                 continue
             old_value = target.value
             merged = list(target.evidence) + evidence
+            # 来源、可信度、affects 也换成这次验过的：原来只换值，部分推断的新值还挂着旧的 user_edit / 1.0（Codex 复现）
             store.update_fact(target.id, value=op["value"], status="confirmed",
-                              evidence=merged, valid_until=op["valid_until"])
+                              evidence=merged, valid_until=op["valid_until"],
+                              source=op["source"], confidence=op["confidence"],
+                              affects=op.get("affects") or target.affects or "")
             store.add_revision(uid, fact_id=target.id, operation="replace", old_value=old_value,
                                new_value=op["value"], evidence=evidence, decision_id=decision_id)
             changed.append({**(store.get_fact(target.id) or target).to_dict(),
@@ -1011,8 +1386,24 @@ def sync_transcript_facts(uid: str) -> dict[str, Any]:
 
     desired = {d["key"]: d for d in
                transcript.derive_capabilities(store.list_enrollments(uid))}
-    existing = {f.key: f for f in active_facts(uid)
-                if str(f.key).startswith("transcript:")}
+    # 同一个 key 可能有几条（老库）：原来只看最后一条，其余的永远不撤，删了课「Python 90」还挂着（Codex 复现）。
+    # 每个 key 留一条（用户改过的优先），多出来的撤掉（用户改过的不动）。
+    groups: dict[str, list] = {}
+    for f in active_facts(uid):
+        if str(f.key).startswith("transcript:"):
+            groups.setdefault(str(f.key), []).append(f)
+    existing = {}
+    dup_removed: list[str] = []
+    for key, fs in groups.items():
+        fs.sort(key=lambda f: (f.source != "user_edit", str(f.created_at)))
+        existing[key] = fs[0]
+        for extra in fs[1:]:
+            if extra.source == "user_edit":
+                continue
+            store.retract_fact(extra.id)
+            store.add_revision(uid, fact_id=extra.id, operation="retract", old_value=extra.value,
+                               new_value=None, evidence=list(extra.evidence))
+            dup_removed.append(key)
 
     # 两种「用户已经表过态」的情况，sync 必须让路，否则就是系统在覆盖用户：
     #   1. 他改过这条 —— 来源变成 user_edit，他才是关于他自己的权威。
@@ -1068,7 +1459,7 @@ def sync_transcript_facts(uid: str) -> dict[str, Any]:
                            evidence=list(f.evidence))
         removed.append(key)
 
-    if added or updated or removed:
+    if added or updated or removed or dup_removed:
         store.bump_memory_version(uid)
     return {"added": added, "updated": updated, "removed": removed,
             "protected": sorted(protected), "keys": sorted(desired)}

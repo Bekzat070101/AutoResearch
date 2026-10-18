@@ -59,10 +59,17 @@ function extract(name) {
   return src.slice(m.index, j + 1);
 }
 
-const el = (tag, cls, text) => {
+// 和 app.js 的 el 一样：第三个参数是 HTML（真 el 写 innerHTML）。原来这里当纯文本，
+// 所以没转义的课名在这个检查里看起来「是文本」，在真页面里却是标签——Codex 就是这么注入成功的。
+// 这里只模拟到：含标签就记成 _html（检查⑥据此判失败），不含标签就把实体解码成文本。
+const el = (tag, cls, html) => {
   const e = mkEl(tag);
   if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
+  if (html !== undefined) {
+    const s = String(html);
+    if (/<[a-zA-Z!\/]/.test(s)) { e._html = s; e._text = s.replace(/<[^>]*>/g, ""); }
+    else e.textContent = s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  }
   return e;
 };
 const esc = (s) => String(s == null ? "" : s)
@@ -157,8 +164,8 @@ const make = () => {
   });
   const raw = JSON.stringify(walk(actions).map((c) => c._text));
   check(raw.includes("<b>AI</b>导论"), "尖括号原样保留在文本节点里（不会被当标签）");
-  check(!byClass(actions, "ri-v").some((c) => c._html),
-    "没有用 innerHTML");
+  check(!walk(actions).some((c) => c._html && c._html.includes("<b>")),
+    "用户粘的尖括号没有变成真标签");
 
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);

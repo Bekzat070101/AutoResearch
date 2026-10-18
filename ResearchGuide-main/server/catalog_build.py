@@ -18,7 +18,8 @@ OUT = ROOT / "knowledge" / "catalog"
 STAGING = OUT / "_pages.jsonl"
 TERM = "2026-2027-1"
 PAGE = 10
-SLEEP = 0.28OPENALEX = "https://api.openalex.org/authors"
+SLEEP = 0.28
+OPENALEX = "https://api.openalex.org/authors"
 PKU_ROR = "02v51n119"
 
 sys.path.insert(0, str(SKILL_SCRIPTS))

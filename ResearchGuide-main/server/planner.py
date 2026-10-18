@@ -14,9 +14,11 @@ schema 不变：{chosen, rationale, alternatives[2], confidence}。
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import llm
+import memory
 import store
 from pku_adapter import search_courses
 from schemas import DECISION_STATUSES, NBA, UserFact
@@ -247,8 +249,12 @@ def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dic
     for item in items:
         if not isinstance(item, dict):
             continue
+        raw = item.get("index")
+        # 取整前先查是有限数：原来 1e309 读成 inf，int(inf) 抛 OverflowError，方向卡接口 500（Codex 复现）
+        if isinstance(raw, float) and not math.isfinite(raw):
+            continue
         try:
-            idx = int(item.get("index"))
+            idx = int(raw)
         except (TypeError, ValueError):
             continue
         why = str(item.get("why") or "").strip()
@@ -333,6 +339,8 @@ def choose_direction(uid: str, code: str) -> UserFact:
         evidence=[{"type": "card_selection", "direction": code, "quote": quote}],
         status="confirmed",
     )
+    # 先撤掉旧方向再记新的：原来两条都留着，前端按最新的显示、规划和对话按最早的走（Codex 复现：选了数学还在出 AI 的任务）
+    memory._supersede_existing(uid, f.key, memory._NAMESPACED["direction"], keep=None, decision_id="card_selection")
     store.add_fact(f)
     return f
 

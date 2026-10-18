@@ -12,29 +12,22 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 import os
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+import budget
+import envfile
 from limits import ReadLimitError, fetch, stream
 
 _ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_dotenv() -> None:
-    path = _ROOT / ".env"
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        key, val = key.strip(), val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = val
+    envfile.load()  # 实际在 envfile 被 import 时已经读过；留着这个名字给老调用方
 
 
 _load_dotenv()
@@ -53,7 +46,8 @@ def config() -> dict:
 
 
 def resolve_cfg(uid: str | None = None, override: dict | None = None) -> dict:
-    """取出这一次该用的地址/模型/密钥。有 override 或用户自己的 key 时，不改 os.environ。"""
+    """取出这一次该用的地址/模型/密钥。有 override 或用户自己的 key 时，不改 os.environ。
+    own=True 表示这把 key 是一次性传进来的或这个人自己上传的：花的是他自己的钱，不扣团队预算（budget.py）。"""
     if override:
         key = (override.get("api_key") or override.get("key") or "").strip()
         base = (override.get("base_url") or "https://api.deepseek.com/v1").strip().rstrip("/")
@@ -95,10 +89,12 @@ def _consent_ok(uid: str | None, override: dict | None = None, cfg: dict | None 
 
 
 def enabled(uid: str | None = None) -> bool:
+    """配了密钥（服务器的，或这个人自己上传的），并且——用服务器密钥时——这个请求的人今天还有额度（budget.py）。
+    自带 key 也要先同意当前隐私说明（16-F08：同意检查不再只挂在扣费路径上）。各功能在这里拿到 False 就走规则版。"""
     cfg = resolve_cfg(uid)
     if not _consent_ok(uid, cfg=cfg):
         return False
-    return cfg["enabled"]
+    return cfg["enabled"] and (cfg["own"] or budget.allowed())
 
 
 def ready(uid: str | None = None) -> bool:
@@ -148,7 +144,8 @@ def probe(*, uid: str | None = None, override: dict | None = None) -> dict:
     cfg = resolve_cfg(uid, override)
     if not cfg["enabled"]:
         return {"ok": False, "error": "未配置 API key"}
-    text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20, uid=uid, override=override)
+    with budget.unmetered():  # 管理员测连通、学生试自己的密钥：都不算在任何人头上
+        text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20, uid=uid, override=override)
     if not text:
         return {"ok": False, "error": "请求失败，请检查地址、密钥和网络", "model": cfg["model"]}
     return {"ok": True, "model": cfg["model"], "base_url": cfg["base_url"], "sample": text[:40]}
@@ -178,6 +175,8 @@ def _post(url: str, key: str, payload: dict, timeout: int, total: int | None = N
         return None, f"network {type(exc).__name__}"
     except json.JSONDecodeError:
         return None, "bad json"
+    except UnicodeDecodeError:
+        return None, "bad utf-8"  # 回包不是合法 UTF-8：原来这个异常从这里漏出去，整轮 500（Codex 复现）
 
 
 def _deepseek_extras(cfg: dict, effort: str) -> dict:
@@ -191,24 +190,16 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
          json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000,
          uid: str | None = None, override: dict | None = None,
          total: int | None = None, retry: bool = True) -> str | None:
-    """返回助手文本；失败或未配置返回 None。网络错误、429、5xx 重试一次。
-    用户自己的 key 只当参数用，绝不写进 os.environ。"""
-    try:
-        import budget
-        who = budget.current()
-        if who and who.startswith("*") and not budget.allowed(who):
-            return None
-    except Exception:
-        who = None
+    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次（retry=False 则不重试）；total 是整次请求的总时限。
+    用服务器密钥时每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。
+    用户自己的 key 只当参数用，绝不写进 os.environ，也不扣团队预算。标题机翻在 budget.metered_as("*xlate") 里调，算在伪账号头上。"""
     cfg = resolve_cfg(uid, override)
     if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return None
-    if who and who.startswith("*"):
-        try:
-            import budget
-            budget.charge(who)
-        except Exception:
-            pass
+    metered = not cfg["own"]
+    if metered and not budget.charge():
+        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
+        return None
     key = cfg.get("key") or ""
     payload: dict = {
         "model": cfg["model"],
@@ -228,25 +219,53 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     url = cfg["base_url"] + "/chat/completions"
     t0 = time.time()
     data, err = None, ""
-    for attempt in range(1 if not retry else 2):
-        data, err = _post(url, key, payload, timeout, total)
+    for attempt in range(2 if retry else 1):
+        if attempt and metered and not budget.charge():
+            err += "; no budget to retry"
+            break
+        data, err = _post(url, key, payload, timeout, total) if total else _post(url, key, payload, timeout)
         can_retry = retry and (err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504"))
         if data is not None or not can_retry or attempt == 1:
             break
         time.sleep(0.8)
     text = None
     if data is not None:
-        try:
-            text = (data["choices"][0]["message"]["content"] or "").strip() or None
-        except (KeyError, IndexError, TypeError):
+        # 回包形状逐层核对：原来顶层是数组、content 是列表这类回包在这里抛异常，漏出降级边界（Codex 复现）
+        choices = data.get("choices") if isinstance(data, dict) else None
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(message, dict) or not isinstance(content, (str, type(None))):
             err = "bad payload"
-    usage = (data or {}).get("usage") or {}
+        else:
+            text = _clean_text((content or "").strip()) or None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    usage = usage if isinstance(usage, dict) else {}  # usage 是列表时原来读 token 数就抛异常（Codex 复现）
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": bool(text), "ms": int((time.time() - t0) * 1000),
         "tokens": usage.get("total_tokens"), "error": err or None,
         "own": bool(cfg.get("own")),
     }, ensure_ascii=False))
     return text
+
+
+def _clean_text(s: str) -> str:
+    """去掉落单的代理字符（JSON 里的 \\ud800 这类）：它们写不进 SQLite，原来先存了事实、到存回复时才报错（Codex 复现）。
+    先整段编码一次（C 速度），编不过才替换：逐字扫描 2 MB 要 85 毫秒（Codex 测过）。"""
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "replace").decode("utf-8")
+
+
+def _clean(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return _clean_text(obj)
+    if isinstance(obj, list):
+        return [_clean(x) for x in obj]
+    if isinstance(obj, dict):
+        return {(_clean_text(k) if isinstance(k, str) else k): _clean(v) for k, v in obj.items()}
+    return obj
 
 
 def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json",
@@ -267,23 +286,28 @@ def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json",
         return None
     try:
         data = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
+        # 清理也可能在很深的嵌套上递归出错：和解析失败一样当这次调用失败，走回退（原来 600 层数组就 500，Codex 复现）
+        return _clean(data) if isinstance(data, dict) else None
+    except (json.JSONDecodeError, RecursionError):
         return None
-    return data if isinstance(data, dict) else None
 
 
 def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: int = 60,
-                tag: str = "stream", max_tokens: int = 2000,
+                tag: str = "stream", max_tokens: int = 2000, status: dict | None = None,
                 uid: str | None = None, override: dict | None = None):
     """逐块产出助手文本（OpenAI 兼容的 SSE）。
 
     只在调用方能接受纯文本时使用——结构化决策（TurnProposal）必须走 chat_json，
     因为它需要完整 JSON 才能校验。失败时产出零块，调用方要自己兜底。
+    传了 status 时，流正常收尾（读到 [DONE] 或 finish_reason）会写 status["finished"] = True；没写就是中途断了。
     和 chat 一样的约束：DeepSeek 关思考、max_tokens 封顶、总时限 LLM_TOTAL_SECONDS、回复字节有上限——
     原来这里都没有：每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。
     """
     cfg = resolve_cfg(uid, override)
     if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
+        return
+    if not cfg["own"] and not budget.charge():  # 自己的 key 不扣团队预算
+        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
         return
     key = cfg.get("key") or ""
     payload: dict = {
@@ -314,22 +338,37 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
                 continue
             body = line[5:].strip()
             if body == "[DONE]":
+                if status is not None and not status.get("cut"):
+                    status["finished"] = True  # 原来断在半个 JSON / 半个汉字上，调用方也把半截当成功回复（Codex 复现）
                 break
             try:
                 chunk = json.loads(body)
             except json.JSONDecodeError:
                 continue
-            choices = chunk.get("choices") or [{}]
-            piece = (choices[0].get("delta") or {}).get("content")
-            if piece:
+            # 块的形状逐层核对，不对就跳过：原来 choices 不是列表、delta 不是对象会抛异常，content 是列表会原样交出去（Codex 复现）
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            delta = choice.get("delta")
+            piece = delta.get("content") if isinstance(delta, dict) else None
+            if piece and isinstance(piece, str):
+                if status is not None and status.get("finished"):
+                    status["finished"] = False  # 说了 stop 之后又来正文：以最后收到的为准，得再等一个 stop / [DONE]（Codex 复现）
                 pieces += 1
-                yield piece
+                yield _clean_text(piece)
+            reason = choice.get("finish_reason")  # 和最后一段正文同一块来的 stop 也算：先处理正文再看它
+            if reason and status is not None:
+                # 只有 stop 是说完了；length（到了字数上限）、content_filter 这些都是半截：原来一律当正常收尾，半截覆盖了完整回复（Codex 复现）
+                status["finished"] = reason == "stop" and not status.get("cut")
+                if reason != "stop":
+                    status["cut"] = str(reason)[:40]
     except urllib.error.HTTPError as exc:
         err = f"http {exc.code}"
     except ReadLimitError as exc:
         err = f"limit {exc}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         err = f"network {type(exc).__name__}"
+    if err and status is not None:
+        status["finished"] = False  # 收到 stop 之后传输又出错：照样算没说完
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": pieces > 0,
         "ms": int((time.time() - t0) * 1000), "chunks": pieces, "error": err or None,

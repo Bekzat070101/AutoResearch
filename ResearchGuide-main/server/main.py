@@ -7,20 +7,25 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextvars
+import functools
 import hashlib
 import hmac
 import json
+import math
 import os
+import sqlite3
 import sys
 import threading
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import anyio
 import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -49,12 +54,13 @@ import store
 import submission
 import transcript
 import tutor
+import userlock
 import workbench
 import workpool
 from schemas import now_iso
 from pku_adapter import search_courses
 from limits import TTLCache
-from singleflight import AsyncFlight
+from singleflight import AsyncFlight, Overloaded
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -62,6 +68,40 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # 四十个学生同时在对话，第四十一个人的任何请求都要排队。线程等模型回话几乎不占资源，可以多开。
 THREADS = int(os.environ.get("QIYAN_THREADS") or 128)
 _LIMITER = None
+
+# 要等模型的活（对话、交任务、方向推荐……）不进上面那个公用池，在 workpool 里跑：公用池留给普通读写，
+# 两百个人同时等模型也不会让登录、读任务排队（Codex 第五轮压测）。排队的再超过 MODEL_QUEUE 个就回 503。
+MODEL_THREADS = int(os.environ.get("QIYAN_MODEL_THREADS") or os.environ.get("QIYAN_TURN_THREADS") or 96)
+MODEL_QUEUE = int(os.environ.get("QIYAN_MODEL_QUEUE") or 160)
+_MODEL = workpool.BoundedPool(MODEL_THREADS, MODEL_QUEUE, "model")
+atexit.register(_MODEL.drain)  # 没走 lifespan 的退出（直接跑脚本、测试）也等在跑的活做完
+CROWDED_MSG = "现在用的人太多，模型那边在排队。请过一会儿再试"
+
+
+async def _in_model_pool(fn, *args, **kwargs):
+    """把一件要等模型的活送进 _MODEL 池并等它做完。排队满了回 503。
+    请求被取消（服务在关、外层的取消域）时：还在排队的活撤掉；已经在跑的要等它做完才往外走——
+    锁是外面的依赖在退出时放的，提前出去就提前放锁，切画像就能插进来，这一轮的结果写进新画像（Codex 复现）。"""
+    try:
+        fut = _MODEL.submit(functools.partial(fn, *args, **kwargs))
+    except Overloaded as exc:
+        raise HTTPException(503, CROWDED_MSG) from exc
+    try:
+        return await asyncio.wrap_future(fut)
+    except BaseException:
+        if not fut.cancel() and not fut.done():
+            with anyio.CancelScope(shield=True):  # 取消域每次 await 都会再取消一次：挡住，等它做完
+                await asyncio.wait([asyncio.wrap_future(fut)])
+        raise
+
+
+def _model_work(fn):
+    """把一个同步接口挪进 _MODEL 里跑。FastAPI 照样按原函数的签名解析参数；拿锁的依赖（SERIAL）在外面，
+    排队期间照样拿着这个人的锁。"""
+    @functools.wraps(fn)
+    async def endpoint(*args, **kwargs):
+        return await _in_model_pool(fn, *args, **kwargs)
+    return endpoint
 
 
 @asynccontextmanager
@@ -73,6 +113,8 @@ async def _lifespan(_app: FastAPI):
         print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
                          ensure_ascii=False))
     yield
+    await anyio.to_thread.run_sync(_MODEL.drain)  # 还在跑的模型活（浏览器走了照样在写的那一轮）做完再退
+    await anyio.to_thread.run_sync(_REVIEW.drain)  # 在评的项目也是：评完记进项目再退（原来只等了 _MODEL，评阅写一半就没了，Codex 复现）
 
 
 app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", dependencies=[Depends(auth.guard)],
@@ -89,6 +131,38 @@ async def maintenance_gate(request: Request, call_next):
         if path.startswith("/api/") and not path.startswith("/api/admin") and path not in ("/api/health", "/metrics"):
             return JSONResponse({"detail": "维护中"}, status_code=503)
     return await call_next(request)
+
+
+BUSY_MSG = "上一件事还在处理（比如正在等模型回话），稍后再试"
+
+
+async def _serial(request: Request):
+    """会改这个人数据的接口挂这个依赖：执行期间拿着这个人的锁（userlock.py）。
+    在事件循环里异步等锁，不占工作线程；等不到或这个人排队的请求太多回 409。"""
+    uid = auth.me(request)
+    if not uid:
+        yield
+        return
+    try:
+        ticket = await userlock.acquire(uid)
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    try:
+        yield
+    finally:
+        ticket.release()
+
+
+SERIAL = [Depends(_serial)]
+
+
+@app.exception_handler(sqlite3.IntegrityError)
+async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
+    """删号那一刻还在跑的请求：写库被触发器拒绝 → 410，前端按「账号没了」处理。别的约束错误照旧是 500。"""
+    if store.USER_DELETED in str(exc):
+        return JSONResponse({"detail": "这个账号已经删除了"}, status_code=410)
+    print(json.dumps({"error": "integrity", "msg": str(exc)}, ensure_ascii=False))
+    return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
 @app.middleware("http")
@@ -348,13 +422,15 @@ def _user_or_404(uid: str) -> dict:
 
 # ---------- onboarding ----------
 
-@app.post("/api/onboard/start")
+@app.post("/api/onboard/start", dependencies=SERIAL)
+@_model_work
 def onboard_start(req: NBAReq):
     _user_or_404(req.uid)
     return onboarding.start(req.uid)
 
 
-@app.post("/api/onboard/message")
+@app.post("/api/onboard/message", dependencies=SERIAL)
+@_model_work
 def onboard_message(req: OnboardMsgReq):
     _user_or_404(req.uid)
     state = store.get_onboard_state(req.uid)
@@ -410,7 +486,7 @@ def onboard_result(uid: str):
             "state": store.get_onboard_state(uid)}
 
 
-@app.post("/api/onboard/confirm")
+@app.post("/api/onboard/confirm", dependencies=SERIAL)
 def onboard_confirm(req: OnboardConfirmReq):
     _user_or_404(req.uid)
     confirmed = onboarding.confirm(req.uid, req.edits)
@@ -442,7 +518,8 @@ def onboard_readiness(uid: str):
 
 # ---------- 对话内核（任务2：环境观察 → 决策 → 工具 → 记忆）----------
 
-@app.post("/api/dialogue/turn")
+@app.post("/api/dialogue/turn", dependencies=SERIAL)
+@_model_work
 def dialogue_turn(req: DialogueTurnReq):
     _user_or_404(req.uid)
     if not req.message.strip():
@@ -457,32 +534,98 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+HEARTBEAT = 10.0  # 秒
+
+
+class _TurnStream(StreamingResponse):
+    """响应不管怎么结束（发完、浏览器断开、出错、服务在关）都调一次 on_close。
+    StreamingResponse 自己的 background 在 ASGI 2.4 下断开时不会跑，生成器没开始就断开时它的 finally 也不会跑。"""
+
+    def __init__(self, content, on_close, **kw):
+        super().__init__(content, **kw)
+        self._on_close = on_close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
+
+
 @app.post("/api/dialogue/stream")
-def dialogue_stream(req: DialogueTurnReq):
+async def dialogue_stream(req: DialogueTurnReq):
     """与 /api/dialogue/turn 同一份内核，但把阶段推进和回复增量实时推给前端。
 
     事件：stage（observe/decide/memory/tool/compose）、delta（正文增量）、
     result（完整响应体，与 turn 一致）、error。
     """
-    _user_or_404(req.uid)
+    await run_in_threadpool(_user_or_404, req.uid)
     if not req.message.strip():
         raise HTTPException(400, "message is required")
+    if _MODEL.stats()["queued"] >= MODEL_QUEUE:  # 先看一眼：队已经满了就别再等这个人的锁十五秒
+        raise HTTPException(503, CROWDED_MSG)
+    try:
+        ticket = await userlock.acquire(req.uid)  # 整轮拿着这个人的锁：等模型时切画像、再发一句，都等它做完
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue = asyncio.Queue()
 
-    def gen():
+    def put(item: str | None) -> None:
         try:
-            for kind, payload in dialogue.turn_steps(req.uid, req.message,
-                                                     req.conversation_id, stream_reply=True):
-                yield _sse(kind, payload)
+            loop.call_soon_threadsafe(events.put_nowait, item)
+        except RuntimeError:
+            pass  # 服务在关：没人收了
+
+    def work() -> None:
+        try:
+            for kind, payload in dialogue.turn_steps(req.uid, req.message, req.conversation_id, stream_reply=True):
+                put(_sse(kind, payload))
         except ValueError as exc:
-            yield _sse("error", {"error": str(exc)})
-        except Exception as exc:  # 流已经开始，不能再抛 HTTP 错误，只能作为事件送出去
-            yield _sse("error", {"error": f"{type(exc).__name__}: {exc}"})
+            put(_sse("error", {"error": str(exc)}))
+        except Exception as exc:  # noqa: BLE001 — 流已经开始，不能再抛 HTTP 错误，只能作为事件送出去
+            put(_sse("error", {"error": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            ticket.release()
+            put(None)
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    # 这一轮在 _MODEL 里从头跑到尾、拿着这个人的锁；开始了就不管浏览器断没断都做完、自己放锁（回复照样记进历史）。
+    # 原来用 run_in_executor 丢进去就不管了：两百个浏览器断开后，168 轮还在排队、锁一直拿着，
+    # 这些人再改东西 15 秒后全 409，最后没人看的 400 次模型调用照样跑完（Codex 第五轮压测）。
+    try:
+        fut = _MODEL.submit(work)
+    except Overloaded as exc:
+        ticket.release()
+        raise HTTPException(503, CROWDED_MSG) from exc
+    except BaseException:
+        ticket.release()
+        raise
+
+    def abandon() -> None:
+        """响应结束了。这一轮要是还在排队（浏览器没等到就走了），撤掉、放锁；已经在跑或跑完的不动。"""
+        if fut.cancel():
+            ticket.release()
+
+    fut.add_done_callback(lambda f: f.cancelled() and put(None))  # 被别处撤掉（服务在关）：响应结束，abandon 放锁
+
+    async def relay():
+        while True:
+            try:
+                item = await asyncio.wait_for(events.get(), HEARTBEAT)
+            except asyncio.TimeoutError:
+                # 排队或等模型时隔一会儿发一行 SSE 注释（前端不认、直接跳过）：代理不会把空闲的连接掐掉，
+                # 浏览器已经走了的话这一写就会失败，响应结束、还在排队的这一轮被撤掉（上面的 abandon）
+                yield ": wait\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+
+    return _TurnStream(relay(), abandon, media_type="text/event-stream",
+                       headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.post("/api/dialogue/action")
+@app.post("/api/dialogue/action", dependencies=SERIAL)
 def dialogue_action(req: DialogueActionReq):
     _user_or_404(req.uid)
     try:
@@ -587,7 +730,7 @@ def transcript_parse(req: TranscriptParseReq):
     }
 
 
-@app.post("/api/me/transcript")
+@app.post("/api/me/transcript", dependencies=SERIAL)
 def transcript_commit(req: TranscriptCommitReq):
     """确认后落库。`mode=replace`（默认，整表替换）或 `append`（跳过完全重复）。"""
     _user_or_404(req.uid)
@@ -607,10 +750,16 @@ def transcript_commit(req: TranscriptCommitReq):
         course = str(it.get("course") or "").strip()
         if not course:
             continue
+        try:
+            credits = float(it.get("credits") or 0)
+        except (TypeError, ValueError):
+            credits = -1.0
+        if not math.isfinite(credits) or not 0 <= credits <= store.MAX_CREDITS:
+            raise HTTPException(400, f"「{course[:30]}」的学分不对（要 0–{store.MAX_CREDITS:g} 之间的数）")
         clean.append({
             "course": course[:120],
             "grade": transcript.normalize_grade(it.get("grade")),
-            "credits": max(0.0, float(it.get("credits") or 0)),
+            "credits": credits,
             "term": str(it.get("term") or "")[:40],
             "kind": str(it.get("kind") or "")[:40],
             "status": (str(it.get("status") or "completed")
@@ -619,8 +768,9 @@ def transcript_commit(req: TranscriptCommitReq):
         })
     if not clean:
         raise HTTPException(400, "没有可写入的课程")
+    # 默认按学期替换（贴进来的学期以新为准，没贴的学期不动）；append 只追加不删
     n = (store.add_enrollments(req.uid, clean) if req.mode == "append"
-         else store.replace_enrollments(req.uid, clean))
+         else store.replace_terms(req.uid, clean))
     store.add_event(req.uid, "transcript_imported", "",
                     {"count": n, "mode": req.mode or "replace"})
     # 成绩单变了 → 重新推导能力结论。这一步是成绩单真正的用处：
@@ -635,7 +785,7 @@ def transcript_get(uid: str):
     return transcript_board(uid)
 
 
-@app.delete("/api/me/enrollments/{eid}")
+@app.delete("/api/me/enrollments/{eid}", dependencies=SERIAL)
 def enrollment_delete(uid: str, eid: str):
     _user_or_404(uid)
     if not store.delete_enrollment(uid, eid):
@@ -659,7 +809,8 @@ def transcript_board(uid: str) -> dict:
     }
 
 
-@app.post("/api/portraits")
+@app.post("/api/portraits", dependencies=SERIAL)
+@_model_work
 def portraits_create(req: PortraitReq):
     _user_or_404(req.uid)
     store.open_new_portrait(req.uid)
@@ -667,7 +818,7 @@ def portraits_create(req: PortraitReq):
     return {"portraits": store.list_portraits(req.uid)}
 
 
-@app.post("/api/portraits/activate")
+@app.post("/api/portraits/activate", dependencies=SERIAL)
 def portraits_activate(req: PortraitReq):
     _user_or_404(req.uid)
     if not req.id:
@@ -679,7 +830,7 @@ def portraits_activate(req: PortraitReq):
     return {"portraits": store.list_portraits(req.uid)}
 
 
-@app.post("/api/portraits/rename")
+@app.post("/api/portraits/rename", dependencies=SERIAL)
 def portraits_rename(req: PortraitRenameReq):
     _user_or_404(req.uid)
     if not req.id:
@@ -692,7 +843,8 @@ def portraits_rename(req: PortraitRenameReq):
     return {"ok": True, "name": name}
 
 
-@app.delete("/api/portraits/{pid}")
+@app.delete("/api/portraits/{pid}", dependencies=SERIAL)
+@_model_work
 def portraits_delete(pid: str, uid: str):
     _user_or_404(uid)
     try:
@@ -724,13 +876,14 @@ def directions_ranking(uid: str):
 
 
 @app.post("/api/directions/cards")
+@_model_work
 def direction_cards(req: NBAReq):
     """带真实课程检索的推荐卡（课程 live，可能较慢，前端按卡懒加载时不用此聚合接口）。"""
     _user_or_404(req.uid)
     return {"cards": planner.direction_cards(req.uid, with_courses=True)}
 
 
-@app.post("/api/directions/choose")
+@app.post("/api/directions/choose", dependencies=SERIAL)
 def choose_direction(req: ChooseDirectionReq):
     _user_or_404(req.uid)
     if req.code not in planner.DIRECTIONS:
@@ -741,7 +894,7 @@ def choose_direction(req: ChooseDirectionReq):
 
 # ---------- tasks / workbench ----------
 
-@app.post("/api/tasks/generate")
+@app.post("/api/tasks/generate", dependencies=SERIAL)
 def task_generate(req: TaskGenerateReq):
     _user_or_404(req.uid)
     if req.direction not in planner.DIRECTIONS:
@@ -755,7 +908,7 @@ def task_get(tid: str, request: Request):
     t = store.get_task(tid)
     if not t or t.user_id != auth.me(request):
         raise HTTPException(404, "task not found")
-    return t.to_dict()
+    return {**t.to_dict(), "feedback": store.latest_feedback(t.user_id, t.id)}  # 刷新、换任务回来都能看到反馈
 
 
 @app.get("/api/tasks")
@@ -764,7 +917,8 @@ def task_list(uid: str):
     return {"tasks": [t.to_dict() for t in store.list_tasks(uid)]}
 
 
-@app.post("/api/tasks/{tid}/submit")
+@app.post("/api/tasks/{tid}/submit", dependencies=SERIAL)
+@_model_work
 def task_submit(tid: str, req: SubmitReq):
     _user_or_404(req.uid)
     t = store.get_task(tid)
@@ -797,6 +951,7 @@ def task_hint(tid: str, req: TaskHintReq):
 
 class DraftReq(BaseModel):
     text: str = ""
+    base_rev: int = 0
 
 
 class PrefsReq(BaseModel):
@@ -823,9 +978,12 @@ def task_draft_put(tid: str, req: DraftReq, request: Request):
     t = store.get_task(tid)
     if not t or t.user_id != uid:
         raise HTTPException(404, "task not found")
-    if t.status == "done":
-        raise HTTPException(400, "已完成的作业不用再改草稿")
-    return store.set_draft_row(uid, tid, req.text)
+    if t.status == "done" and (req.text or "").strip():
+        raise HTTPException(400, "已完成的作业不用再改草稿")  # 交完之后前端会把草稿清空（空串），这一笔要放行，不然库里留着旧草稿
+    try:
+        return store.set_draft_row(uid, tid, req.text, req.base_rev)
+    except store.DraftConflict:
+        raise HTTPException(409, "草稿已在别处更新，本地稿已保留")
 
 
 def _prefs_out(raw: dict) -> dict:
@@ -917,7 +1075,7 @@ def me_fact(fid: str, uid: str):
     return f.to_dict()
 
 
-@app.patch("/api/me/facts/{fid}")
+@app.patch("/api/me/facts/{fid}", dependencies=SERIAL)
 def me_fact_patch(fid: str, req: FactPatchReq):
     """用户自己改一条记忆。
 
@@ -939,7 +1097,7 @@ def me_fact_patch(fid: str, req: FactPatchReq):
     return f2.to_dict() if f2 else {}
 
 
-@app.delete("/api/me/facts/{fid}")
+@app.delete("/api/me/facts/{fid}", dependencies=SERIAL)
 def me_fact_delete(fid: str, uid: str):
     """用户删掉一条记忆。不硬删：置为 retracted 并留 revision，可追溯。"""
     f = store.get_fact(fid)
@@ -1022,14 +1180,32 @@ def curriculum_stats():
 #   · DSH 的 dsh-mcp-client 配置见 docs/DEPARTMENT_KNOWLEDGE.md §4.4
 #   · stdio：python server/mcp_curriculum.py
 
+MCP_MAX_BODY = 64 * 1024   # 正常的工具调用几百字节
+MCP_MAX_BATCH = 16         # 一次批量最多几条
+MCP_PER_IP_HOUR = 600
+
+
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
+    """公开接口（只读课程知识）。原来在事件循环上同步算：一个 1.7 KB 的匿名批量请求能把整个服务卡住 3.7 秒。
+    现在：请求体和批量条数有上限，按来源限次，计算放到工作线程。"""
+    if not auth.allow_ip(request, "mcp", MCP_PER_IP_HOUR):
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32000, "message": "too many requests"}}, status_code=429)
     try:
-        payload = await request.json()
+        raw = await _read_capped(request, MCP_MAX_BODY, f"request body over {MCP_MAX_BODY // 1024} KB")
+        payload = json.loads(raw)
+    except HTTPException as exc:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32600, "message": str(exc.detail)}}, status_code=413)
     except Exception:                                          # noqa: BLE001
         return JSONResponse({"jsonrpc": "2.0", "id": None,
                              "error": {"code": -32700, "message": "parse error"}}, status_code=200)
-    resp = mcp_curriculum.http_handle(payload)
+    if isinstance(payload, list) and len(payload) > MCP_MAX_BATCH:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32600, "message": f"batch too large (max {MCP_MAX_BATCH})"}},
+                            status_code=413)
+    resp = await run_in_threadpool(mcp_curriculum.http_handle, payload)
     if resp is None:                                            # 通知类消息：按 MCP 规范回 202
         return Response(status_code=202)
     return JSONResponse(resp)
@@ -1077,6 +1253,7 @@ def project_interview(req: ProjectInterviewReq):
 
 
 @app.post("/api/projects/search")
+@_model_work
 def project_search(req: ProjectSearchReq):
     _user_or_404(req.uid)
     if req.direction and req.direction not in planner.DIRECTIONS:
@@ -1084,7 +1261,7 @@ def project_search(req: ProjectSearchReq):
     return projects.search(req.uid, req.direction, req.stage, req.keywords, req.node, req.path_step, req.chain)
 
 
-@app.post("/api/projects/pick")
+@app.post("/api/projects/pick", dependencies=SERIAL)
 def project_pick(req: ProjectPickReq):
     _user_or_404(req.uid)
     try:
@@ -1107,6 +1284,15 @@ def _project_or_404(uid: str, pid: str) -> dict:
     if not p:
         raise HTTPException(404, "project not found")
     return p
+
+
+def _project_in_portrait_or_404(uid: str, pid: str) -> tuple[dict, str]:
+    """项目和「现在是哪个画像」一次读出来（store.project_in_portrait）。"""
+    _user_or_404(uid)
+    p, portrait = store.project_in_portrait(uid, pid)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return p, portrait
 
 
 @app.get("/api/projects/{pid}")
@@ -1135,9 +1321,16 @@ REVIEW_PENDING_MAX = 6      # 已收完、在排队或在评阅的；每个握�
 UPLOADS_MAX = 8             # 同时在上传的
 UPLOAD_IDLE_SECONDS = 20    # 这么久一个字节都没收到，就当连接卡住了
 UPLOAD_TOTAL_SECONDS = 300  # 总时限：20 MB 在 70 KB/s 的慢网上也传得完；只防一直吊着不传完的连接
-_REVIEW_POOL = ThreadPoolExecutor(max_workers=REVIEW_WORKERS, thread_name_prefix="review")
-_review_pending = 0  # 这两个计数只在事件循环线程里改，不用锁
-_uploads = 0
+# 在评阅和排队的都在这个池子里数（workpool：取消的排队活当场拿掉，连同它握着的压缩包）。原来另记一个计数，
+# 请求一取消计数就减，排队的活却还留在 ThreadPoolExecutor 里握着 20 MB：反复交了又断开，队里堆了 32 份（Codex 复现）
+_REVIEW = workpool.BoundedPool(REVIEW_WORKERS, REVIEW_PENDING_MAX - REVIEW_WORKERS, "review")
+atexit.register(_REVIEW.drain)
+_uploads = 0  # 只在事件循环线程里改，不用锁
+
+
+def _review_full() -> bool:
+    st = _REVIEW.stats()
+    return st["running"] + st["queued"] >= REVIEW_PENDING_MAX
 
 
 async def _read_capped(request: Request, limit: int, too_big: str | None = None) -> bytes:
@@ -1165,21 +1358,43 @@ async def _read_capped(request: Request, limit: int, too_big: str | None = None)
             raise HTTPException(413, too_big)
 
 
-def _review_and_record(uid: str, p: dict, data: bytes) -> dict:
+def _review_and_record(uid: str, p: dict, data: bytes, portrait: str = "") -> dict:
     try:
         result = submission.review(data, p)
     except submission.SubmissionError as exc:
         raise HTTPException(400, str(exc)) from exc
-    result["fact"] = projects.record_review(uid, p, result)
+    # 记录时才拿锁，并且按「现在」的项目来记：评阅要几十秒，这期间可能有另一次评阅记进去了（原来后一次会把前一次覆盖掉），
+    # 也可能画像切走了（原来会把这个项目写进新画像）
+    try:
+        with userlock.hold(uid):
+            current = store.get_project(uid, p["id"])
+            # 项目 id 在各画像里可以重复（同一个项目在 A、B 里都挑过）：只看 id 会把 A 的评阅记进 B（Codex 复现）。
+            # 交的时候是哪个画像，就只记进那个画像；画像变了就不记。
+            if current is None or (portrait and store.active_portrait_id(uid) != portrait):
+                result["recorded"] = False
+                result["note"] = "评阅期间切换了画像或删了这个项目，这次评阅没有记进项目"
+                return result
+            result["fact"] = projects.record_review(uid, current, result)
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    result["recorded"] = True
     return result
 
 
 @app.post("/api/projects/{pid}/submit")
-async def project_submit(pid: str, uid: str, request: Request):
-    """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。"""
-    global _review_pending, _uploads
-    p = await run_in_threadpool(_project_or_404, uid, pid)
-    if _uploads >= UPLOADS_MAX or _review_pending >= REVIEW_PENDING_MAX:
+async def project_submit(pid: str, uid: str, request: Request, portrait: str = ""):
+    """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。
+    portrait：前端打开这个项目页时的画像。已经切走了就不收：同一个项目 id 在两份画像里都有时，
+    评阅会记进学生眼前不是的那一份。"""
+    global _uploads
+    # 项目和「当时是哪个画像」在收上传之前、同一个读事务里一起拿，评阅用的就是这一份项目：
+    # 原来项目另读一次，两次之间切了画像，A 的项目内容配上 B 的画像，评阅记进了 B（Codex 复现）。
+    # 不用这个人的锁：同时交几份时不该互相 409。
+    p, current = await run_in_threadpool(_project_in_portrait_or_404, uid, pid)
+    if portrait and portrait != current:
+        raise HTTPException(409, "画像已经切换了：这个项目页属于原来那份画像。刷新页面再交。")
+    portrait = current
+    if _uploads >= UPLOADS_MAX or _review_full():
         raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
     _uploads += 1
     try:
@@ -1188,13 +1403,19 @@ async def project_submit(pid: str, uid: str, request: Request):
         _uploads -= 1
     if not data:
         raise HTTPException(400, "没有收到文件")
-    if _review_pending >= REVIEW_PENDING_MAX:
-        raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
-    _review_pending += 1
     try:
-        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, _review_and_record, uid, p, data)
-    finally:
-        _review_pending -= 1
+        # workpool 带上上下文变量：评阅里的模型调用要知道算在谁头上（budget.py）
+        if _review_full():
+            raise Overloaded()
+        fut = _REVIEW.submit(_review_and_record, uid, p, data, portrait)
+    except Overloaded as exc:
+        raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。") from exc
+    del data  # 压缩包只让排队的活握着：撤掉时一起放掉
+    try:
+        return await asyncio.wrap_future(fut)
+    except BaseException:
+        fut.cancel()  # 请求没了：还在排队就撤掉；已经在评的照样评完、记进项目
+        raise
 
 
 # ---------- 研读：领域工具包 / 每日情报 / 阅读卡 / 矩阵 ----------
@@ -1210,19 +1431,26 @@ def _reading(fn, *args):
 
 # 共享的活按种类分开线程池：arXiv 要排限速锁（每次至少隔 3 秒），几篇不同的论文就能把线程全占在等锁上；
 # 分开以后，等 arXiv 的不会拖住课程检索和建引文索引
+# max_pending：同时在做或在排队的不同请求最多几个。原来不封顶：一个人连发 120 个不同论文号，
+# 就排上 120 个抓取任务，请求取消了任务还留在队列里（Codex 复现）。
+# 线程池用 workpool：等的人走光时排队的活当场拿掉。ThreadPoolExecutor 取消了的还留在它的队里，
+# 反复要了又断开，上限 32 的队里实际堆了 112 件（Codex 复现）
 _FLIGHTS = {
-    "arxiv": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="arxiv")),
-    "index": AsyncFlight(ThreadPoolExecutor(max_workers=2, thread_name_prefix="index")),
-    "courses": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="courses")),
-    "daily": AsyncFlight(ThreadPoolExecutor(max_workers=1, thread_name_prefix="daily")),
-    "xlate": AsyncFlight(ThreadPoolExecutor(max_workers=1, thread_name_prefix="xlate")),
+    "arxiv": AsyncFlight(workpool.BoundedPool(4, 32, "arxiv"), max_pending=32),
+    "index": AsyncFlight(workpool.BoundedPool(2, 16, "index"), max_pending=16),
+    "courses": AsyncFlight(workpool.BoundedPool(4, 32, "courses"), max_pending=32),
+    "daily": AsyncFlight(workpool.BoundedPool(1, 16, "daily"), max_pending=16),  # 每日取数单独一个小池，不挤占论文全文的名额
+    "xlate": AsyncFlight(workpool.BoundedPool(1, 8, "xlate"), max_pending=8),  # 标题机翻：后台补译，1 线程
 }
 _FLIGHT_OF = {"paper": "arxiv", "daily": "daily", "index": "index", "courses": "courses", "xlate": "xlate", "search": "daily"}
 
 
 async def _shared(key: tuple, fn, *args):
     """多人同时要同一份数据：只有一个线程去做，其余在事件循环里等结果，不各占一个工作线程。"""
-    return await _FLIGHTS[_FLIGHT_OF[key[0]]].do(key, _reading, fn, *args)
+    try:
+        return await _FLIGHTS[_FLIGHT_OF[key[0]]].do(key, _reading, fn, *args)
+    except Overloaded as exc:
+        raise HTTPException(503, "现在取数据的人太多，过一会儿再试") from exc
 
 
 def _payload_of(p: dict) -> dict:
@@ -1394,7 +1622,7 @@ async def daily_feed(uid: str, kit: str = ""):
     return await run_in_threadpool(_reading, _interest_daily, uid, False)
 
 
-@app.post("/api/daily/triage")
+@app.post("/api/daily/triage", dependencies=SERIAL)
 async def daily_triage(req: TriageReq):
     await run_in_threadpool(_user_or_404, req.uid)
     if not req.kit:
@@ -1619,7 +1847,7 @@ def tutor_get(arxiv_id: str, uid: str, kit: str):
     return _tutor_call(_do)
 
 
-@app.post("/api/tutor/{arxiv_id}/start")
+@app.post("/api/tutor/{arxiv_id}/start", dependencies=SERIAL)
 async def tutor_start(arxiv_id: str, req: TutorStartReq):
     await run_in_threadpool(_user_or_404, req.uid)
     aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
@@ -1627,10 +1855,10 @@ async def tutor_start(arxiv_id: str, req: TutorStartReq):
         if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
             await _shared(("paper", aid), _paper_payload, aid)
         await _shared(("index", aid), _paper_index, aid)
-    return await run_in_threadpool(_tutor_call, tutor.start, req.uid, req.kit, aid, req.restart)
+    return await _in_model_pool(_tutor_call, tutor.start, req.uid, req.kit, aid, req.restart)  # 出题要等模型：进模型池，不占公用线程
 
 
-@app.post("/api/tutor/{arxiv_id}/turn")
+@app.post("/api/tutor/{arxiv_id}/turn", dependencies=SERIAL)
 async def tutor_turn(arxiv_id: str, req: TutorTurnReq):
     await run_in_threadpool(_user_or_404, req.uid)
     aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
@@ -1638,18 +1866,18 @@ async def tutor_turn(arxiv_id: str, req: TutorTurnReq):
         if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
             await _shared(("paper", aid), _paper_payload, aid)
         await _shared(("index", aid), _paper_index, aid)
-    return await run_in_threadpool(
-        _tutor_call, tutor.turn, req.uid, req.kit, aid, req.qid, req.answer, req.skip, req.rev, req.regrade)
+    return await _in_model_pool(
+        _tutor_call, tutor.turn, req.uid, req.kit, aid, req.qid, req.answer, req.skip, req.rev, req.regrade)  # 判卷、跨站出题都要等模型
 
 
-@app.post("/api/tutor/{arxiv_id}/finish")
+@app.post("/api/tutor/{arxiv_id}/finish", dependencies=SERIAL)
 async def tutor_finish(arxiv_id: str, req: TutorFinishReq):
     await run_in_threadpool(_user_or_404, req.uid)
     aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
     return await run_in_threadpool(_tutor_call, tutor.finish, req.uid, req.kit, aid)
 
 
-@app.post("/api/cards")
+@app.post("/api/cards", dependencies=SERIAL)
 async def card_submit(req: CardReq):
     aid = _reading(reading.arxiv.clean_id, req.arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
@@ -1680,13 +1908,13 @@ def edges_list(uid: str):
     return positioning.edges(uid)
 
 
-@app.post("/api/edges")
+@app.post("/api/edges", dependencies=SERIAL)
 def edges_add(req: EdgeReq):
     _user_or_404(req.uid)
     return _reading(positioning.add_edge, req.uid, req.kind, req.text, req.evidence_url)
 
 
-@app.delete("/api/edges/{edge_id}")
+@app.delete("/api/edges/{edge_id}", dependencies=SERIAL)
 def edges_delete(edge_id: str, uid: str):
     _user_or_404(uid)
     return _reading(positioning.delete_edge, uid, edge_id)
@@ -1699,7 +1927,7 @@ def channels_map(uid: str, direction: str):
     return positioning.channel_map(uid, direction)
 
 
-@app.post("/api/channels/toggle")
+@app.post("/api/channels/toggle", dependencies=SERIAL)
 def channels_toggle(req: ChannelReq):
     _user_or_404(req.uid)
     return _reading(positioning.toggle_channel, req.uid, req.id, req.on, req.direction)
@@ -1717,7 +1945,7 @@ def statement_get(uid: str, kit: str):
     return _reading(positioning.statement, uid, kit)
 
 
-@app.post("/api/statement")
+@app.post("/api/statement", dependencies=SERIAL)
 def statement_save(req: StatementReq):
     """dry_run=true 只跑检查不保存，给编辑时实时提示用。"""
     _user_or_404(req.uid)
@@ -1732,13 +1960,13 @@ def bets_list(uid: str):
     return positioning.bets(uid)
 
 
-@app.post("/api/bets")
+@app.post("/api/bets", dependencies=SERIAL)
 def bets_add(req: BetReq):
     _user_or_404(req.uid)
     return _reading(positioning.add_bet, req.uid, req.name, req.kind, req.tier, req.kit, req.niche)
 
 
-@app.post("/api/bets/{bet_id}/close")
+@app.post("/api/bets/{bet_id}/close", dependencies=SERIAL)
 def bets_close(bet_id: str, req: BetCloseReq):
     _user_or_404(req.uid)
     return _reading(positioning.close_bet, req.uid, bet_id, req.outcome, req.reason)
@@ -1840,6 +2068,9 @@ def prometheus_metrics(request: Request):
 
 
 def _model_pool() -> dict:
+    """health 里的 model_pool：本分支模型池的实值（workers/threads/running/queued/max_queued，queued 长时间接近
+    max_queued 就是模型慢了或该加 QIYAN_MODEL_THREADS），再加上游 w81 要的公用线程池借用数和 pdf 池。"""
+    out = dict(_MODEL.stats())
     pdf = _PDF_POOL.snapshot()
     borrowed, cap = 0, THREADS
     try:
@@ -1848,15 +2079,14 @@ def _model_pool() -> dict:
         cap = int(getattr(lim, "total_tokens", THREADS) or THREADS)
     except Exception:
         pass
-    return {
-        "queued": pdf["queued"],
-        "running": pdf["running"] + borrowed,
-        "max_queued": pdf["max_queued"],
+    out.update({
         "threads_borrowed": borrowed,
         "threads_max": cap,
         "pdf_queued": pdf["queued"],
         "pdf_running": pdf["running"],
-    }
+        "pdf_max_queued": pdf["max_queued"],
+    })
+    return out
 
 
 @app.get("/api/health")
@@ -1872,9 +2102,9 @@ async def health():
             "base_url": cfg["base_url"] if cfg["enabled"] else "",
         },
         "auth": auth.status(),
-        "db": {"ephemeral": store.ephemeral()},  # true 就是库会随实例一起没：上线前必须是 false
+        "db": {"ephemeral": store.ephemeral(), "writable": store.db_writable()},  # true 就是库会随实例一起没：上线前必须是 false
         "threads": THREADS,
-        "model_pool": _model_pool(),
+        "model_pool": _model_pool(),  # 模型池实值 + 公用线程借用 + pdf 池
         "checks": {
             "secret_set": bool(os.environ.get("QIYAN_SECRET")),
             "wechat_secure": _wechat_secure(),

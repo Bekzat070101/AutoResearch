@@ -484,6 +484,7 @@ def daily(uid: str, kit_id: str, source: tuple[list[dict[str, Any]], str] | None
         it["lib"] = lib.get(it["arxiv_id"], "")
     keeps = [r for r in seen.values() if r["verdict"] == "keep"]
     return {"kit": {"id": k["id"], "name": k["name"]}, "items": items, "error": error,
+            "day": today,  # done_today 是哪一天的：前端同一天里只往大里改，换了一天就照新的来
             "goal": DAILY_GOAL, "done_today": len(done_today), "kept_total": len(keeps), "triaged_total": len(seen),
             "recent_keeps": sorted(keeps, key=lambda r: r["created_at"], reverse=True)[:5]}
 
@@ -529,7 +530,7 @@ def _check_own(text: str, paper: dict[str, Any], label: str) -> tuple[bool, str]
 
 
 def check_limitation(quote: str, paper: dict[str, Any]) -> dict[str, Any]:
-    loc = quotes.locate(quote, paper)
+    loc = quotes.locate(quote, paper, prefer=LIMIT_SECTIONS)  # 同一句多处出现时，有一处在局限段就算那一处（Codex 复现）
     has_limit_section = any(n in LIMIT_SECTIONS for n, _ in arxiv.sections(paper.get("text") or ""))
     if loc.get("found") and has_limit_section and loc.get("section") not in LIMIT_SECTIONS:
         return {**loc, "pass": False,
@@ -591,8 +592,12 @@ def submit_card(uid: str, kit_id: str, arxiv_id: str, fields: dict[str, str], di
             "decision_log": decision_log or [], "review": review, "status": "pass" if review["pass"] else "revise",
             "prev_passed": prev["review"]["passed"] if prev else None}
     store.save_card(card)
-    if review["pass"] and not (prev and prev["status"] == "pass"):
-        f = UserFact(user_id=uid, category="capability", key=f"card:{kit_id}:{aid}",
+    # 卡不分画像、证据（事实）分画像：在新画像里交过线的卡，原来因为「上一版已过线」不再写证据，
+    # 新画像就有过线的卡、却没有对应的已证明的边（Codex 复现）。改成看当前画像里有没有这条证据。
+    fact_key = f"card:{kit_id}:{aid}"
+    has_evidence = any(f.key == fact_key and f.status in ("active", "confirmed") for f in store.list_facts(uid))
+    if review["pass"] and not has_evidence:
+        f = UserFact(user_id=uid, category="capability", key=fact_key,
                      value=f"已证明：能读《{_short(paper['title'])}》，定位作者自述的局限并写出自己的改动（阅读卡 v{version}）",
                      confidence=0.85, source="behavior",
                      evidence=[{"type": "reading_card", "card_id": card["id"], "task_title": _short(paper["title"]), "arxiv_id": aid}],

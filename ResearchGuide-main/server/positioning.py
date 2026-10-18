@@ -16,7 +16,7 @@ import datetime as dt
 import json
 import re
 from collections import Counter
-from itertools import combinations
+from itertools import chain, combinations
 from typing import Any
 
 import reading
@@ -39,6 +39,7 @@ TIERS = {"reach": "冲", "match": "稳", "safety": "保"}
 BET_KINDS = {"group": "进组", "program": "本研 / 科研计划", "contest": "竞赛", "project": "练手项目"}
 OUTCOMES = {"got": "拿到了", "missed": "没拿到", "dropped": "主动放弃"}
 X_MIN, X_MAX = 8, 60
+PROOF_STATUSES = ["active", "confirmed"]  # 学生确认过的行为证据仍是已证明的边，不能一确认就消失
 
 
 CHANNELS = reading.ROOT / "knowledge" / "channels.json"
@@ -62,7 +63,7 @@ def is_generic(text: str) -> bool:
 
 def edges(uid: str) -> dict[str, Any]:
     """已证明的边从账本自动导入（不可手改）；自述的边由学生自己加。画像里记着的背景、经历给出一键导入。"""
-    facts = store.list_facts(uid, ["active"])
+    facts = store.list_facts(uid, PROOF_STATUSES)  # 确认过的行为证据照样算已证明
     out = []
     for f in facts:
         if f.source != "behavior":
@@ -81,7 +82,7 @@ def edges(uid: str) -> dict[str, Any]:
         e["generic"] = is_generic(e["text"])
     have = {_norm(e["text"]) for e in mine}
     suggest = [{"kind": FACT_TO_KIND[f.category], "text": f.value, "from": "画像"} for f in facts
-               if f.source != "behavior" and f.category in FACT_TO_KIND and _norm(f.value) not in have]
+               if f.status == "active" and f.source != "behavior" and f.category in FACT_TO_KIND and _norm(f.value) not in have]
     return {"kinds": EDGE_KINDS, "edges": out, "suggest": suggest[:8],
             "proven": sum(e["status"] == "proven" for e in out), "declared": len(mine)}
 
@@ -116,6 +117,17 @@ def _self_key(row: dict[str, Any]) -> str:
 
 
 
+def _confirmed_peer_proofs(uids: list[str]):
+    """同学已确认的行为证据：store.iter_peer_key_parts 只读 active，确认过的在这里分批补上，形状同账本行。"""
+    with store._conn() as c:
+        cur = c.cursor()
+        cur.row_factory = None
+        for part in store._in_chunks(uids):
+            marks = ",".join("?" * len(part))
+            yield from cur.execute(f"SELECT user_id, COALESCE(NULLIF(key, ''), id), NULL, NULL FROM facts "
+                                   f"WHERE source='behavior' AND status='confirmed' AND user_id IN ({marks})", part)
+
+
 RARITY_SHOW = 20  # 组合太多时只列最少见的这么多组，另给总数
 NORM_MEMO_MAX = 4096  # 重复的描述只规范化一次，但最多记这么多条：各不相同的描述不能全攒在内存里
 
@@ -137,7 +149,7 @@ def combo_rarity(uid: str, kit_id: str) -> dict[str, Any]:
     seat = {u: i for i, u in enumerate(pool)}
     cols = [bytearray((len(pool) + 7) // 8) for _ in keys]
     norm_of: dict[str, str] = {}
-    for u, proof, ref, text in store.iter_peer_key_parts(pool):
+    for u, proof, ref, text in chain(store.iter_peer_key_parts(pool), _confirmed_peer_proofs(pool)):  # 确认过的证据也算同学有这条边
         if proof is not None:
             k = proof
         elif ref:
@@ -328,7 +340,9 @@ def statement(uid: str, kit_id: str) -> dict[str, Any]:
     if not s:
         return {"statement": None}
     fresh = review_statement(uid, kit_id, s["x_ref"], s["x_text"], s["y_ids"])  # 账本变了，检查跟着变
-    return {"statement": {**s, "checks": fresh["checks"], "portfolio_ready": fresh["portfolio_ready"], "y": fresh["y"]}}
+    # 句子、能否保存、能否进作品集都按现存的边重算：删掉的边不能还留在句子里、还算进作品集
+    return {"statement": {**s, "checks": fresh["checks"], "can_save": fresh["can_save"], "portfolio_ready": fresh["portfolio_ready"],
+                          "sentence": fresh["sentence"], "y": fresh["y"]}}
 
 
 # ---------- 下注组合 ----------
@@ -345,7 +359,7 @@ def _bet_checks(uid: str, active: list[dict[str, Any]]) -> list[dict[str, str]]:
     for names in same.values():
         if len(names) >= 2:
             out.append({"level": "warn", "note": f"「{'」「'.join(names)}」押在同一个子方向：它一热起来，这几个目标一起变难"})
-    has_work = any(f.source == "behavior" for f in store.list_facts(uid, ["active"]))
+    has_work = any(f.source == "behavior" for f in store.list_facts(uid, PROOF_STATUSES))  # 确认过的作品也算有作品
     if active and "safety" not in tiers and not has_work:
         out.append({"level": "hint", "note": "你还没有过线的作品：先用一个「保」拿到第一件过线作品和第一位能为你说话的人，再冲"})
     if not out and active:
@@ -396,7 +410,7 @@ def daily_tweak(uid: str, kit_id: str, kept_today: list[dict[str, Any]]) -> dict
         if not passed:
             return None
         return {"text": "你已经有过线的阅读卡了。花两分钟写第一版定位：我是能做 X 的人，因为 Y。", "action": "写定位", "view": "position"}
-    new_proof = [f for f in store.list_facts(uid, ["active"]) if f.source == "behavior" and f.created_at > s["created_at"]]
+    new_proof = [f for f in store.list_facts(uid, PROOF_STATUSES) if f.source == "behavior" and f.created_at > s["created_at"]]  # 确认过的新证明也提示
     if new_proof:
         return {"text": f"你新证明了「{new_proof[-1].value[:40]}」——这条能不能强化你的 Y？", "action": "改定位", "view": "position"}
     o = next((p for p in k["open_problems"] if p["id"] == s["x_ref"]), None)

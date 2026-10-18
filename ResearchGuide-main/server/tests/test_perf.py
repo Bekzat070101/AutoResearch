@@ -57,7 +57,7 @@ def _dns_idle(timeout: float = 5.0) -> None:
 
 
 def test_review_runs_off_the_event_loop(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(submission, "review", lambda data, p: time.sleep(BLOCK) or {"passed": 0})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)
 
@@ -75,7 +75,7 @@ def test_review_runs_off_the_event_loop(monkeypatch):
 
 
 def test_upload_limit_stops_reading_early(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(submission, "MAX_ZIP_BYTES", 1000)
     sent = []
 
@@ -95,8 +95,8 @@ def test_upload_limit_stops_reading_early(monkeypatch):
 
 
 def test_review_queue_is_bounded(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
-    monkeypatch.setattr(main, "_review_pending", main.REVIEW_PENDING_MAX)
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
+    monkeypatch.setattr(main, "_review_full", lambda: True)
 
     async def go():
         async with _asgi() as c:
@@ -299,7 +299,7 @@ def test_external_reads_have_a_total_deadline_and_byte_cap(trickle, monkeypatch)
 
 
 def test_stalled_uploads_time_out_and_do_not_block_ready_ones(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(main, "UPLOAD_IDLE_SECONDS", 0.3)
     monkeypatch.setattr(submission, "review", lambda data, p: {"passed": 1})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)
@@ -524,12 +524,21 @@ def test_slow_dns_counts_against_the_deadline(monkeypatch):
     import urllib.request
     import limits
     _dns_idle()
-    real = socket.getaddrinfo
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: time.sleep(BLOCK) or real(*a, **k))
-    t0 = time.perf_counter()
-    with pytest.raises(limits.ReadLimitError):
-        limits.fetch(urllib.request.Request("http://example.invalid/"), timeout=0.08, max_bytes=1000)
-    assert time.perf_counter() - t0 < QUICK
+    release = threading.Event()
+
+    def fake_dns(*a, **k):
+        assert release.wait(5)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_dns)
+    try:
+        t0 = time.perf_counter()
+        with pytest.raises(limits.ReadLimitError):
+            limits.fetch(urllib.request.Request("http://example.invalid/"), timeout=0.08, max_bytes=1000)
+        assert time.perf_counter() - t0 < QUICK
+    finally:
+        release.set()
+        _dns_idle()
 
 
 def test_prefixed_zip64_is_checked_before_parsing(monkeypatch):
@@ -813,7 +822,7 @@ def test_notebook_outputs_are_skipped_without_building_objects():
     bundle = submission.read_zip(zipped(ok))
     assert bundle["texts"]["analysis.ipynb"] == '# 说明 "引号" {[}]\n\nprint(x)'
     assert submission._nb_object([("source", "x")]) == 1 and submission._nb_object([("cell_type", "code")]) == {"cell_type": "code"}
-    small = _json.dumps({"cells": [{"cell_type": "code", "source": "a", "outputs": [{"t": "}"}]}, {"cell_type": "markdown", "source": ["b", "c"]}]}).encode()
+    small = _json.dumps({"cells": [{"cell_type": "code", "source": "a", "outputs": [{"output_type": "stream", "t": "}"}]}, {"cell_type": "markdown", "source": ["b", "c"]}]}).encode()
     assert submission._ipynb_text(small) == ("a\n\nbc", True)
 
 
@@ -843,18 +852,19 @@ def test_concurrent_reviews_build_the_quote_index_once(monkeypatch):
 def test_concurrent_card_submissions_wait_for_the_index_off_the_workers(monkeypatch):
     import quotes
     quotes.clear_prepared()
-    uid = store.create_user("t")["uid"]
+    # 四十个不同的人同时交同一篇（同一个人连交四十张会被每人排队上限挡掉，那是 userlock 的事，见 test_same_user_races）
+    uids = [store.create_user(f"t{i}")["uid"] for i in range(40)]
     paper = {"id": "2310.17623", "title": "T", "source": "html", "url": "u",
              "text": "Abstract\n" + "We study things. " * 20_000 + "\n6 Limitations\nIt is limited."}
     monkeypatch.setattr(arxiv, "fulltext", lambda aid: paper)
     built = []
     real = quotes._index
     monkeypatch.setattr(quotes, "_index", lambda text: built.append(1) or time.sleep(BLOCK) or real(text))
-    body = {"uid": uid, "kit": "llm-eval", "arxiv_id": "2310.17623", "fields": {"claim_quote": "We study things. We study"}, "dims": {}}
+    body = {"kit": "llm-eval", "arxiv_id": "2310.17623", "fields": {"claim_quote": "We study things. We study"}, "dims": {}}
 
     async def go():
         async with _asgi() as c:
-            subs = [asyncio.create_task(c.post("/api/cards", json=body)) for _ in range(40)]
+            subs = [asyncio.create_task(c.post("/api/cards", json={**body, "uid": u})) for u in uids]
             await asyncio.sleep(0.1)
             t0 = time.perf_counter()
             health = await c.get("/api/health")
@@ -916,7 +926,7 @@ def test_arxiv_waits_do_not_starve_course_searches(monkeypatch):
 
 
 def test_slow_but_steady_uploads_finish_and_total_is_capped(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(main, "UPLOAD_IDLE_SECONDS", 0.3)
     monkeypatch.setattr(submission, "review", lambda data, p: {"passed": 1})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)
@@ -1022,19 +1032,30 @@ def test_cached_papers_do_not_queue_behind_slow_fetches(tmp_path, monkeypatch):
     import json as _json
     monkeypatch.setattr(arxiv, "CACHE_DIR", tmp_path)
     (tmp_path / "2310.17623.json").write_text(_json.dumps(
-        {"id": "2310.17623", "title": "T", "source": "html", "text": "Abstract\\nx", "url": "u"}), encoding="utf-8")
-    gate = threading.Event()
-    monkeypatch.setattr(arxiv, "papers", lambda ids: gate.wait(10) and [])  # 没缓存的论文：卡在取元数据上
+        {"id": "2310.17623", "title": "T", "source": "html", "text": "Abstract\\nx", "url": "u", "tables": []}), encoding="utf-8")  # 带 tables：没有的旧缓存会被重取（上游 w74）
+    gate, started, mu, n = threading.Event(), threading.Event(), threading.Lock(), [0]
+
+    def html(*a, **k):  # 没缓存的论文：卡在取正文 HTML 上
+        with mu:
+            n[0] += 1
+            if n[0] >= 4:
+                started.set()
+        assert gate.wait(5)
+        return ("<html><article><p>" + "body " * 500 + "</p></article></html>").encode()
+
+    monkeypatch.setattr(arxiv, "_get", html)
 
     async def go():
         async with _asgi() as c:
             slow = [asyncio.create_task(c.get(f"/api/papers/2401.{i:05d}")) for i in range(6)]  # 占满 arXiv 线程池
-            await asyncio.sleep(0.1)
-            t0 = time.perf_counter()
-            hit = await c.get("/api/papers/2310.17623")
-            waited = time.perf_counter() - t0
-            gate.set()
-            await asyncio.gather(*slow)
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                t0 = time.perf_counter()
+                hit = await c.get("/api/papers/2310.17623")
+                waited = time.perf_counter() - t0
+            finally:
+                gate.set()
+                await asyncio.gather(*slow)
             return hit.status_code, hit.json()["title"], waited
 
     code, title, waited = asyncio.run(go())

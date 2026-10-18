@@ -28,6 +28,7 @@ def fresh(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKUP_KEY", "backup-key-16++++")
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "bk"))
     monkeypatch.setenv("QIYAN_SNAP", str(tmp_path / "snap.db"))
+    monkeypatch.delenv("BACKUP_OSS_BUCKET", raising=False)
     monkeypatch.setattr(llm, "enabled", lambda uid=None: False)
     admin.SNAP = tmp_path / "snap.db"
 
@@ -185,6 +186,7 @@ def test_collect_lock_blocks_second(client, monkeypatch):
     assert r.status_code == 409
     store.release_collect_lock()
     monkeypatch.setattr(paper_collect, "collect_node", lambda *a, **k: {"node": "520.20"})
+    monkeypatch.setattr(paper_collect, "_pin_kit", lambda: 0)
     r2 = client.post("/api/admin/papers/collect?node=520.20&max_seconds=240",
                      headers={"X-Admin-Token": TOKEN})
     assert r2.status_code == 200, r2.text
@@ -198,3 +200,226 @@ def test_health_gains_checks_and_keeps_ok(client):
     assert "model_pool" in h
     assert "threads_max" in h["model_pool"]
     assert h["version"] == "0.2.0"
+
+
+def test_concurrent_restore_partial_write_keeps_validated_database(client, tmp_path, monkeypatch):
+    """20-R01：A 校验后暂停、B 写坏自己的 stage，A 继续换入的仍是完整库。"""
+    import sqlite3
+    import threading
+    uid = store.create_user("并发恢复")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    validated, b_done = threading.Event(), threading.Event()
+    real_write, real_check = admin._write_restore_bytes, admin._check_integrity_and_close
+    calls = {"write": 0, "check": 0}
+
+    def write(path, data):
+        calls["write"] += 1
+        if calls["write"] == 2:
+            path.write_bytes(data[:128])
+            raise OSError(28, "No space left on device")
+        real_write(path, data)
+
+    def check(path):
+        calls["check"] += 1
+        real_check(path)
+        if calls["check"] == 1:
+            validated.set()
+            assert b_done.wait(10)
+
+    monkeypatch.setattr(admin, "_write_restore_bytes", write)
+    monkeypatch.setattr(admin, "_check_integrity_and_close", check)
+    res = {}
+
+    def run_a():
+        res["a"] = client.post("/api/admin/restore", json={"object": out["object"]},
+                               headers={"X-Admin-Token": TOKEN})
+
+    t = threading.Thread(target=run_a)
+    t.start()
+    assert validated.wait(10)
+    rb = client.post("/api/admin/restore", json={"object": out["object"]},
+                     headers={"X-Admin-Token": TOKEN})
+    b_done.set()
+    t.join(15)
+    assert rb.status_code == 500
+    assert res["a"].status_code == 200, res["a"].text
+    with sqlite3.connect(str(store.DB_PATH)) as c:
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert store.get_user(uid)["nickname"] == "并发恢复"
+    assert not list(Path(store.DB_PATH).parent.glob("*.incoming*"))
+
+
+def test_restore_cleanup_error_reports_applied(client, tmp_path, monkeypatch):
+    """20-R01：换入成功后 sidecar 清理失败报 200 + cleanup_pending。"""
+    uid = store.create_user("已换入")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    store.create_user("恢复后应消失")
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if str(self).endswith("-wal"):
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    r = client.post("/api/admin/restore", json={"object": out["object"]},
+                    headers={"X-Admin-Token": TOKEN})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["object"] == out["object"]
+    assert body["cleanup_pending"] == ["-wal"]
+    assert body["warning"] == "恢复已换入；WAL/SHM 清理待重试"
+    assert store.get_user(uid)["nickname"] == "已换入"
+
+
+def test_restore_waits_for_open_connections(client, tmp_path):
+    """20-R01：有连接没排空时 5 秒内 503，旧库不变。"""
+    import time as _time
+    uid = store.create_user("旧库")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    store.create_user("恢复不应执行")
+    orig = Path(store.DB_PATH).read_bytes()
+    with store._conn() as c:
+        c.execute("SELECT COUNT(*) FROM users").fetchone()
+        t0 = _time.monotonic()
+        r = client.post("/api/admin/restore", json={"object": out["object"]},
+                        headers={"X-Admin-Token": TOKEN})
+        elapsed = _time.monotonic() - t0
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"] == "数据库仍在使用，请稍后重试恢复"
+    assert elapsed < 6.5
+    assert Path(store.DB_PATH).read_bytes() == orig
+    assert store.get_user(uid)["nickname"] == "旧库"
+
+
+def test_rewrap_concurrent_mine_save_preserves_latest_ciphertext(client, monkeypatch):
+    """20-R04：解封旧密文后学生重存新 key，rewrap 不得覆盖。"""
+    monkeypatch.setenv("QIYAN_SECRET", "old-wrap")
+    uid = store.create_user("并发换钥")["uid"]
+    store.save_llm_secret(uid, "sk-old-1111", "https://old.example/v1", "old-model")
+    monkeypatch.setenv("QIYAN_SECRET", "new-wrap")
+    real_unwrap = store.unwrap_secret
+    hits = {"n": 0}
+
+    def unwrap(hexed, secret=None):
+        plain = real_unwrap(hexed, secret=secret)
+        if secret == "old-wrap" and hits["n"] == 0:
+            hits["n"] += 1
+            store.save_llm_secret(uid, "sk-new-9999", "https://new.example/v1", "new-model")
+        return plain
+
+    monkeypatch.setattr(store, "unwrap_secret", unwrap)
+    r = client.post("/api/admin/rewrap", json={"old_secret": "old-wrap"},
+                    headers={"X-Admin-Token": TOKEN})
+    monkeypatch.setattr(store, "unwrap_secret", real_unwrap)
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["ok"] is False and detail["code"] == "secret_changed"
+    assert detail["changed"] == [uid] and detail["rewrapped"] == 0 and detail["failed"] == []
+    assert store.llm_secret(uid)["key"] == "sk-new-9999"
+    meta = store.llm_secret_meta(uid)
+    assert meta["tail"] == "9999" and meta["base_url"] == "https://new.example/v1"
+    assert meta["model"] == "new-model"
+    assert os.environ["QIYAN_SECRET"] == "new-wrap"
+
+
+def test_oss_failure_has_false_ok_contract(client, monkeypatch):
+    """D29：OSS 上传失败 502 回包精确为 ok:false + detail；成功仍 200/oss:ok。"""
+    monkeypatch.setenv("BACKUP_OSS_BUCKET", "qiyan-bak")
+    monkeypatch.setenv("BACKUP_OSS_ACCESS_KEY_ID", "id")
+    monkeypatch.setenv("BACKUP_OSS_ACCESS_KEY_SECRET", "secret")
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("https://oss", 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    r = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN})
+    assert r.status_code == 502
+    assert r.json() == {"ok": False, "detail": "OSS 上传失败：HTTPError"}
+
+    class Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b"ok"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Resp())
+    ok = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["oss"] == "ok"
+
+
+def test_restore_waiting_reader_does_not_invert_writer_lock(client, tmp_path, monkeypatch):
+    """R4-06：A 持 reader、B 恢复关闸等 A、C 写入排在 _LOCK 后；放开 A 后 B 200，C 的行在新库可读。"""
+    import threading
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    a_open, release_a, gate_waiting, c_blocked = (threading.Event() for _ in range(4))
+
+    class SpyGate(threading.Condition):
+        def wait(self, timeout=None):
+            me = threading.get_ident()
+            owner = store._GATE_STATE["owner"]
+            if owner == me:
+                gate_waiting.set()
+            if threading.current_thread().name == "C" and owner not in (None, me):
+                c_blocked.set()
+            return super().wait(timeout)
+
+    class SpyLock:
+        def __init__(self):
+            self._l = threading.Lock()
+
+        def acquire(self, blocking=True, timeout=-1):
+            if threading.current_thread().name == "C":
+                if self._l.acquire(False):
+                    return True
+                c_blocked.set()
+            return self._l.acquire(blocking, timeout)
+
+        def release(self):
+            self._l.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *a):
+            self.release()
+            return False
+
+    monkeypatch.setattr(store, "_GATE", SpyGate())
+    monkeypatch.setattr(store, "_LOCK", SpyLock())
+    res = {}
+
+    def run_a():
+        with store._conn() as c:
+            c.execute("SELECT COUNT(*) FROM users").fetchone()
+            a_open.set()
+            assert release_a.wait(15)
+
+    def run_b():
+        res["b"] = client.post("/api/admin/restore", json={"object": out["object"]},
+                               headers={"X-Admin-Token": TOKEN})
+
+    def run_c():
+        res["c"] = store.create_user("排队写入")
+
+    ta = threading.Thread(target=run_a, name="A")
+    tb = threading.Thread(target=run_b, name="B")
+    tc = threading.Thread(target=run_c, name="C")
+    ta.start()
+    assert a_open.wait(10)
+    tb.start()
+    assert gate_waiting.wait(10)
+    tc.start()
+    assert c_blocked.wait(10)
+    release_a.set()
+    for t in (ta, tb, tc):
+        t.join(15)
+    assert res["b"].status_code == 200, res["b"].text
+    body = res["b"].json()
+    assert body["ok"] is True and body["object"] == out["object"]
+    assert store.get_user(res["c"]["uid"])["nickname"] == "排队写入"
+    assert not list(Path(store.DB_PATH).parent.glob("*.incoming-*"))

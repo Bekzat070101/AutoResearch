@@ -6,6 +6,22 @@
 
 ---
 
+## [2026-10-18] [FIX] 并入 PR #19 后：规则版五问的轮次不再被 gathering 抹掉
+
+- 变更内容：上游 PR #19 的 `dialogue._sync_onboard_state` 每轮把 onboard 的 `phase` 改写成 `gathering`，而模型不可用时的规则版五问（`onboarding.advance`）把当前轮次记在 `phase` 里，结果没模型的新同学被一遍遍问同一句（本分支 `test_degraded_onboarding` 抓到，Codex 第四轮曾复现过同类问题）。现在只有第一轮/空状态记成 `gathering`，已经往后走的轮次与「问完」原样保留，`guide.assess` 判定就绪时仍记 `done`；上游 `test_enter` 对首轮 `gathering` 的期待不变。随上游契约改写了五个本分支测试：对话不再布置任务（接受 → ValueError、拒绝 → abandoned）、开场白是固定文案不调模型（`_voice` 的截断保护单测）、没模型时问完后的提示指向研读模块、`same_user_races` 的 env 桩补 `guidance`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/dialogue.py、server/tests/test_degraded_onboarding.py、server/tests/test_journey_r6.py、server/tests/test_model_output_callers.py、server/tests/test_same_user_races.py
+- 决策来源：陈浩文
+- 登记人：陈浩文
+
+## [2026-10-18] [FIX] 并入 main（PR #19：对话首次引导、成绩单接话、「我的」页信息层级，本地 w98–w101）
+
+- 变更内容：把上游 b34ca59（Bekzat070101 的 PR #19）并进本分支。7 处冲突的对接：`dialogue.py` 取上游的「对话不再布置任务」（`action_event` 只接受 decline → abandoned，其它事件 ValueError）与新的模型不可用提示；成绩单导入保留本分支「按学期替换」（`store.replace_terms`）并接上游新的 `append` 模式（`store.add_enrollments`）；`test_dialogue.py` 取上游参数化的「模型动作一律丢弃」；`styles.css` 窄屏对话列取上游；app.js 保留本分支登录页与 `openUpgrade`（上游重做的 `renderLogin` 不接入），删掉「我的」页里的成绩单粘贴列（上游已把成绩单改成对话里接话）；chat.js 保留本分支「等待期间切页不写入」的守卫并接上游 `renderGuide/enterCard(history.guide)`。界面 w102（上游 w101 与本分支 w98 内容不同）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/dialogue.py、server/tests/test_dialogue.py、web/css/styles.css、web/index.html、web/js/app.js、web/js/chat.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
 ## [2026-10-18] [TEST] 对话优化 PR 集成验收
 
 - 汇总本轮最终代码和验收材料，新增 docs/verification/dialogue-2026-10-18.md、虚构连续对话实录及三张测试页面截图，方便组内直接复查。
@@ -55,6 +71,54 @@
 - 登记人：助手。
 
 
+## [2026-10-18] [FIX] 第三轮实施令第四批：Codex 第六轮复核指出的 2 处
+
+- 变更内容：Codex 第六轮确认 R5-01 的 P0 跨画像覆盖已修、R5-02 符合，剩两个 P2。R6-01：`dirAwait` 在请求 fulfilled 与 rejected 之后都校验上下文（`try { return await run(); } finally { c.check(); }`），`saveTrail` 的上下文模式校验完成并重新抛出 `STALE_DIR`，`addMyDirection` 不再在重新读取前读旧 `S.myDirs`；失效操作静默结束，零新增请求/状态写入/绘制/提示，当前上下文的既有提示文案不变。R6-02：方向弹层的「添加到我的方向/取消添加/确认这个方向」、`renderCards/chooseFocus`、「我的」页的「移出」三处 UI 调用方在 await 后、任何状态修改/绘制/课程请求/导航前校验上下文，`STALE_DIR` 静默，其它错误照旧。新增 `test_frontend_state.py` 三个测试与 `verify_frontend_state.js` 场景 `direction-context-errors` / `direction-context-save` / `direction-context-ui`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_frontend_state.py
+- 决策来源：陈浩文（按 Codex 第六轮实施令）
+- 登记人：陈浩文
+
+## [2026-10-18] [FIX] 第三轮实施令第三批：Codex 第五轮复核指出的 2 处
+
+- 变更内容：Codex 第五轮在 bd20f1b 上复核第二批 12 条：10 条符合，R4-01 与 R4-12 各有一个新缺陷。R5-01（P0）：切画像时在途的方向操作（add/remove/choose 的 trail GET、prefs GET、choose POST）会在返回后把旧画像的 code/dir/tasks/dirs/sel 写进新画像；现在方向操作在开始时捕获 uid/token/pid/缓存键/纪元（`directionContext`），每次 await 前后校验（`dirAwait`），`portraitOp` 接纳切换/新建/删除以及 `setSession/clearSession` 都递增纪元，失效的操作抛 `STALE_DIR` 静默结束、零写入、不显示旧成功提示；`loadPrefs/putPrefs/saveTrail` 在写 S/缓存/发 PUT 前校验，`saveTrail` 用捕获的 pid/键。R5-02（P2）：`test_network_isolation.py` 的守卫只放行 `ipaddress.ip_address(...).is_loopback` 为真的数值地址，域名（含 localhost、`127.review.invalid`）、空值、通配地址一律记录并拒绝。新增 `test_frontend_state.py::test_direction_write_aborts_after_portrait_switch`（`verify_frontend_state.js` 场景 `direction-context`，六种在途时序 + 切走再切回 + 会话失效）、`test_network_isolation.py::test_guard_rejects_non_numeric_loopback_targets` 与子进程对照。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_frontend_state.py、server/tests/test_network_isolation.py
+- 决策来源：陈浩文（按 Codex 第五轮实施令）
+- 登记人：陈浩文
+
+## [2026-10-18] [FIX] 第三轮实施令第二批：Codex 第四轮复核指出的 12 处
+
+- 变更内容：Codex 第四轮在 bca5c99 上复核第一批九项：R04/D13/D29 符合，R05/D11 偏离，R01/R02/R03/D02 有新缺陷；按其 12 条实施令由五个 Opus 5.5 会话分支实现后并入。R4-01 方向的 add/remove/choose 写入前先 GET 当前画像 trail（`readTrailForWrite`），以其为准构造修改，GET 失败零写入；R4-02 `pullTrail` 把带 dirs/sel 数组（含显式空数组）的 trail 视为现代数据不迁移，GET 失败不触发 prefs 迁移；R4-03 低于本地 base_rev 的 GET/ACK 不回退草稿版本；R4-04 旧格式「已清空未同步」的 meta 迁移为 dirty+conflict，不被云端旧稿吞掉；R4-05 冲突按钮随当前表单重绑；R4-06 恢复改为先取 `_LOCK` 再关恢复闸，共用五秒截止，排队写入不再与恢复互锁；R4-07 `assert_db_under_nas` 拒绝反斜线/非绝对路径并返回规范化路径，下发给 SDK 的就是校验过的值；R4-08 登录先校验用户名形状，非法名 401 且不建任何桶、不查用户表；R4-09 草稿非 409 失败 toast「草稿未同步，联网后重试」；R4-10 收藏未加载时「我的」显示「收藏未加载，请重试」与重试按钮；R4-11 uptime 版本戳按去重集合比对；R4-12 八个会外联的测试补桩（collect 锁测试 stub `_pin_kit`、缓存性能测试 stub `arxiv._get`、慢 DNS 测试用假解析器、admin 共用 fixture 清 `BACKUP_OSS_BUCKET`），新增 `test_network_isolation.py` 以子进程审计钩子断言零外联。`tools/verify/verify_frontend_loss.js` 加 `readTrailForWrite` 与 trail GET 桩。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、server/admin.py、server/auth.py、tools/deploy/fc_safety.py、tools/verify/verify_frontend_state.js、tools/verify/verify_frontend_loss.js、.github/workflows/uptime.yml、server/tests/
+- 决策来源：陈浩文（按 Codex 第四轮实施令）
+- 登记人：陈浩文
+
+## [2026-10-18] [FIX] 第三轮实施令第一批：恢复/换钥/草稿/收藏/登录桶/发布门/探活
+
+- 变更内容：按 docs/tasks/20、21 的实施令，由四个 Opus 5.5 实现会话在各自分支完成后并入：20-R01 恢复用唯一 stage 文件 + 连接闸（`store.restore_gate`），写入/校验/替换失败保留原库，换入后清理失败返回 200 带 `cleanup_pending`/`warning`；20-R02 `drafts` 表加 `rev`，`PUT /api/tasks/{tid}/draft` 按 `base_rev` 做 CAS（不等 → 409「草稿已在别处更新，本地稿已保留」），前端草稿按 uid/tid 记 `edit_seq/dirty`，旧响应不再覆盖新稿，409 给「用本地稿覆盖云端」；20-R03 `loadPrefs` 失败置 `undefined`，写收藏前重新 GET，`boot()` 恢复 directions；20-R04 rewrap 按快照密文 CAS，学生并发重存 → 409 `secret_changed`；20-R05 `_HITS` 总数上限 10000、用户名桶 600 秒过期、满时拒绝新桶，形状不对的用户名直接 401 不建桶；21-D02 生产发布须 `QIYAN_DB` 落在函数已配置的 NAS 挂载目录（`fc_safety.nas_mount_dirs/assert_db_under_nas`），缺探活地址或 health 非 `ephemeral=false && writable=true` 不写成功状态，health 增加 `db.writable`；21-D11 uptime 按唯一 wN 比对 Pages 与 API，`QIYAN_REQUIRE_PERSISTENT` 时 ephemeral 必须是 JSON false；21-D13 `deploy_fc.llm_settings()` 只取第一个有密钥的源整组配置；21-D29 备份 OSS 失败 502 回包补 `ok:false`。新测试：`test_admin.py`（恢复并发/清理/连接闸、rewrap CAS、备份回包）、`test_user_store.py`（草稿 CAS）、`test_frontend_state.py` + `tools/verify/verify_frontend_state.js`（草稿同步、收藏重读、boot 恢复）、`test_auth_password.py`（桶上限）、`test_uptime_workflow.py`、`test_deploy_fc.py`（NAS 门、模型配置源）。全量 1173 passed（3.12、3.11）。Codex 第四轮复核进行中，结论回写 docs/tasks/20、21。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/admin.py、server/store.py、server/main.py、server/auth.py、web/js/app.js、tools/deploy/fc_safety.py、tools/deploy/deploy_fc.py、tools/verify/verify_frontend_state.js、.github/workflows/uptime.yml、server/tests/
+- 决策来源：陈浩文（按 20/21 实施令）
+- 登记人：陈浩文
+
+## [2026-10-18] [FIX] 并入 main（w97：画像内多选方向、画像命名、意见反馈、研读/论文页工具栏）
+
+- 变更内容：把上游 57f4464（Yukinannie 的 w97，经 PR #18 合入 main）并进本分支。3 处冲突的对接：`POST /api/portraits/rename` 加本分支的 `dependencies=SERIAL`（按人串行），`DELETE /api/portraits/{pid}` 保留本分支的 SERIAL + `_model_work`；app.js 的页面分发仍用本分支带 try/catch 的 switch，加 `feedback` 视图；上游新的「画像与方向」面板整体采用，但切换/新建/删除三处改走本分支 `portraitOp`（服务器成功后才改前端画像、换画像时清上一份的方向/项目/定位草稿、防连点），`portraitOp` 加 `after` 钩子；`clearSession` 补清 `portraitName/mePortrait`；界面 w98（上游 w97 与本分支 w84 内容不同）。其余原样并入：`feedback` 表与 `/api/feedback`、`/api/admin/feedback*`、`portraits.name` 迁移、`interests.direction_nodes`（trail.sel 多选）、`daily_for_user` 合并多方向目录、研读 `read-toolbar`、论文页 `paper-tools` 与滚动联动、`test_feedback.py`。
+- 影响文档：docs/CHANGELOG.md、docs/tasks/21-r3-sheet-audit.md（加「w97 之后」一节）
+- 影响模块：server/main.py、server/auth.py（`/api/admin/feedback`、`/api/admin/feedback/status` 补进 PUBLIC，与其它 admin 路由同一约定）、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
+## [2026-10-17] [FIX] 并入 main（w83：request-10-16 缺陷修复）
+
+- 变更内容：把上游 f4c91f6（w83，按 docs/tasks 15–19 缺陷单修复）并进本分支。本次上游已是 LF；`.gitattributes` 取本分支版本（多列二进制类型）。对接本分支：auth 的 `PER_IP_HOUR` 仍按本分支（环境变量 `AUTH_PER_IP_HOUR`，默认 600）并加上游的 `SIGNIN_USER_LIMIT/WINDOW`，`_allow`/`_recent` 加 `window` 参数；`budget.py` 仍是本分支那份，补上游 `consented()`；`llm.enabled` = 同意检查 + 本分支「服务器 key 要有额度」；`PUT /api/tasks/{tid}/draft` 保留本分支「已完成的作业可清空草稿」的放行，返回上游 `set_draft_row`（带 updated_at）；`deploy_fc.llm_settings()` 取上游形状（key/base_url/model，`test_local_defaults_returns_three_keys` 钉着），`_local_defaults` 只在 DeepSeek 地址下写 `DEEPSEEK_API_KEY` 并透传 `LLM_REASONING_EFFORT`；app.js 会话块仍是本分支的（`setSession/clearSession` 补 `llmKeyInvalid`），任务草稿键仍按人（`rg_draft_${uid}_${tid}`、`rg_draft_meta_${uid}_${tid}`）并接上游的 updated_at/dirty 同步。界面 w84（上游 w83 与本分支 w82 内容不同）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：.gitattributes、server/auth.py、server/budget.py、server/llm.py、server/main.py、tools/deploy/deploy_fc.py、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
 ## [2026-10-16] [OPS] Pages 发到 w83，生产 API 仍是 w74
 
 - 变更内容：前端同步 GitHub Pages（w83）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用或行为不同）。A5 未挂盘，本轮不发生产函数，未把 `/metrics` 发到现网。
@@ -71,6 +135,14 @@
 - 影响模块：server/auth.py、store.py、llm.py、budget.py、admin.py、arxiv.py、tutor.py、main.py、paper_collect.py、reading.py、metrics.py、pdf.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
 - 决策来源：邬程灿（request-10-16 评审 2026-10-16）
 - 登记人：助手
+
+## [2026-10-15] [FIX] 并入 main（w81：/metrics、paper_dir 与方向论文入库、隐私渲染、带读拒标题）
+
+- 变更内容：把上游 7a8dc36 并进本分支。上游这 30 个文件是在 Windows 上以 CRLF 提交的：新增 `.gitattributes`（`* text=auto eol=lf`），用 `git merge -X renormalize` 合并，仓库内容仍全部 LF，只剩 5 处真冲突。对接本分支：`workpool.BoundedPool` 仍是本分支的有界队列实现，补 `snapshot()` 给上游 `_model_pool()` 用；health `model_pool` = 本分支模型池实值（workers/threads/running/queued/max_queued）+ 上游的 threads_borrowed/threads_max/pdf_queued/pdf_running；「我的」账号面板与登录页保留本分支（已有 openPrivacy 隐私说明、consentRow 同意勾选、导出、切回账号、设用户名密码），上游新加的 `privacyBox()` 保留但登录页不重复渲染；`applyLlmPill` 取上游（未登录隐藏，不再显示「连接模型」）；上游 `/metrics`、`record_metrics` 中间件、`paper_dir` 表与 `GET /api/papers/dir`、`paper_collect.py`、搜索库优先、研读左栏读目录、带读拒绝标题、`direction_node` 不再回落 7 码、`test_metrics_sync`/`test_paper_dir` 原样并入。界面 w82（上游 w81 与本分支 w81 内容不同，再 +1）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：.gitattributes、server/workpool.py、server/main.py、web/index.html、web/js/app.js
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
 
 ## [2026-10-15] [OPS] Pages 发到 w81，生产 API 仍是 w74
 
@@ -103,6 +175,14 @@
 - 影响模块：server/metrics.py、server/main.py、server/auth.py
 - 决策来源：邬程灿（第 4 次小组汇报 / 课程「系统监控与运维」）
 - 登记人：助手
+
+## [2026-10-15] [FIX] 并入 main（w75–w80：论文缓存止血、会话与方向、今日按方向、研读三栏与论文库、带读判卷）
+
+- 变更内容：把上游 372e767 并进本分支（它按 docs/tasks 的 11–14 实现了 w75–w80）。对接本分支：预算仍是 budget.py 这一份（按人按天、同意隐私才调、bind/unmetered），补上上游要的 `metered_as("*xlate")`、`current()`、`LLM_DAILY_XLATE`，`*` 开头的伪账号只查自己和全站的上限；`llm.chat/chat_json` 用本分支的扣额逻辑，加上游的 `total`/`retry`；线程池仍是本分支的 workpool（取消即出队、带上下文变量、能 drain），加 `PoolFull = Overloaded` 别名和 kwargs，上游的 pdf 池直接用它；`_FLIGHTS` 全部用 BoundedPool（新增 xlate 1 线程 8 排队）；带读 start/turn 走 `_paper_ref`（本地 PDF 不取 arXiv）但仍进模型池、挂用户锁；`_review_full` 保留；论文原文仍要登录（不按 arXiv 编号放行）；缓存写盘失败照上游打 warn 不 500。前端：会话仍用本分支那套（localStorage 三键、停着的号、换人整页重载），接上上游的 `sessionGoneMsg`（401 落登录页并提示）、`confirmLeave`/`clearChatDraft`、`logout(next)`（退出 / 换账号）、用户菜单四项、`chooseDirection`、`renderPositionSoon`、今日按方向文案、分拣不带 kit；隐私说明用上游 w80 那份（PDF、作答发给模型），版本 2026-10-15。界面 w81。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/budget.py、server/workpool.py、server/llm.py、server/main.py、server/arxiv.py、server/auth.py、server/dialogue.py、server/tests/test_auth.py、tools/deploy/bootstrap、tools/deploy/download_wheels.py、web/js/app.js、web/js/chat.js、web/index.html
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
 
 ## [2026-10-14] [FIX] 今日去掉「定位微调」
 
@@ -160,6 +240,14 @@
 - 决策来源：邬程灿（request-10-14）
 - 登记人：助手
 
+## [2026-10-14] [FIX] 并入 main（w71–w74：壳与栏目、开场全屏对话与「我的」、按兴趣每日论文、服务端带读、运维止血）
+
+- 变更内容：把上游 d874523 并进本分支（它按 docs/tasks 的五份任务书实现了 w71–w74）。和本分支对接：模型池与限流照旧——带读的 start/turn 进 `_MODEL` 池（`_in_model_pool`，从 `_model_work` 抽出）并挂用户锁，`/api/cards` 仍挂 SERIAL，每日取数用 `workpool.BoundedPool(1, 16)` 的独立小池而不是 `ThreadPoolExecutor`；`/api/health` 同时给 `model_pool` 的真实计数和上游的 `checks`；`quotes.locate` 同时支持 `prefer`（多处出现时挑局限段那一处）和带读的 `within`/`at`，`check_limitation` 仍传 `prefer=LIMIT_SECTIONS`；`store.init_db` 先建墓碑触发器再迁移旧的 XOR 封装；deploy_fc 用上游的 merge_env/refuse_unsafe、删掉本分支那份吞异常的 `existing_env`，更新与创建都保持单实例 200 并发。前端：保留本分支的会话持久化（localStorage、停着的号、换人整页重载）、微信 / 账号 / 注册三栏登录页和「设用户名密码」，接上上游的 `entered`（`setSession` 读 `r.entered`、`firstView`/`enterApp`、登录后统一走 `afterEnter`）、`confirm` 转「我的」页、项目占位页、今日论文区、对话右栏只读；`/api/nba` 随上游删去。隐私说明合成一份（带读作答一条照上游），指纹重算。界面 w75。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/deploy/README.md
+- 影响模块：server/main.py、server/quotes.py、server/reading.py、server/store.py、tools/deploy/deploy_fc.py、web/js/app.js、web/js/chat.js、web/index.html、server/tests/test_auth.py
+- 决策来源：陈浩文（并入上游）
+- 登记人：陈浩文
+
 ## [2026-10-13] [FIX] deploy_fc 适配当前 FC SDK 的 GetFunction
 
 - 变更内容：`get_function` 必须带 `GetFunctionRequest`，否则读现有环境变量在发版时直接 TypeError。
@@ -215,6 +303,14 @@
 - 影响模块：web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html
 - 决策来源：邬程灿（request-10-13）
 - 登记人：助手
+
+## [2026-10-12] [FIX] 并入 main（w67–w70：四栏引导、作业正式题与提示、项目问答、研读真表、定位人话；注册登录、每人一把 DeepSeek、进度入库）
+
+- 变更内容：把上游 5898874、743b5e2、0d188ae 并进本分支。拿过来的：四栏「这一页先做什么」、作业正式题（已知 / 求 / 交）和「卡住了要提示」、项目先问答再按整条链检索、研读真表和一张卡出矩阵、定位序号人话和卡片地图、Windows 慢响应头按总时限断开、云端依赖按 wheel 清单重装；用户名 + 密码注册 / 登录 / 升级（`/api/auth/register`、`signin`、`upgrade`）、每人一把 DeepSeek（`user_secrets`，调用按 uid 带 key）、作业草稿 / 项目路径 / 研读工具包进库按人隔离。和本分支对接：模型预算（budget.py）只管服务器的密钥——用自己密钥的人（`llm.resolve_cfg` 给 `own=True`）不问额度也不扣；注册了用户名的人按「能找回的账号」算 `LLM_DAILY_USER`，不按访客；`/api/auth/me` 同时给 `llm_left` 和 `has_llm_key`；流式回复同时带 `status` 和 `uid`；`llm.ready(uid)` 兼容测试里零参的 `enabled` 桩；导出仍在一个读事务里，多出 `username` 一列；删号和墓碑触发器按列自动覆盖新表。登录页：微信 / 账号登录 / 注册三个标签，访客入口照旧要先勾隐私说明，密码登录后隐私说明过期会再问一次；「记录」页多「设用户名密码」（访客和微信号都能补）和「我的 DeepSeek」；用户菜单和侧栏模型钮也能开「我的 DeepSeek」；已完成的作业用上游的折叠面板，刷新后没有评阅的照样去服务器取。没拿的两条上游界面决定（w69「只留登录 / 注册、不再给访客入口」、w70「登录只记在内存里、打开页面重新登录」）：本分支的访客号、停着的另一个号、跨标签页同步、草稿都靠这台浏览器里存着的会话，改成每次重新登录等于访客的记录一刷新就没了；要跟上游走的话改 `boot()` 开头和 `setSession` / `clearSession` 即可。服务器上的草稿写进带 uid 的本地键。隐私说明补上用户名、上传的密钥、草稿和路径进度（版本 2026-10-12）。界面版本 w71。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md
+- 影响模块：server/llm.py、server/budget.py、server/auth.py、server/store.py、server/dialogue.py、server/workbench.py、web/js/app.js、web/index.html
+- 决策来源：陈浩文（并入上游，保留本分支的会话和访客模型）
+- 登记人：陈浩文
 
 ## [2026-10-12] [UX] 打开页面必须重新登录
 
@@ -311,6 +407,15 @@
 - 影响模块：web/js/app.js、web/css/styles.css、web/index.html
 - 决策来源：邬程灿（problem-10-12）
 - 登记人：助手
+
+## [2026-10-10] [FIX] Codex 七轮复查、两百人压测、学生全流程走查，并入 main（五栏 + w64）：权限、预算、注入、并发写、可用性、数据正确性
+
+- 变更内容：Codex（gpt-6-astra）对 #16/#17 和全站做了四轮审查，逐条复现后修掉。权限：uid 核对不再看 Content-Type 大小写；微信只认安全模式、同一条消息不能配两次登录、猜数字先查限额。预算：模型调用按人/按全站每天封顶，访客、没同意隐私说明的、匿名接口不调（budget.py）。注入：前端所有 innerHTML 先消毒，几处模型/用户文本逐处转义。并发：同一个人的改动一件一件来（userlock.py，异步等锁、每人排队上限），流式对话在自己的线程里跑完再放锁；删号后在路上的请求写不回来（墓碑 + 触发器）；评阅记录按当时的画像。可用性：MCP 不卡事件循环，论文抓取有上限、没人等的就取消，/api/papers 要登录。数据：成绩单按学期替换、「不及格」保留、半学分照算、无穷大学分拒收并修老库；改方向换键而不是换标签；替换写入新来源和可信度；重复结论和重复卡都对账；任务反馈存库；导出在一个读事务里。前端：换人整页重载、草稿按人存、只在明确退出时清；对话页晚到的渲染不覆盖别的页。压测（模拟两百人同时用）：等模型的接口挪进自己的线程池（workpool.py），公用池留给普通读写，原来两百人等模型时连健康检查都要排五秒；浏览器走了，还在排队的那轮对话撤掉、马上放锁，排队有上限（满了回 503）；同一出口地址一小时 600 次登录（原来 30，一个机房开不了号），全体访客另有每天合计的模型额度；上游重试也扣额度；服务关闭时等在跑的那一轮写完。全流程走查：访客绑微信、这个微信却已有账号时先问，访客号的会话留在这台浏览器上可以切回去（原来直接切走，访客的记录再也进不去）；交成果的评阅按一次读出的项目和画像记，项目页带上它属于的画像；模型给的任务格式不对（「20分钟」）照样建出任务，建不出来行动也不记成已接受；对话生成中切走再回来，新页面接上那一轮；切画像后方向重新取。
+- 并入 main：保留五栏和 w64 首页；登录页用本分支的（公众号没开通时只给访客入口，要先勾隐私说明——没同意的人不调模型）；会话过期先重试一次再踢人（上游的多实例兜底）照留；论文原文 /api/papers 仍要登录（上游按路径放开了，没登录也能让服务器去 arXiv 取任意论文）。界面版本 w65。五栏前端走查（Codex 第九轮）：作业列表没取到时不再当成「没做过」重新出题；定位页保存只清自己那一版草稿、做完不把人拉回定位、加目标双击只算一次；切画像清掉项目表单等上一份画像的状态；今日页只在「还没方向」和「继续当前节点」时用服务端建议；「我的项目」没取到时说没取到；各页加载失败给提示和重试；每日分拣双击只算一次、数字用服务器的；用户菜单不叠两个、「继续聊」去对话；刷新停在原来那一栏；手机上对话页单列。回归复查（Codex 第十轮，重跑前九轮全部复现脚本）：项目评阅和论文抓取的排队改用 workpool，断开的请求连同压缩包当场出队；局限引文在全文多处出现时按局限段那一处算；笔记本只认代码单元的真实输出；定位页写完只在原来那次渲染上重画；对话页加载失败也给提示；分拣计数只往大里改；发版时推理强度跟着模型设置一起换。模型输出走查（Codex 第十一轮，用假模型喂坏 JSON、错类型、超长、截断的流）：记忆的证据只认学生自己说的话，短值也要在原话里有着落（年级按阶段和年份比）；模型 op 字段类型不对只拒这一条；先规整整份决策再写库；回包和流的形状逐层核对，流断在半截时用第一次调用的完整回复；评分只认真的 true/false 和 0–100 的有限分数，评分出错不留「已完成、没反馈」的任务；项目评阅的证据文件必须在压缩包里，说做到却拿不出证据降成部分做到；重排全是编的 id 时退回规则候选；开场白先给下一问留位置再截；关服务时也等在评的项目评完。第十二轮：年级按阶段和年份比，原话没说第几年、或者被「不是」否定的不算，英文 freshman/sophomore 也认；常见缩写（AI/人工智能、ML/机器学习）算同一个；值里的数字原话里得有；数字写的年份年龄转成文字收下；流到字数上限（length）也算半截；模型给的落单代理字符先清掉；大整数分数不再 500；引文类型不对的证据整条不要；跨零点倒序回来的分拣计数不倒退。第十三轮：试过让「前者」「好」借助手上一句当证据，Codex 复现「好」能把助手整段话变成学生自述、还能被伪造，撤掉——只回确认时不记、下次再问；数字按数值比（3.70 = 3.7，3.07 ≠ 3.7），中文数带单位也比；「本科第2年」认得，「以前是大一」「不算大二」不算现在的；模型 JSON 嵌套太深当失败回退；stop 之后又来正文或传输出错都不算说完。第十四轮：「第N年」要有「第」（「学了三年」「一年内」不是年级），「去年读大二」「打错了」不算现在的，英文 second-year、「大 2」认得，年级值里夹带的 GPA 要另有着落；数量连着单位比（「每周2小时，总共20周」撑不住「每周20小时」），小时和分钟可换算，全角、范围、课程序号、「四级」都认；「对 X 没有兴趣」不记成兴趣；升级前存在旧键里的作业草稿搬到新键；删一份不在用的画像不清当前画像没写完的陈述。第十五轮：年级和否定两条约束不分值的长短都查；英文年级认否定、阶段看这一处后面的词；「本科二年」认得；「作业错了」「代码写错了」不是改口；双重否定不算否定，缩写要有词界；½ 当 0.5；门、篇、个各算各的；新旧草稿键并存时以新的为准、清空时一起删，搬不过去照样显示；年级正则在长串空白上的平方级回溯修掉。第十六轮：带分数「1½」和「⅓」整体算、「半小时」「一个半小时」认得；紧跟的「不对」「错了」算改口；「本科四年里」是学制不是年级；英文 PhD 优先、否定的那一处不吞后面的年级；量词「个」和项、门互通；成绩单重新识别后旧的「就用这份」撤掉（原来点到旧的会把旧成绩写回去）。第十七轮：「半小时」正则的平方级回溯、「3.7/4.0」里的「7/4」被当成分数，都修掉；对所有记忆辅助函数做了长输入扫描（最坏 50 毫秒）。记忆写入闸门改成按字段核对（server/evidence.py，不再逐条补正则）：模型按字段给结构化的值——年级 {stage, year}、年龄/入学年份/每周时间 {value, unit, per}——代码拿固定的表去原话里对：年级要有一处按表认出同一个（阶段, 第几年），没说阶段的只撑本科；数量要有同一个数、同量纲单位（时分、天周、月年可换算，「一小时二十分钟」算 80 分钟，「十九岁」「20周岁」「24级」都认）；学校查校名简称表（「东北大学」里的「北大」不算）、院系查培养方案别名表（「数学」这类学科词得跟着系/院/专业）、专业查培养方案卡片；兴趣/目标的值要是原话的一段（或常见缩写），不是原样就得有四字以上的公共片段当锚、收下也只算 inferred。一套分句范围规则管否定（含后置的「没兴趣」「没学过」，双重否定不算）、过去（以前、去年、「大一的时候」）、改口，年级/学校院系/数量还排除「想、打算」；其余字段照旧按支撑度，另外查数字、全是虚词的值不再算撑得住、和原话共有的片段全被否定就拒。旧字符串值走同一套核对（存原样），结构化的存规范写法（大二、19岁、每周10小时），形状不对拒 bad_type:value；对话提示改成要这些形状。原来的四个对抗例（「我不想碰机器学习」→兴趣、「我在北京大学读书」→清华、「second-year, not a graduate student」→研二、「我没学过Python」→会）都拒；第十八轮（Codex 复查这次 diff）：数量串夹带别的内容、否定检查换缩写、锚住的兴趣也查数字、一张培养方案卡上的几个专业分开、超大整数、入学年份可以是过去、抵掉的否定不再后置认回、「大二.」、年龄范围两头都留。第十九轮（Codex 独立语料 191 条该收、122 条该拒，c19f9de 上误拒 7、误收 88）：范围改按引文所在的整条消息算（模型只引「大四」时「我不是大四」的否定原来在引文外面）；加「别人的事」（室友、家人、老师、「别人给的建议」）和「假设」两种范围；改口越过「等下」「抱歉」这种插话；「现在」只截断过去、并列的下一分句接着否定、问出来的话题被下一句否定也算、后置否定认表情；学校院系专业要作为学籍出现、长名字里的短名字不算、附中出版社和「法院」不算；入学年份连着入学说、每周时间不算上课；结构化数量不认上下限、范围不挑一头、「每周」不能凭空补；中文小数点、分之、省略末位（两千六）、英文复合数、三段时长、「二三年入学」都认；旧格式数量串只能是这一个量；其余字段英文词整个出现、短值也算支撑度、和原话的说法双向一致、不许多出原话没有的内容；在册 key 规范化后认回原样（base:math_code）；改口词逐个从句首重扫的平方级去掉。现在 Codex 语料误拒 0、误收 3（只提到没表态的「差分隐私」、反义词「时间很多/很少」、能力自述的「独立完成」——契约里这类保留成 inferred 并标 needs_behavior_evidence）；自建语料旧闸门误拒 9、误收 37，新的 0/0。六万四千字的消息、引文重复上千处、十二条 op 一次校验约 0.5 秒。第二十轮（diff 复查）：值带换行不再抛异常、整段引文的否定检查线性、换缩写的片段保留值里的否定、「课题组」不是课、「读研二」是年级。第二十一轮（Codex 新写的独立语料 200 条该收、105 条该拒，87c75f9 上误拒 24、误收 85）：别人的事隔着逗号接着管、到「而我…」为止，「我和同学都…」不算，「替同学问的」「大四的学长」「是爸妈给我定的」算别人的；问句不是自述（问句里「我这个大四…」的自我介绍除外）；条件句的后件、「只是理想状态」算假设；「是讲座的题目」「这个词」只是提到；学校院系专业改成学籍说法的模板（名字前后紧挨着的词、或整句就是名字），「附近、门口、出版、选过课」不算；带单位的数量字符串和结构化值一样严格；入学年份紧挨着入学；「接触过、完成了」算以前；三字以上片段一处对不上就拒；三处长消息的平方级（重叠引文、逐个数量重扫分句、整段覆盖重数）去掉。现在两份 Codex 语料误拒都是 0，误收 2/122、10/105，剩下的是字面规则管不了的：反义词、谓语归属、能力字段里没依据的「精通/独立完成」（契约保留成 inferred 加标注）、旧格式光秃秃的数字。
+- 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md、docs/DIALOGUE_CONTRACT.md、.env.example
+- 影响模块：server/evidence.py（新）、server/auth.py、server/budget.py（新）、server/userlock.py（新）、server/workpool.py（新）、server/envfile.py（新）、server/wechat.py、server/store.py、server/main.py、server/llm.py、server/memory.py、server/reading.py、server/workbench.py、server/transcript.py、server/dialogue.py、server/singleflight.py、web/js/app.js、web/js/chat.js、tools/backup_db.py、tools/verify/verify_receipt_render.js、server/tests/
+- 决策来源：陈浩文（上线前让 Codex 按「真的会有人用」来挑错）
+- 登记人：陈浩文
 
 ## [2026-10-10] [UX] 粒子首页收进 PR15 视觉引擎
 

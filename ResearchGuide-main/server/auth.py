@@ -30,12 +30,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+import budget
 import store
 import wechat
 
 SESSION_TTL = 30 * 86400   # 三十天不用才过期；用着的一天续一次
 TICKET_TTL = 300           # 网页上的数字五分钟有效
-PER_IP_HOUR = 30           # 同一来源一小时最多开三十次登录、三十个访客号
+# 同一来源一小时最多开几次微信登录、几个访客号。学校机房、宿舍的出口常常是同一个公网地址、几百人共用：
+# 原来 30，一个班两百人同时开访客号 170 个被拦（Codex 第五轮压测）。这里只挡脚本刷号；
+# 访客能花的模型钱另有全体访客合计的上限（budget.guests_cap），刷再多访客号也花不到绑了微信的人头上。
+PER_IP_HOUR = int(os.environ.get("AUTH_PER_IP_HOUR") or 600)
 SIGNIN_USER_LIMIT = 10     # 同一用户名 10 分钟内最多试这么多次（含对的密码）
 SIGNIN_USER_WINDOW = 600
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
@@ -58,6 +62,7 @@ PUBLIC = frozenset({
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",
     "/api/admin/maintenance", "/api/admin/user/delete", "/api/admin/rewrap",
     "/api/admin/papers/warm", "/api/admin/papers/collect",
+    "/api/admin/feedback", "/api/admin/feedback/status",  # 上游 w97 的反馈管理：同样自己核对管理员口令
 })
 
 _ARXIV_PAPER_PATH = re.compile(r"^/api/papers/\d{4}\.\d{4,5}$")
@@ -93,15 +98,14 @@ def _session_uid(request: Request) -> str | None:
 async def guard(request: Request) -> None:
     """挂在整个 app 上的依赖。公开接口直接放行；其余的先认会话，再核对请求里自称的 uid。"""
     route = request.scope.get("route")
+    budget.bind(None)  # 先当匿名：公开接口不许调模型
     path = request.url.path or ""
     route_path = getattr(route, "path", None)
     if path.startswith("/static") or path.startswith("/api/admin") or route_path in PUBLIC or path in PUBLIC:
         return
     # 路由还没绑上时，公开知识仍按路径放行，避免工具包被过期会话拖成 401。
-    # 论文原文只放行 arXiv 编号；search / mine / upload / local: 要登录。
+    # 论文原文 /api/papers/ 不在这里：没登录也能让服务器去 arXiv 取任意论文，会占满限速的抓取队列和磁盘缓存
     if path.startswith("/api/kits/"):
-        return
-    if _public_arxiv_paper(path):
         return
     # 查会话是一次 SQLite 读：放线程池，别在事件循环上做。每个请求都经过这里，库在网络盘上时一次就是几毫秒，
     # 在循环上排队会拖慢所有人，包括正在流式输出的对话。
@@ -109,12 +113,20 @@ async def guard(request: Request) -> None:
     if not uid:
         raise HTTPException(401, "请先登录", headers={"WWW-Authenticate": "Bearer"})
     request.state.uid = uid
-    claimed = [request.query_params.get("uid"), request.path_params.get("uid")]
-    # 只看有 JSON 体的接口：FastAPI 在跑依赖之前已经把它读进内存，这里再取是缓存，不会把上传流读一遍
-    if getattr(route, "body_field", None) is not None and "json" in request.headers.get("content-type", ""):
+    budget.bind(uid)  # 这个请求里的模型调用算在这个人头上
+    claimed = [*request.query_params.getlist("uid"), request.path_params.get("uid")]
+    # 有请求体的接口：不看 Content-Type，只要体是 JSON 对象就核对里面的 uid。
+    # FastAPI 对没有 Content-Type、application/JSON、application/xxx+json 都照样当 JSON 解析；
+    # 原来只认小写子串 "json"，把头写成 application/JSON 就能改别人的数据。
+    # 体在跑依赖之前已经被 FastAPI 读进内存，这里取的是缓存，不会把上传流再读一遍（上传接口没有 body_field）。
+    if getattr(route, "body_field", None) is not None:
         try:
-            body = await request.json()
-        except ValueError:
+            raw = await request.body()
+        except RuntimeError:  # 表单接口的流已被表单解析读走（目前没有这种接口）
+            raw = b""
+        try:
+            body = json.loads(raw) if raw else None
+        except (ValueError, UnicodeDecodeError):
             body = None  # 坏 JSON 交给接口自己报 422
         if isinstance(body, dict):
             claimed.append(body.get("uid"))
@@ -147,25 +159,66 @@ def _client_ip(request: Request) -> str | None:
         return None
 
 
+_HITS_CAP = 10000
+_NEXT_SWEEP = [0.0]
+
+
+def _ttl(key: str) -> float:
+    return 600 if key.startswith("signin-user:") else 3600
+
+
+def _sweep_expired(now: float) -> None:
+    for k in [k for k, v in _HITS.items() if not v or now - v[-1] >= _ttl(k)]:
+        del _HITS[k]
+
+
+def _recent(key: str, now: float, window: float = 3600) -> list[float] | None:
+    """这个 key 在 window 秒内的记录；容量满且是新 key 时返回 None。调用方持有 _HITS_LOCK。"""
+    if now >= _NEXT_SWEEP[0]:
+        _sweep_expired(now)
+        _NEXT_SWEEP[0] = now + 1
+    if key not in _HITS and len(_HITS) >= _HITS_CAP:
+        return None
+    hits = [t for t in _HITS.get(key, []) if now - t < window]
+    _HITS[key] = hits
+    return hits
+
+
 def _allow(key: str, limit: int, window: float = 3600) -> bool:
-    """window 秒内同一个 key 最多 limit 次。内存计数，有界。"""
+    """window 秒内同一个 key 最多 limit 次：查一次、记一次。内存计数，有界。"""
     now = time.time()
     with _HITS_LOCK:
-        if len(_HITS) > 10000:  # 一小时内的才有用，旧的整体清掉
-            for k in [k for k, v in _HITS.items() if not v or now - v[-1] > 3600]:
-                del _HITS[k]
-        hits = [t for t in _HITS.get(key, []) if now - t < window]
-        if len(hits) >= limit:
-            _HITS[key] = hits
+        hits = _recent(key, now, window)
+        if hits is None or len(hits) >= limit:
             return False
         hits.append(now)
-        _HITS[key] = hits
     return True
 
 
+def _used_up(key: str, limit: int) -> bool:
+    """只查不记。"""
+    with _HITS_LOCK:
+        hits = _recent(key, time.time())
+        return hits is None or len(hits) >= limit
+
+
+def _note(key: str) -> None:
+    """只记不查。"""
+    now = time.time()
+    with _HITS_LOCK:
+        hits = _recent(key, now)
+        if hits is not None:
+            hits.append(now)
+
+
 def _ip_allows(request: Request, kind: str) -> bool:
+    return allow_ip(request, kind, PER_IP_HOUR)
+
+
+def allow_ip(request: Request, kind: str, limit: int) -> bool:
+    """同一来源一小时最多 limit 次（来源认不出时不限，见 _client_ip）。"""
     ip = _client_ip(request)
-    return True if ip is None else _allow(f"{kind}:{ip}", PER_IP_HOUR)
+    return True if ip is None else _allow(f"{kind}:{ip}", limit)
 
 
 def _dev() -> bool:
@@ -211,6 +264,7 @@ def account(uid: str) -> dict[str, Any]:
         "guest": not bool(u.get("wechat_openid") or username),
         "consent_ok": u.get("consent_version") == PRIVACY_VERSION,
         "privacy_version": PRIVACY_VERSION,
+        "llm_left": budget.left(uid) if u else 0,  # 今天还能让服务器的模型回答几次；用自己密钥的人不受这个数限制
         "has_llm_key": meta["has_key"],
         "llm_key_tail": meta["tail"],
         "llm_key_invalid": store.llm_secret_invalid(uid) if meta["has_key"] else False,
@@ -314,6 +368,8 @@ def register(req: RegisterReq, request: Request):
 @router.post("/api/auth/signin")
 def signin(req: SigninReq, request: Request):
     username = store.normalize_username(req.username)
+    if not store.valid_username(username):  # 形状不对的用户名直接 401，不给它建桶（R05：桶总数有上限，别让垃圾名占位）
+        raise HTTPException(401, "用户名或密码不对")
     if not _ip_allows(request, "signin"):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
     if username and not _allow(f"signin-user:{username}", SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
@@ -399,9 +455,8 @@ def wechat_poll(req: WechatPollReq, request: Request):
             uid = store.user_by_openid(openid)["id"]
     if row["consent"]:
         store.record_consent(uid, PRIVACY_VERSION)
-    old = _bearer(request)
-    if old:
-        store.drop_session(old)  # 访客会话换成新会话
+    # 不在这里吊销浏览器原来的令牌：这个结果可能被浏览器当成过期的尝试丢掉（用户已经换了数字或走了访客），
+    # 那时原令牌还得能用。前端真正采用新令牌之后，自己调 /api/auth/logout 吊销旧的。
     return {**account(uid), "token": store.create_session(uid, SESSION_TTL),
             "created": created, "bound": bound, "left_guest": bool(guest_uid and guest_uid != uid)}
 
@@ -421,10 +476,14 @@ def _on_message(msg: dict[str, str]) -> str | None:
     digits = re.sub(r"\D", "", unicodedata.normalize("NFKC", msg.get("Content", "")))
     if len(digits) != 6:
         return "要登录启研，把网页上显示的 6 位数字发过来就行。"
-    if store.wechat_claim_code(digits, openid):
-        return "登录成功，回到网页就好，网页会自己跳转。"
-    if not _allow(f"openid:{openid}", PER_OPENID_HOUR):
+    # 先查限额再去配：原来是配完才看限额，超限之后照样能一直猜，限额只换了一句提示。
+    # 只记发错的；发对了（包括微信超时重发同一条）不算次数。
+    key = f"openid:{openid}"
+    if _used_up(key, PER_OPENID_HOUR):
         return "发错的次数太多了，过一会儿再试。"
+    if store.wechat_claim_code(digits, openid, msg.get("MsgId", "")):
+        return "登录成功，回到网页就好，网页会自己跳转。"
+    _note(key)
     return "没找到这个数字。请看网页上显示的 6 位数字，5 分钟内有效。"
 
 
@@ -443,6 +502,8 @@ async def wechat_message(request: Request, signature: str = "", timestamp: str =
     安全模式下 parse 会核对签了密文的 msg_signature 并解密；明文模式只核 URL 签名，消息体是不可信的（只给本机调试）。"""
     if not wechat.check_signature(signature, timestamp, nonce):
         raise HTTPException(403, "签名不对")
+    if not wechat.configured():  # 只设了 Token、没开安全模式：消息体没签名，不收
+        raise HTTPException(403, "公众号要用安全模式（设 WECHAT_AES_KEY）")
     body = await request.body()
     try:
         msg = wechat.parse(body, msg_signature=msg_signature, timestamp=timestamp, nonce=nonce)
@@ -462,7 +523,7 @@ def wechat_dev_send(req: DevSendReq):
     if not _dev():
         raise HTTPException(404, "Not Found")
     return {"reply": _on_message({"FromUserName": req.openid, "ToUserName": "dev", "MsgType": "text",
-                                  "Content": req.code})}
+                                  "Content": req.code, "MsgId": "dev-" + secrets.token_hex(8)})}
 
 
 @router.post("/api/auth/legacy")

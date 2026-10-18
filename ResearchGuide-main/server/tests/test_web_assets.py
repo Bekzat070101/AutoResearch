@@ -430,7 +430,7 @@ def test_privacy_export_and_sidebar_copy():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     html = (WEB / "index.html").read_text(encoding="utf-8")
     assert "function privacyBox" in js
-    assert "consent.checked" in js
+    assert "consent.checked" in js or "consent.ok()" in js  # 本分支登录页用 consentRow().ok() 把关
     assert js.count("PRIVACY_HTML") >= 2
     assert "/api/me/export" in js
     assert 'id="llmPill"' in html and "我的 DeepSeek" in html

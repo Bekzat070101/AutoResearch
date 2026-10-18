@@ -24,6 +24,13 @@ POOL = [
     "我大二，想试试 AI，但 Python 只会抄",
     "本周只有十分钟",
     "我不是不喜欢 AI，只是这次不想写模型",
+    # 下面几句给「值要撑得住」：短值也得在学生原话里有着落（Codex 第十一轮），夹具里的值要有对应的原话
+    "我对机器学习有兴趣，也关心注意力",
+    "其实只想了解经济学",
+    "我还是大一",
+    "跟着教程跑过几遍",
+    "其实更想学数学",
+    "我在做选课数据大作业",
 ]
 
 
@@ -134,7 +141,7 @@ def test_retract_does_not_need_affects():
     """retract/support 是对已有事实的操作，不要求重新举证。"""
     uid = make_user()
     acc, _ = memory.apply_ops(uid, memory.validate_ops(
-        uid, ops(op("add", "interest:ml", "对机器学习感兴趣", "想试试 AI")), POOL)[0], "")
+        uid, ops(op("add", "interest:ml", "对机器学习感兴趣", "我对机器学习有兴趣")), POOL)[0], "")
     fid = acc[0]["id"]
     raw = {"op": "retract", "key": "interest:ml", "value": "",
            "evidence_quote": "不是不喜欢 AI", "target_fact_id": fid}
@@ -443,20 +450,22 @@ def test_slug_allows_hyphen_and_dot():
     """模型很自然会写 interest:machine-learning，这类 key 必须放行——
     否则丢的是用户真实说的话，不是垃圾数据。"""
     uid = make_user()
-    for key in ("interest:machine-learning", "goal:phd.app", "capability:python_3"):
-        acc, rej = memory.validate_ops(uid, ops(op("add", key, "x", "我大二")), POOL)
+    # 能力的引文得是能力：「想试试 AI」撑不住 capability「AI」（结构化闸门之后），这里换成原话里真说过的
+    for key, value, quote in (("interest:machine-learning", "AI", "想试试 AI"), ("goal:phd.app", "AI", "想试试 AI"),
+                              ("capability:python_3", "Python 只会抄", "Python 只会抄")):
+        acc, rej = memory.validate_ops(uid, ops(op("add", key, value, quote)), POOL)
         assert len(acc) == 1, f"{key} 应被接受，实际 {rej}"
     # 中文 slug 要放行：模型写 current:选课数据大作业 是很自然的，
     # 只放行 [a-z0-9_] 会把真实信息整条丢掉。
-    acc, rej = memory.validate_ops(uid, ops(op("add", "current:选课数据大作业", "在做这个大作业",
-                                               "我大二")), POOL)
+    acc, rej = memory.validate_ops(uid, ops(op("add", "current:选课数据大作业", "在做选课数据大作业",
+                                               "我在做选课数据大作业")), POOL)  # 原来拿「我大二」当证据，只因为都有个「大」
     assert len(acc) == 1, f"中文 slug 应被接受，实际 {rej}"
     # 仍然挡住标点、超长、以及规范化后为空的
     for bad in ("interest:bad!", "interest:" + "x" * 41, "interest:___"):
         acc, _ = memory.validate_ops(uid, ops(op("add", bad, "x", "我大二")), POOL)
         assert acc == [], f"{bad} 不该被接受"
     # 首尾分隔符不算错：规范化会把它削掉，而不是把整条信息拒掉
-    acc, _ = memory.validate_ops(uid, ops(op("add", "interest:-leading", "x", "我大二")), POOL)
+    acc, _ = memory.validate_ops(uid, ops(op("add", "interest:-leading", "AI", "想试试 AI")), POOL)
     assert [a["key"] for a in acc] == ["interest:leading"]
 
 
@@ -482,7 +491,7 @@ def test_model_cannot_claim_behavior_source():
     """模型自称 behavior 会被降级为 declared，confidence 随之下降。"""
     uid = make_user()
     acc, _ = memory.validate_ops(uid, ops(
-        op("add", "capability:python", "跟着教程跑过", "Python 只会抄", source="behavior")), POOL)
+        op("add", "capability:python", "跟着教程跑过", "跟着教程跑过几遍", source="behavior")), POOL)
     assert len(acc) == 1
     assert acc[0]["source"] == "declared"
     assert acc[0]["confidence"] == pytest.approx(0.6)
@@ -500,7 +509,7 @@ def test_mastery_claim_without_behavior_is_flagged():
 def test_category_comes_from_registry_not_model():
     uid = make_user()
     acc, _ = memory.validate_ops(uid, ops(
-        {**op("add", "interest:x", "关心注意力", "想试试 AI"), "category": "background"}), POOL)
+        {**op("add", "interest:x", "关心注意力", "也关心注意力"), "category": "background"}), POOL)
     assert acc[0]["category"] == "interest"
 
 
@@ -519,8 +528,9 @@ def test_apply_writes_fact_and_revision():
 def test_direction_is_exclusive():
     """方向互斥：选新方向后旧方向自动失效，M3 的分歧从根上消失。"""
     uid = make_user()
-    for code in ("ai", "math"):
-        acc, _ = memory.validate_ops(uid, ops(op("add", f"direction:{code}", code, "想试试 AI")), POOL)
+    # 值要有原话撑着：原来 direction:math 拿「想试试 AI」当证据，只因为 math 和 AI 都有字母 a
+    for code, value, quote in (("ai", "AI", "想试试 AI"), ("math", "数学", "其实更想学数学")):
+        acc, _ = memory.validate_ops(uid, ops(op("add", f"direction:{code}", value, quote)), POOL)
         memory.apply_ops(uid, acc, "d1")
 
     all_dirs = {f.key: f.status for f in store.list_facts(uid) if f.key.startswith("direction:")}
@@ -532,7 +542,7 @@ def test_direction_is_exclusive():
 
 def test_single_cardinality_key_supersedes_old_value():
     uid = make_user()
-    acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大一", "我大二")), POOL)
+    acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大一", "我还是大一")), POOL)
     memory.apply_ops(uid, acc, "d1")
     acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大二", "我大二")), POOL)
     a2, changed = memory.apply_ops(uid, acc, "d2")
@@ -542,12 +552,12 @@ def test_single_cardinality_key_supersedes_old_value():
 
 def test_replace_and_retract_keep_history():
     uid = make_user()
-    acc, _ = memory.validate_ops(uid, ops(op("add", "interest:ml", "对机器学习有兴趣", "想试试 AI")), POOL)
+    acc, _ = memory.validate_ops(uid, ops(op("add", "interest:ml", "对机器学习有兴趣", "我对机器学习有兴趣")), POOL)
     added, _ = memory.apply_ops(uid, acc, "d1")
     fid = added[0]["id"]
 
     acc, _ = memory.validate_ops(uid, ops(
-        op("replace", "interest:ml", "其实只想了解经济学", "我不是不喜欢 AI", target_fact_id=fid)), POOL)
+        op("replace", "interest:ml", "其实只想了解经济学", "其实只想了解经济学", target_fact_id=fid)), POOL)
     _, changed = memory.apply_ops(uid, acc, "d2")
     assert changed[0]["old_value"] == "对机器学习有兴趣"
     assert store.get_fact(fid).value == "其实只想了解经济学"
@@ -571,7 +581,7 @@ def test_replace_target_must_belong_to_profile():
 def test_duplicate_submission_does_not_duplicate_facts():
     """同一轮重试不应把同一条记忆写两遍（幂等由 key 基数保证）。"""
     uid = make_user()
-    o = ops(op("add", "interest:attention", "关心注意力", "想试试 AI"))
+    o = ops(op("add", "interest:attention", "关心注意力", "也关心注意力"))
     for _ in range(3):
         acc, _ = memory.validate_ops(uid, o, POOL)
         memory.apply_ops(uid, acc, "d1")

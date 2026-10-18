@@ -2,7 +2,7 @@
 """在线备份 SQLite 库：服务不用停，拷一份一致的快照，按时间命名，只留最近几天。
 
 用法（服务器上每天跑一次，比如 cron `0 4 * * *`）：
-  python tools/backup_db.py                          # 库：$QIYAN_DB，没设就是 server/data/demo.db；备份放在库旁边的 backups/
+  python tools/backup_db.py                          # 库：$QIYAN_DB（环境变量或 .env），没设就是 server/data/demo.db；备份放在库旁边的 backups/
   python tools/backup_db.py --out /data/backups --keep 7
   docker compose exec qiyan python tools/backup_db.py --out /data/backups
 
@@ -17,6 +17,9 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
+import envfile  # noqa: E402,F401  和服务读同一份 .env：.env 里写的 QIYAN_DB 备份脚本也要认
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "server" / "data" / "demo.db"
 PREFIX = "qiyan-"

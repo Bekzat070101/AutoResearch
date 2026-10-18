@@ -10,8 +10,10 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import auth
@@ -123,7 +125,12 @@ def _get_oss(name: str) -> bytes | None:
 @router.post("/api/admin/backup")
 def backup(request: Request):
     _admin(request)
-    return make_backup()
+    try:
+        return make_backup()
+    except HTTPException as exc:
+        if exc.status_code != 502:
+            raise
+        return JSONResponse(status_code=502, content={"ok": False, "detail": exc.detail})
 
 
 class RestoreReq(BaseModel):
@@ -153,38 +160,64 @@ def restore(request: Request, object: str = "", req: RestoreReq | None = None):
         src.write_bytes(blob)
     raw = gzip.decompress(_aes(src.read_bytes(), key, False))
     try:
-        install_restored_db(raw)
+        pending = install_restored_db(raw)
     except OSError as exc:
         raise HTTPException(500, f"换库失败：{exc}") from exc
+    if pending:
+        return {"ok": True, "object": name, "cleanup_pending": pending,
+                "warning": "恢复已换入；WAL/SHM 清理待重试"}
     return {"ok": True, "object": name}
 
 
-def install_restored_db(raw: bytes) -> None:
-    """把恢复包写到目标同目录临时文件，校验后再 os.replace。失败保留原库。"""
+_BUSY = "数据库仍在使用，请稍后重试恢复"
+
+
+def install_restored_db(raw: bytes) -> list[str]:
+    """恢复包写到目标同目录唯一 stage，校验后在恢复闸内 os.replace。失败保留原库；返回清理失败的 sidecar。"""
     target = Path(store.DB_PATH)
-    staging = target.with_name(target.name + ".incoming")
+    stage = target.with_name(f"{target.name}.incoming-{uuid4().hex}")
     try:
-        _write_restore_bytes(staging, raw)
-        conn = sqlite3.connect(str(staging))
+        _write_restore_bytes(stage, raw)
+        _check_integrity_and_close(stage)
         try:
-            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise HTTPException(500, "恢复包 integrity_check 失败")
-        finally:
-            conn.close()
-        with store._LOCK:
-            with store._conn() as c:
-                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            os.replace(staging, target)
-            for extra in (str(target) + "-wal", str(target) + "-shm"):
-                Path(extra).unlink(missing_ok=True)
-    except HTTPException:
-        staging.unlink(missing_ok=True)
-        raise
-    except OSError:
-        staging.unlink(missing_ok=True)
-        raise
+            deadline = time.monotonic() + 5
+            if not store._LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+                raise HTTPException(503, _BUSY)
+            try:
+                with store.restore_gate(timeout=max(0, deadline - time.monotonic())):
+                    with store._conn() as c:
+                        left_ms = max(0, int(1000 * (deadline - time.monotonic())))
+                        c.execute(f"PRAGMA busy_timeout={left_ms}")
+                        busy = c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+                    if busy:
+                        raise HTTPException(503, _BUSY)
+                    os.replace(stage, target)
+                    return _remove_sidecars_collect_errors(target)
+            finally:
+                store._LOCK.release()
+        except store.RestoreBusy as exc:
+            raise HTTPException(503, _BUSY) from exc
     finally:
-        staging.unlink(missing_ok=True)
+        stage.unlink(missing_ok=True)
+
+
+def _check_integrity_and_close(path: Path) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise HTTPException(500, "恢复包 integrity_check 失败")
+    finally:
+        conn.close()
+
+
+def _remove_sidecars_collect_errors(target: Path) -> list[str]:
+    pending: list[str] = []
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(target) + suffix).unlink(missing_ok=True)
+        except OSError:
+            pending.append(suffix)
+    return pending
 
 
 def _write_restore_bytes(path: Path, raw: bytes) -> None:
@@ -403,6 +436,7 @@ def rewrap(req: RewrapReq, request: Request):
     env_before = os.environ.get("QIYAN_SECRET")
     n = 0
     failed: list[str] = []
+    changed: list[str] = []
     with store._LOCK, store._conn() as c:
         rows = list(c.execute("SELECT user_id, kind, wrapped FROM user_secrets"))
     for r in rows:
@@ -410,18 +444,25 @@ def rewrap(req: RewrapReq, request: Request):
             plain = store.unwrap_secret(r["wrapped"], secret=old)
             new = store.wrap_secret(plain)
             with store._LOCK, store._conn() as c:
-                c.execute(
-                    "UPDATE user_secrets SET wrapped=?, key_id='v2' WHERE user_id=? AND kind=?",
-                    (new, r["user_id"], r["kind"]),
-                )
-            n += 1
+                hit = c.execute(
+                    "UPDATE user_secrets SET wrapped=?, key_id='v2' WHERE user_id=? AND kind=? AND wrapped=?",
+                    (new, r["user_id"], r["kind"], r["wrapped"]),
+                ).rowcount
         except Exception:
             failed.append(r["user_id"])
+            continue
+        if hit:
+            n += 1
+        else:
+            changed.append(r["user_id"])
     if os.environ.get("QIYAN_SECRET") != env_before:
         if env_before is None:
             os.environ.pop("QIYAN_SECRET", None)
         else:
             os.environ["QIYAN_SECRET"] = env_before
+    if changed:
+        raise HTTPException(409, {"ok": False, "code": "secret_changed", "changed": changed,
+                                  "rewrapped": n, "failed": failed})
     if failed:
         raise HTTPException(400, {"ok": False, "rewrapped": n, "failed": failed})
     return {"ok": True, "rewrapped": n}

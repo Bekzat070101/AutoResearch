@@ -179,6 +179,41 @@ def message(uid: str, msg: str) -> dict[str, Any]:
     return _turn(reply, nxt_def, state, facts)
 
 
+def advance(uid: str, msg: str) -> dict[str, Any] | None:
+    """模型不可用时给对话内核用：按规则抽取这一轮的回答、推进五轮问答，返回下一问和可点的选项。
+    不写消息（对话内核自己写），已经问完返回 None。
+    原来模型额度用完时，对话只会一遍遍说同一句「先看看你想往哪个方向走」，新同学卡在原地（Codex 复现）。"""
+    state = store.get_onboard_state(uid)
+    phase = state.get("phase") or ROUNDS[0]["id"]
+    if phase == "done":
+        return None
+    idx = _ROUND_INDEX.get(phase, 0)
+    round_def = ROUNDS[idx]
+    if msg.strip():
+        # 只用规则抽取：走到这里就是模型不可用（额度用完或刚刚连失败），不能再去调它（Codex 复现：又一次超时、又扣一笔）
+        _extract(uid, round_def, msg, use_model=False)
+    nxt = _TRANSITIONS.get(phase) or (ROUNDS[idx + 1]["id"] if idx + 1 < len(ROUNDS) else "done")
+    if nxt == "done":
+        store.set_onboard_state(uid, {**state, "phase": "done", "round_no": idx + 1})
+        return {"reply": "五个问题聊完了。刚才记下的几条在「核对」页，说得不对可以改；"
+                         "然后去「方向」页挑一个方向，我按它给你排第一件二十分钟的小事。",
+                "options": [], "done": True}
+    store.set_onboard_state(uid, {**state, "phase": nxt, "round_no": idx + 2})
+    nxt_def = ROUNDS[_ROUND_INDEX[nxt]]
+    return {"reply": f"{_ACK.get(phase, '')}{nxt_def['ask']}",
+            "options": [o["label"] for o in nxt_def["options"]], "done": False}
+
+
+def answers_current_round(uid: str, msg: str) -> bool:
+    """这句话是不是在点当前这一问的选项。"""
+    state = store.get_onboard_state(uid)
+    phase = state.get("phase") or ROUNDS[0]["id"]
+    if phase == "done":
+        return False
+    round_def = ROUNDS[_ROUND_INDEX.get(phase, 0)]
+    return any(o["label"] == msg.strip() for o in round_def["options"])
+
+
 def _turn(reply: str, round_def: dict[str, Any], state: dict[str, Any],
           facts: list[UserFact] | None = None) -> dict[str, Any]:
     return {
@@ -191,7 +226,7 @@ def _turn(reply: str, round_def: dict[str, Any], state: dict[str, Any],
     }
 
 
-def _extract(uid: str, round_def: dict[str, Any], msg: str) -> list[UserFact]:
+def _extract(uid: str, round_def: dict[str, Any], msg: str, use_model: bool = True) -> list[UserFact]:
     """W0 规则抽取：命中选项 tag → 预设事实；自由文本 → declared 原文事实。"""
     matched = next((o for o in round_def["options"] if o["label"] == msg), None)
     evidence = [{"type": "onboard_message", "round": round_def["id"], "quote": msg}]
@@ -201,7 +236,7 @@ def _extract(uid: str, round_def: dict[str, Any], msg: str) -> list[UserFact]:
         out.append(UserFact(user_id=uid, category=cat, key=key, value=value,
                             confidence=conf, source=source, evidence=evidence, status="draft"))
     else:
-        fact = _extract_free_text(uid, round_def, msg, evidence)
+        fact = _extract_free_text(uid, round_def, msg, evidence, use_model)
         out.append(fact)
     for f in out:
         store.add_fact(f)
@@ -228,18 +263,22 @@ def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False,
     text = llm.chat(system, user, temperature=0.5, timeout=20, uid=uid)
     if not text:
         return fallback
-    if not closing and next_ask not in text:
-        text = text.rstrip("。") + "。" + next_ask
-    return text[:240]
+    if closing or (next_ask in text and len(text) <= 240):
+        return text[:240]
+    # 只截模型那段、给下一问留位置：原来接上问题再整段截 240 字，模型话一长问题被截掉，存下的消息里没有问题（Codex 复现）
+    head = text.split(next_ask, 1)[0]
+    return head[:240 - len(next_ask) - 1].rstrip("。") + "。" + next_ask
 
 
-def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: list) -> UserFact:
+def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: list, use_model: bool = True) -> UserFact:
     category = _guess_category(round_def["id"])
     fallback = UserFact(
         user_id=uid, category=category, key=f"raw:{round_def['id']}",
         value=f"自述：「{msg[:80]}」", confidence=0.6, source="declared",
         evidence=evidence, status="draft",
     )
+    if not use_model:
+        return fallback
     data = llm.chat_json(
         "把学生的自述归纳成一条可核对的事实。category 只能是 background/interest/capability/preference。"
         "value 必须能在原话里找到依据，不要脑补。",
