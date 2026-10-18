@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 第三轮实施令第四批：Codex 第六轮复核指出的 2 处
+
+- 变更内容：Codex 第六轮确认 R5-01 的 P0 跨画像覆盖已修、R5-02 符合，剩两个 P2。R6-01：`dirAwait` 在请求 fulfilled 与 rejected 之后都校验上下文（`try { return await run(); } finally { c.check(); }`），`saveTrail` 的上下文模式校验完成并重新抛出 `STALE_DIR`，`addMyDirection` 不再在重新读取前读旧 `S.myDirs`；失效操作静默结束，零新增请求/状态写入/绘制/提示，当前上下文的既有提示文案不变。R6-02：方向弹层的「添加到我的方向/取消添加/确认这个方向」、`renderCards/chooseFocus`、「我的」页的「移出」三处 UI 调用方在 await 后、任何状态修改/绘制/课程请求/导航前校验上下文，`STALE_DIR` 静默，其它错误照旧。新增 `test_frontend_state.py` 三个测试与 `verify_frontend_state.js` 场景 `direction-context-errors` / `direction-context-save` / `direction-context-ui`。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_frontend_state.py
+- 决策来源：陈浩文（按 Codex 第六轮实施令）
+- 登记人：陈浩文
+
 ## [2026-10-18] [FIX] 第三轮实施令第三批：Codex 第五轮复核指出的 2 处
 
 - 变更内容：Codex 第五轮在 bd20f1b 上复核第二批 12 条：10 条符合，R4-01 与 R4-12 各有一个新缺陷。R5-01（P0）：切画像时在途的方向操作（add/remove/choose 的 trail GET、prefs GET、choose POST）会在返回后把旧画像的 code/dir/tasks/dirs/sel 写进新画像；现在方向操作在开始时捕获 uid/token/pid/缓存键/纪元（`directionContext`），每次 await 前后校验（`dirAwait`），`portraitOp` 接纳切换/新建/删除以及 `setSession/clearSession` 都递增纪元，失效的操作抛 `STALE_DIR` 静默结束、零写入、不显示旧成功提示；`loadPrefs/putPrefs/saveTrail` 在写 S/缓存/发 PUT 前校验，`saveTrail` 用捕获的 pid/键。R5-02（P2）：`test_network_isolation.py` 的守卫只放行 `ipaddress.ip_address(...).is_loopback` 为真的数值地址，域名（含 localhost、`127.review.invalid`）、空值、通配地址一律记录并拒绝。新增 `test_frontend_state.py::test_direction_write_aborts_after_portrait_switch`（`verify_frontend_state.js` 场景 `direction-context`，六种在途时序 + 切走再切回 + 会话失效）、`test_network_isolation.py::test_guard_rejects_non_numeric_loopback_targets` 与子进程对照。
