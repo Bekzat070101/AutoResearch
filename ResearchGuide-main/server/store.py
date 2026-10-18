@@ -46,6 +46,14 @@ def ephemeral() -> bool:
     return not os.environ.get("QIYAN_DB") or not _own_mount(DB_PATH)
 
 
+def db_writable() -> bool:
+    """库所在目录存在且可写；库文件已存在时也要可写。"""
+    parent = DB_PATH.parent
+    if not parent.is_dir() or not os.access(parent, os.W_OK):
+        return False
+    return not DB_PATH.exists() or os.access(DB_PATH, os.W_OK)
+
+
 def _own_mount(path: Path) -> bool:
     """路径落在单独挂上来的盘（NAS、容器卷）上，不是实例自己的根盘：往上找第一个挂载点，是根目录就不算。"""
     p = Path(os.path.abspath(path)).parent
