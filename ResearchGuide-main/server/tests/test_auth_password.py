@@ -138,6 +138,9 @@ def test_signin_bucket_cardinality_is_bounded(client, monkeypatch):
         "username": "real_user", "password": "secret-ok", "nickname": "甲", "consent": True,
     })
     auth._HITS.clear()
+    for bad in ("x", "a" * 25, "全角名字"):  # 形状不对的用户名：401，而且不建桶
+        assert client.post("/api/auth/signin", json={"username": bad, "password": "nope-nope"}).status_code == 401
+    assert not [k for k in auth._HITS if k.startswith("signin-user:")]
     for _ in range(auth.SIGNIN_USER_LIMIT):
         client.post("/api/auth/signin", json={"username": "locked_one", "password": "nope-nope"})
     assert client.post("/api/auth/signin", json={"username": "locked_one", "password": "nope-nope"}).status_code == 429
