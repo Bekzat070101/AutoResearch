@@ -129,3 +129,33 @@ def test_signin_rate_limits_before_password(client, monkeypatch):
     assert third.status_code == 429
     ok_in_window = client.post("/api/auth/signin", json={"username": "rate_me", "password": "secret-ok"})
     assert ok_in_window.status_code == 429
+
+
+def test_signin_bucket_cardinality_is_bounded(client, monkeypatch):
+    clock = [auth.time.time() + 10]
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    client.post("/api/auth/register", json={
+        "username": "real_user", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    for _ in range(auth.SIGNIN_USER_LIMIT):
+        client.post("/api/auth/signin", json={"username": "locked_one", "password": "nope-nope"})
+    assert client.post("/api/auth/signin", json={"username": "locked_one", "password": "nope-nope"}).status_code == 429
+    hashed = []
+    monkeypatch.setattr(store, "password_ok", lambda *a, **k: hashed.append(1) or False)
+    codes = []
+    for i in range(10020):
+        r = client.post("/api/auth/signin", json={"username": f"ghost_{i}", "password": "nope-nope"})
+        codes.append(r.status_code)
+    assert len(auth._HITS) <= 10000
+    assert codes[-1] == 429
+    assert hashed == []
+    assert client.post("/api/auth/signin", json={"username": "locked_one", "password": "nope-nope"}).status_code == 429
+    db = store.DB_PATH
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "DB_PATH", db)
+    clock[0] += 600
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    ok = client.post("/api/auth/signin", json={"username": "real_user", "password": "secret-ok"})
+    assert ok.status_code == 200, ok.text
+    assert len(auth._HITS) < 10000

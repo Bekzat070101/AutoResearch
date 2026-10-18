@@ -159,11 +159,26 @@ def _client_ip(request: Request) -> str | None:
         return None
 
 
-def _recent(key: str, now: float, window: float = 3600) -> list[float]:
-    """这个 key 在 window 秒内的记录（默认一小时）。调用方持有 _HITS_LOCK。"""
-    if len(_HITS) > 10000:  # 一小时内的才有用，旧的整体清掉
-        for k in [k for k, v in _HITS.items() if not v or now - v[-1] > 3600]:
-            del _HITS[k]
+_HITS_CAP = 10000
+_NEXT_SWEEP = [0.0]
+
+
+def _ttl(key: str) -> float:
+    return 600 if key.startswith("signin-user:") else 3600
+
+
+def _sweep_expired(now: float) -> None:
+    for k in [k for k, v in _HITS.items() if not v or now - v[-1] >= _ttl(k)]:
+        del _HITS[k]
+
+
+def _recent(key: str, now: float, window: float = 3600) -> list[float] | None:
+    """这个 key 在 window 秒内的记录；容量满且是新 key 时返回 None。调用方持有 _HITS_LOCK。"""
+    if now >= _NEXT_SWEEP[0]:
+        _sweep_expired(now)
+        _NEXT_SWEEP[0] = now + 1
+    if key not in _HITS and len(_HITS) >= _HITS_CAP:
+        return None
     hits = [t for t in _HITS.get(key, []) if now - t < window]
     _HITS[key] = hits
     return hits
@@ -174,7 +189,7 @@ def _allow(key: str, limit: int, window: float = 3600) -> bool:
     now = time.time()
     with _HITS_LOCK:
         hits = _recent(key, now, window)
-        if len(hits) >= limit:
+        if hits is None or len(hits) >= limit:
             return False
         hits.append(now)
     return True
@@ -183,14 +198,17 @@ def _allow(key: str, limit: int, window: float = 3600) -> bool:
 def _used_up(key: str, limit: int) -> bool:
     """只查不记。"""
     with _HITS_LOCK:
-        return len(_recent(key, time.time())) >= limit
+        hits = _recent(key, time.time())
+        return hits is None or len(hits) >= limit
 
 
 def _note(key: str) -> None:
     """只记不查。"""
     now = time.time()
     with _HITS_LOCK:
-        _recent(key, now).append(now)
+        hits = _recent(key, now)
+        if hits is not None:
+            hits.append(now)
 
 
 def _ip_allows(request: Request, kind: str) -> bool:
