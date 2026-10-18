@@ -114,3 +114,37 @@ def test_production_requires_remote_nas_and_postcheck(cfg, db, url, health, ok):
         with pytest.raises(SystemExit):
             run()
         assert written == []
+
+
+def _llm_ns(app_env, root_env):
+    import ast
+    src = (DEPLOY / "deploy_fc.py").read_text(encoding="utf-8")
+    ns = {
+        "__file__": str(DEPLOY / "deploy_fc.py"),
+        "DEFAULT_NAME": "qiyan",
+        "Path": Path,
+        "load_env": lambda *a, **k: dict(app_env if a else root_env),
+    }
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name in {"llm_settings", "llm_key", "_local_defaults"}:
+            exec(compile(ast.Module([node], []), "deploy_fc.py", "exec"), ns)
+    return ns
+
+
+def test_llm_settings_selects_one_complete_source():
+    ns = _llm_ns({"LLM_BASE_URL": "https://api.openai.com/v1", "LLM_MODEL": "gpt-x"},
+                 {"DEEPSEEK_API_KEY": "sk-root"})
+    got = ns["llm_settings"]()
+    assert got["key"] == "sk-root"
+    assert got["base_url"] == "https://api.deepseek.com/v1"
+    assert got["model"] == "deepseek-flash"
+    ns = _llm_ns({"DEEPSEEK_API_KEY": "sk-app"}, {})
+    assert ns["llm_settings"]()["key"] == "sk-app"
+    ns = _llm_ns({"LLM_API_KEY": "sk-app", "LLM_BASE_URL": "https://api.openai.com/v1", "LLM_MODEL": "gpt-x"},
+                 {"LLM_API_KEY": "sk-root", "LLM_MODEL": "deepseek-flash"})
+    got = ns["llm_settings"]()
+    assert (got["key"], got["base_url"], got["model"]) == ("sk-app", "https://api.openai.com/v1", "gpt-x")
+    ns = _llm_ns({"LLM_MODEL": "gpt-x"}, {"LLM_BASE_URL": "https://api.openai.com/v1"})
+    assert ns["llm_settings"]() is None
+    assert ns["llm_key"]() == ""
+    assert not [k for k in ns["_local_defaults"]("qiyan") if k.startswith("LLM_") or k == "DEEPSEEK_API_KEY"]

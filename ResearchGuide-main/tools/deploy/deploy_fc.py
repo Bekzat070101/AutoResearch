@@ -39,20 +39,22 @@ def write_state(rows: dict[str, str]) -> None:
     STATE.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
 
 
-def llm_settings() -> dict[str, str]:
+def llm_settings() -> dict[str, str] | None:
+    """app → root 取第一个有 key 的源，整组取值；两处都没 key 返回 None。"""
     app_env = load_env(Path(__file__).resolve().parents[2] / ".env")
     root_env = load_env()
-    key = (app_env.get("LLM_API_KEY") or root_env.get("DEEPSEEK_API_KEY")
-           or root_env.get("LLM_API_KEY") or "")
-    base = (app_env.get("LLM_BASE_URL") or root_env.get("LLM_BASE_URL")
-            or "https://api.deepseek.com/v1")
-    model = (app_env.get("LLM_MODEL") or root_env.get("LLM_MODEL") or "deepseek-flash")
-    effort = app_env.get("LLM_REASONING_EFFORT") or root_env.get("LLM_REASONING_EFFORT") or ""
-    return {"key": key, "base_url": base, "model": model, "effort": effort}
+    for src in (app_env, root_env):
+        key = src.get("LLM_API_KEY") or src.get("DEEPSEEK_API_KEY")
+        if key:
+            return {"key": key, "base_url": src.get("LLM_BASE_URL") or "https://api.deepseek.com/v1",
+                    "model": src.get("LLM_MODEL") or "deepseek-flash",
+                    "effort": src.get("LLM_REASONING_EFFORT") or ""}
+    return None
 
 
 def llm_key() -> str:
-    return llm_settings()["key"]
+    settings = llm_settings()
+    return settings["key"] if settings else ""
 
 
 def client(ak: str, sk: str, aid: str) -> Client:
@@ -90,11 +92,11 @@ def existing_function(cli: Client, name: str):
 
 def _local_defaults(name: str) -> dict[str, str]:
     settings = llm_settings()
-    env_vars = {
-        "LLM_BASE_URL": settings["base_url"],
-        "LLM_MODEL": settings["model"],
-        "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
-    }
+    env_vars = {"QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod"}
+    if settings is None:
+        return env_vars
+    env_vars["LLM_BASE_URL"] = settings["base_url"]
+    env_vars["LLM_MODEL"] = settings["model"]
     key = settings["key"]
     if key:
         env_vars["LLM_API_KEY"] = key
