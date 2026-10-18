@@ -51,7 +51,9 @@ function extract(src, name) {
   const RG_DIR = { byId: { "190.20": {}, "520.20": {}, "110.67": {} }, legacyDir: {} };
   const window = { RG_DIR };
   const FIELD_TREES = {};
-  const fns = ["loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
+  const ctxDecl = [/^const STALE_DIR\b.*$/m, /^let directionEpoch\b.*$/m, /^let portraitBusy\b.*$/m]
+    .map((re) => re.exec(appSrc)[0]).join("\n");
+  const fns = ctxDecl + "\n" + ["directionContext", "dirAwait", "loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
     "selectedDirs", "portraitDirsAdd", "readTrailForWrite", "addMyDirection"].map((n) => extract(appSrc, n)).join("\n");
   const fn = new Function("S", "api", "toast", "paintChrome", "useKit",
     "window", "RG_DIR", "FIELD_TREES", "localStorage",

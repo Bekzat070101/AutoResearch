@@ -201,7 +201,7 @@ function prefsEnv(remoteDirs) {
   const src = names.map((n) => extract(appSrc, n)).join("\n");
   const f = new Function("S", "api", "toast", "paintChrome", "useKit", "window", "RG_DIR", "FIELD_TREES",
     "localStorage", "setView", "dirTitle",
-    src + "; return {loadPrefs, trail, saveTrail, addMyDirection, removeMyDirection, chooseDirection};");
+    dirCtxSrc() + "\n" + src + "; return {loadPrefs, trail, saveTrail, addMyDirection, removeMyDirection, chooseDirection};");
   const fns = f(S, api, toast, () => {}, () => {}, window, RG_DIR, {}, ls, () => {}, (x) => x);
   return Object.assign({ store, calls, net, S, toasts, ls }, fns);
 }
@@ -399,6 +399,7 @@ async function retry() {
   if (which === "r4-dirs" || which === "all") await r4Dirs();
   if (which === "r4-boot" || which === "all") await r4Boot();
   if (which === "r4-retry" || which === "all") await r4Retry();
+  if (which === "direction-context" || which === "all") await directionCtx();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -466,7 +467,7 @@ async function r4Dirs() {
       "selectedDirs", "portraitDirsAdd", "readTrailForWrite", "addMyDirection", "removeMyDirection", "chooseDirection"];
     const f = new Function("S", "api", "toast", "paintChrome", "useKit", "window", "RG_DIR", "FIELD_TREES",
       "localStorage", "setView", "dirTitle",
-      r4Pick(names) + "; return {trail, addMyDirection, removeMyDirection, chooseDirection};");
+      dirCtxSrc() + "\n" + r4Pick(names) + "; return {trail, addMyDirection, removeMyDirection, chooseDirection};");
     return Object.assign(env, f(env.S, env.api, env.toast, () => {}, () => {}, env.window, env.RG_DIR, {}, env.ls, () => {}, (x) => x));
   };
   const J = JSON.stringify;
@@ -537,7 +538,7 @@ async function r4Boot() {
     const env = r4Env({ prefs: ["190.20", "110.67"], remote: c.remote, trailGetFail: c.fail, local: c.local, portraitId: "" });
     const names = ["loadPrefs", "trailStorageKey", "trail", "saveTrail", "pullTrail", "ensureSelKey", "adoptLegacyTrail", "ensurePortrait"];
     const fns = new Function("S", "api", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
-      r4Pick(names) + "; return {loadPrefs, ensurePortrait, trail};")(
+      dirCtxSrc() + "\n" + r4Pick(names) + "; return {loadPrefs, ensurePortrait, trail};")(
       env.S, env.api, () => {}, env.window, env.RG_DIR, {}, env.ls);
     const run = new Function("S", "api", "loadPrefs", "ensurePortrait", "localStorage",
       "return (async () => { let needConsent = false; " + block + " })();");
@@ -577,7 +578,7 @@ async function r4Retry() {
       "ensureSelKey", "pullTrail", "portraitSection"];
     const fns = new Function("S", "api", "toast", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
       "document", "setView", "dirTitle", "paintChrome", "portraitOp", "removeMyDirection", "ensurePortrait", "enterApp",
-      r4Pick(names) + "; return {loadPrefs, portraitSection, trail};")(
+      dirCtxSrc() + "\n" + r4Pick(names) + "; return {loadPrefs, portraitSection, trail};")(
       env.S, env.api, env.toast, () => {}, env.window, env.RG_DIR, {}, env.ls,
       document, (v) => env.views.push(v), (x) => "T" + x, () => {}, () => {}, () => {}, () => {}, () => {});
     return Object.assign(env, fns);
@@ -615,5 +616,127 @@ async function r4Retry() {
     const box = await env.portraitSection();
     check(texts(box).some((x) => String(x).includes("T110.67")), "未加载时已确认的 trail 仍展示", J(texts(box)));
     check(!texts(box).some((x) => String(x).includes("这份画像还没有加方向")), "未加载时不显示空收藏结论");
+  }
+}
+
+/* ===================== R5-01 方向操作绑定会话/画像纪元（第五轮，独立区块） ===================== */
+function dirCtxSrc() {
+  const decl = [/^const STALE_DIR\b.*$/m, /^let directionEpoch\b.*$/m, /^let portraitBusy\b.*$/m]
+    .map((re) => (re.exec(appSrc) || [""])[0]).join("\n");
+  return decl + "\n" + r4Pick(["directionContext", "dirAwait"]);
+}
+
+function r5Env(holdOn) {
+  const RG_DIR = r4LoadDir();
+  const window = { RG_DIR, confirm: () => true };
+  const A = { code: "psy", dir: "190.20", dirs: ["190.20"], sel: ["190.20"], tasks: { a: { note: "A keep" } }, done: [], byDir: {} };
+  const B = { code: "stat", dir: "110.67", dirs: ["190.20", "110.67"], sel: ["110.67"], tasks: { b: { note: "B keep" } }, done: [], byDir: {} };
+  const C = (x) => JSON.parse(JSON.stringify(x));
+  const store = { active: "p1", trails: { p1: C(A), p2: C(B) }, prefs: { directions: ["190.20"] } };
+  const writes = [];
+  const gate = hold();
+  const st = { held: false };
+  const api = async (m, url, body) => {
+    if (m !== "GET") writes.push({ m, url, body: C(body || {}) });
+    const match = holdOn && !st.held && holdOn(m, url);
+    if (match) { st.held = true; await gate.p; }
+    if (url === "/api/me/prefs" && m === "GET") return C(store.prefs);
+    if (url === "/api/me/prefs" && m === "PUT") { if (body.directions) store.prefs.directions = body.directions.slice(); return C(store.prefs); }
+    const tm = /^\/api\/projects\/(p1|p2)\/trail$/.exec(url);
+    if (tm && m === "GET") return C(store.trails[tm[1]]);
+    if (tm && m === "PUT") { store.trails[tm[1]] = C(body.data); return {}; }
+    if (url === "/api/directions/choose") return {};
+    if (url === "/api/portraits/activate") { store.active = body.id; return list(); }
+    if (url === "/api/portraits?uid=u1") return list();
+    throw new Error("未预期的请求 " + m + " " + url);
+  };
+  const list = () => ({ portraits: ["p1", "p2"].map((id, i) => ({
+    id, active: store.active === id, name: "", label: i ? "画像二" : "画像一", default_label: "", custom: false, dirs: [], sel: [] })) });
+  const toasts = [];
+  const toast = (t) => toasts.push(t);
+  const ls = memStorage();
+  ls.setItem("rg_trail_u1_p1", JSON.stringify(A));
+  ls.setItem("rg_trail_owner_u1", "p1");
+  const S = { myDirs: ["190.20"], uid: "u1", token: "t", portraitId: "p1", portraitName: "", mePortrait: "p2", view: "me" };
+  const names = ["el", "esc", "loadPrefs", "putPrefs", "trailStorageKey", "trail", "saveTrail", "selectedDirs",
+    "portraitDirsAdd", "readTrailForWrite", "addMyDirection", "removeMyDirection", "chooseDirection",
+    "ensureSelKey", "pullTrail", "portraitOp", "portraitSection", "clearLocalDrafts", "clearSession"];
+  const fns = new Function("S", "api", "toast", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
+    "document", "setView", "dirTitle", "paintChrome", "ensurePortrait", "enterApp",
+    dirCtxSrc() + "\n" + r4Pick(names) +
+    "; return {addMyDirection, removeMyDirection, chooseDirection, portraitSection, clearSession};")(
+    S, api, toast, () => {}, window, RG_DIR, {}, ls, r4Dom(), () => {}, (x) => x, () => {}, async () => {}, () => {});
+  return Object.assign({ A, B, store, writes, gate, st, toasts, ls, S }, fns);
+}
+
+async function r5Swap(env) {
+  const box = await env.portraitSection();
+  const btn = r4Walk(box).find((n) => n.tag === "button" && n.innerHTML === "更换到该画像");
+  if (!btn || !btn.onclick) return false;
+  await btn.onclick();
+  return true;
+}
+
+async function directionCtx() {
+  console.log("=== R5-01 切画像后旧方向操作静默作废 ===");
+  const J = JSON.stringify;
+  const holds = {
+    trail: (m, url) => m === "GET" && url === "/api/projects/p1/trail",
+    prefs: (m, url) => m === "GET" && url === "/api/me/prefs",
+    choose: (m, url) => m === "POST" && url === "/api/directions/choose",
+  };
+  const run = (env, op) => (op === "add" ? env.addMyDirection("520.20")
+    : op === "choose" ? env.chooseDirection("520.20") : env.removeMyDirection("190.20"));
+  const waitHeld = async (env) => { for (let i = 0; i < 100 && !env.st.held; i++) await tick(); return env.st.held; };
+  const cases = [["add", "trail"], ["remove", "trail"], ["choose", "trail"], ["add", "prefs"], ["remove", "prefs"], ["choose", "choose"]];
+  for (const [op, h] of cases) {
+    const name = `${op} 挂起 ${h}`;
+    const env = r5Env(holds[h]);
+    const p = run(env, op);
+    check(await waitHeld(env), `${name}: 请求已挂起`);
+    check(await r5Swap(env), `${name}: 点了真实「更换到该画像」`);
+    const cache2 = () => JSON.parse(env.ls.getItem("rg_trail_u1_p2") || "null");
+    check(env.S.portraitId === "p2" && env.store.active === "p2" && J(cache2()) === J(env.B) && J(env.store.trails.p2) === J(env.B),
+      `${name}: p2 已正确加载`, J({ pid: env.S.portraitId, cache: cache2() }));
+    const w0 = env.writes.length, t0 = env.toasts.length;
+    env.gate.open();
+    await p.catch((e) => { check(false, `${name}: 旧操作不抛错`, String(e)); });
+    await tick();
+    check(J(env.store.trails.p2) === J(env.B), `${name}: p2 远端每个字段不变`, J(env.store.trails.p2));
+    check(J(cache2()) === J(env.B), `${name}: p2 缓存每个字段不变`, J(cache2()));
+    check(env.writes.length === w0, `${name}: 放行后零 POST/PUT`, J(env.writes.slice(w0)));
+    check(env.toasts.length === t0, `${name}: 无旧操作提示`, J(env.toasts.slice(t0)));
+  }
+  // 纪元对照一：切走再切回 p1，旧操作仍作废
+  {
+    const env = r5Env(holds.trail);
+    const p = env.addMyDirection("520.20");
+    check(await waitHeld(env), "切回 p1: 请求已挂起");
+    check(await r5Swap(env), "切回 p1: 先换到 p2");
+    env.S.mePortrait = "p1";
+    check(await r5Swap(env), "切回 p1: 再换回 p1");
+    const cache1 = () => JSON.parse(env.ls.getItem("rg_trail_u1_p1") || "null");
+    check(env.S.portraitId === "p1" && J(cache1()) === J(env.A), "切回 p1: p1 已加载", J(cache1()));
+    const w0 = env.writes.length, t0 = env.toasts.length;
+    env.gate.open();
+    await p.catch((e) => { check(false, "切回 p1: 旧操作不抛错", String(e)); });
+    await tick();
+    check(J(env.store.trails.p1) === J(env.A) && J(cache1()) === J(env.A), "切回 p1: p1 远端/缓存不变", J(env.store.trails.p1));
+    check(env.writes.length === w0, "切回 p1: 放行后零 POST/PUT", J(env.writes.slice(w0)));
+    check(env.toasts.length === t0, "切回 p1: 无旧操作提示", J(env.toasts.slice(t0)));
+  }
+  // 纪元对照二：会话失效（clearSession）
+  {
+    const env = r5Env(holds.trail);
+    const p = env.addMyDirection("520.20");
+    check(await waitHeld(env), "clearSession: 请求已挂起");
+    env.clearSession();
+    const w0 = env.writes.length, t0 = env.toasts.length;
+    env.gate.open();
+    await p.catch((e) => { check(false, "clearSession: 旧操作不抛错", String(e)); });
+    await tick();
+    check(J(env.store.trails.p1) === J(env.A) && J(env.store.prefs.directions) === J(["190.20"]), "clearSession: 远端不变", J(env.store));
+    check(env.writes.length === w0, "clearSession: 放行后零 POST/PUT", J(env.writes.slice(w0)));
+    check(env.toasts.length === t0, "clearSession: 无旧操作提示", J(env.toasts.slice(t0)));
   }
 }
