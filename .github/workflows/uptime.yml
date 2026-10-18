@@ -35,21 +35,25 @@ jobs:
           import json, os, re, sys
           health = json.load(open("/tmp/qiyan-health.json", encoding="utf-8"))
           html = open("/tmp/qiyan-pages.html", encoding="utf-8", errors="replace").read()
-          ephemeral = bool((health.get("db") or {}).get("ephemeral"))
+          db = health.get("db") or {}
+          ephemeral = db.get("ephemeral") if isinstance(db, dict) else None
           build = str((health.get("checks") or {}).get("build") or "")
-          m = re.search(r"界面版本\s*<b>(w\d+)</b>", html)
-          pages = m.group(1) if m else ""
+          stamp = re.search(r"界面版本\s*<b>([^<]*)</b>", html)
+          pages = stamp.group(1) if stamp else ""
           print(f"ephemeral={ephemeral} pages={pages} api_build={build}")
           print(f"::notice::ephemeral={ephemeral} pages={pages} api_build={build}")
-          if not pages:
-              sys.exit("Pages 版本戳缺失")
-          if not build:
-              sys.exit("API 版本戳缺失")
-          if pages != build:
-              sys.exit(f"Pages {pages} ≠ API {build}")
+          WN = r"(?<!\w)w\d+(?!\w)"
+          api_w = re.findall(WN, build)
+          pages_w = re.findall(WN, pages)
+          if len(api_w) != 1:
+              sys.exit("API 版本戳缺失或有歧义")
+          if len(pages_w) != 1:
+              sys.exit("Pages 版本戳缺失或有歧义")
+          if api_w[0] != pages_w[0]:
+              sys.exit(f"Pages 与 API 版本不一致：Pages {pages_w[0]} ≠ API {api_w[0]}")
           require = (os.environ.get("QIYAN_REQUIRE_PERSISTENT") or "").strip() in ("1", "true", "TRUE", "yes")
-          if require and ephemeral:
-              sys.exit("QIYAN_REQUIRE_PERSISTENT：生产库仍是 ephemeral")
+          if require and ephemeral is not False:
+              sys.exit("生产持久化状态缺失或不是 false")
           PY
       - name: Alert
         if: failure()
