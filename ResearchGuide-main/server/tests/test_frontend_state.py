@@ -23,3 +23,19 @@ def test_prefs_reload_failure_blocks_replace():
 
 def test_boot_restores_directions():
     _run("boot")
+
+
+def test_draft_revision_never_regresses():
+    _run("rev")
+
+
+def test_legacy_empty_draft_preserves_failed_clear():
+    _run("legacy")
+
+
+def test_conflict_action_survives_task_reopen():
+    _run("reopen")
+
+
+def test_draft_failure_shows_retry_notice():
+    _run("retry")

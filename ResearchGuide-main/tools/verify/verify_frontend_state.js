@@ -60,11 +60,12 @@ function draftClient(srv, ls) {
   const localStorage = ls || memStorage();
   const fns = ["readDraft", "readDraftMeta", "writeDraftMeta", "writeDraft", "hydrateDraft"]
     .map((n) => extract(appSrc, n)).join("\n");
-  const toast = () => {};
-  const document = { activeElement: null, createElement: () => ({ remove() {}, set textContent(v) { this.text = v; } }) };
+  const toasts = [];
+  const toast = (t) => toasts.push(t);
+  const document = { activeElement: null, createElement: () => ({ removed: false, remove() { this.removed = true; }, set textContent(v) { this.text = v; } }) };
   const f = new Function("S", "api", "localStorage", "document", "toast",
     fns + "; return {readDraft, readDraftMeta, writeDraft, hydrateDraft};");
-  return Object.assign({ S, localStorage }, f(S, srv.api, localStorage, document, toast));
+  return Object.assign({ S, localStorage, toasts }, f(S, (m, u, b) => srv.api(m, u, b), localStorage, document, toast));
 }
 
 function hold() { let open; const p = new Promise((r) => { open = r; }); return { p, open }; }
@@ -266,11 +267,134 @@ async function boot() {
   check(S.kitId === "llm-eval", "kit_id 照常恢复", String(S.kitId));
 }
 
+/* ---------- R4-03/04/05/09 ---------- */
+function formTa(value) {
+  const inserted = [];
+  return { value, inserted, insertAdjacentElement: (_, el) => { inserted.push(el); return el; } };
+}
+
+async function rev() {
+  console.log("=== R4-03 GET 快照先于 ACK、重开后 ===");
+  {
+    const srv = draftServer();
+    await srv.api("PUT", "/api/tasks/t1/draft", { text: "server old", base_rev: 0 });
+    const c = draftClient(srv);
+    await c.hydrateDraft("t1", formTa(""));
+    const p = hold(); srv.putHold = p.p;
+    c.writeDraft("t1", "just typed and saved"); await tick();
+    const g = hold(); srv.getHold = g.p;
+    const ta = formTa("just typed and saved");
+    const h = c.hydrateDraft("t1", ta); await tick();
+    srv.getHold = null;
+    p.open(); await tick(); await tick();
+    g.open(); await h; await tick();
+    const m = c.readDraftMeta("t1");
+    check(ta.value === "just typed and saved" && c.readDraft("t1") === "just typed and saved", "旧 GET 快照不回退文本", ta.value + "/" + c.readDraft("t1"));
+    check(m.base_rev === 2 && m.dirty === false && m.edit_seq === 1, "base_rev 保持 2、dirty=false", JSON.stringify(m));
+  }
+  console.log("=== R4-03 旧 ACK 不降低较新 GET 版本 ===");
+  {
+    const srv = draftServer();
+    await srv.api("PUT", "/api/tasks/t1/draft", { text: "server old", base_rev: 0 });
+    const c = draftClient(srv);
+    await c.hydrateDraft("t1", formTa(""));
+    const inner = srv.api;
+    const ack = hold();
+    srv.api = async (m, u, b) => { const r = await inner(m, u, b); if (m === "PUT") await ack.p; return r; };
+    c.writeDraft("t1", "same"); await tick();
+    await inner("PUT", "/api/tasks/t1/draft", { text: "same", base_rev: 2 });
+    srv.api = inner;
+    const ta = formTa("same");
+    const h = c.hydrateDraft("t1", ta); await tick(); await tick();
+    const m1 = c.readDraftMeta("t1");
+    check(m1.base_rev === 3 && m1.dirty === false, "GET 确认同文本 rev3", JSON.stringify(m1));
+    ack.open(); await h; await tick();
+    const m = c.readDraftMeta("t1");
+    check(m.base_rev === 3 && m.dirty === false && m.edit_seq === 1 && c.readDraft("t1") === "same", "旧 ACK rev2 不把 base_rev 降到 2", JSON.stringify(m));
+  }
+}
+
+async function legacy() {
+  console.log("=== R4-04 旧格式清空失败 ===");
+  const srv = draftServer();
+  await srv.api("PUT", "/api/tasks/t1/draft", { text: "server old", base_rev: 0 });
+  const ls = memStorage();
+  ls.setItem("rg_draft_meta_u1_t1", JSON.stringify({ updated_at: "2030-01-01T00:00:00Z", dirty: true }));
+  const c = draftClient(srv, ls);
+  const m0 = c.readDraftMeta("t1");
+  check(c.readDraft("t1") === "" && m0.base_rev === 0 && m0.edit_seq === 0 && m0.dirty === true && m0.conflict === true, "迁移为空稿 dirty+conflict", JSON.stringify(m0));
+  const ta = formTa("");
+  const n0 = srv.puts.length;
+  await c.hydrateDraft("t1", ta);
+  check(ta.value === "" && c.readDraft("t1") === "" && srv.puts.length === n0, "旧稿不重新出现、不静默上传", ta.value);
+  const m1 = c.readDraftMeta("t1");
+  check(m1.dirty === true && m1.conflict === true, "dirty/conflict 保持 true", JSON.stringify(m1));
+  check(ta.inserted.length === 1 && ta.inserted[0].text === "用本地稿覆盖云端", "显示「用本地稿覆盖云端」");
+  if (ta.inserted[0] && ta.inserted[0].onclick) await ta.inserted[0].onclick();
+  const last = srv.puts[srv.puts.length - 1];
+  check(last && last.text === "" && last.base_rev === 1 && srv.text === "" && srv.rev === 2, "GET 最新 rev 后 CAS 清空", JSON.stringify(last));
+  check(c.readDraftMeta("t1").dirty === false, "成功后 dirty=false");
+}
+
+async function reopen() {
+  console.log("=== R4-05 重开冲突任务 ===");
+  {
+    const srv = draftServer();
+    const a = draftClient(srv), b = draftClient(srv);
+    await a.hydrateDraft("t1", formTa(""));
+    const ta1 = formTa("");
+    await b.hydrateDraft("t1", ta1);
+    await a.writeDraft("t1", "别处");
+    await b.writeDraft("t1", "本地");
+    check(ta1.inserted.length === 1, "首次冲突在旧表单显示按钮");
+    const ta2 = formTa("本地");
+    await b.hydrateDraft("t1", ta2);
+    check(ta1.inserted[0] && ta1.inserted[0].removed === true, "旧按钮引用被移除");
+    check(ta2.inserted.length === 1 && ta2.inserted[0].text === "用本地稿覆盖云端", "当前表单有且只有一个按钮", String(ta2.inserted.length));
+    if (ta2.inserted[0] && ta2.inserted[0].onclick) await ta2.inserted[0].onclick();
+    const m = b.readDraftMeta("t1");
+    check(srv.text === "本地" && m.dirty === false && m.conflict === false && ta2.inserted[0] && ta2.inserted[0].removed === true, "点新按钮 GET→CAS 成功并移除", JSON.stringify(m));
+  }
+  console.log("=== R4-05 在途 409 只挂当前表单 ===");
+  {
+    const srv = draftServer();
+    const a = draftClient(srv), b = draftClient(srv);
+    await a.hydrateDraft("t1", formTa(""));
+    const ta1 = formTa("");
+    await b.hydrateDraft("t1", ta1);
+    await a.writeDraft("t1", "别处");
+    const p = hold(); srv.putHold = p.p;
+    b.writeDraft("t1", "本地"); await tick();
+    const ta2 = formTa("本地");
+    const h = b.hydrateDraft("t1", ta2); await tick();
+    p.open(); await h; await tick();
+    check(ta1.inserted.length === 0 && ta2.inserted.length === 1, "迟到 409 只挂当前表单", ta1.inserted.length + "/" + ta2.inserted.length);
+  }
+}
+
+async function retry() {
+  console.log("=== R4-09 非 409 失败提示 ===");
+  const srv = draftServer();
+  const c = draftClient(srv);
+  await c.hydrateDraft("t1", formTa(""));
+  srv.putFail = true;
+  await c.writeDraft("t1", "unsaved");
+  check(c.toasts.includes("草稿未同步，联网后重试"), "显示「草稿未同步，联网后重试」", JSON.stringify(c.toasts));
+  check(c.readDraft("t1") === "unsaved" && c.readDraftMeta("t1").dirty === true, "本地稿与 dirty 保留");
+  srv.putFail = false;
+  await c.writeDraft("t1");
+  check(srv.text === "unsaved" && c.readDraftMeta("t1").dirty === false, "恢复后重试保存成功", srv.text);
+}
+
 (async () => {
   const which = process.argv[2] || "all";
   if (which === "drafts" || which === "all") await drafts();
   if (which === "prefs" || which === "all") await prefs();
   if (which === "boot" || which === "all") await boot();
+  if (which === "rev" || which === "all") await rev();
+  if (which === "legacy" || which === "all") await legacy();
+  if (which === "reopen" || which === "all") await reopen();
+  if (which === "retry" || which === "all") await retry();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
