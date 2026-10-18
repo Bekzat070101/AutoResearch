@@ -43,8 +43,8 @@ jobs:
           print(f"ephemeral={ephemeral} pages={pages} api_build={build}")
           print(f"::notice::ephemeral={ephemeral} pages={pages} api_build={build}")
           WN = r"(?<!\w)w\d+(?!\w)"
-          api_w = re.findall(WN, build)
-          pages_w = re.findall(WN, pages)
+          api_w = sorted(set(re.findall(WN, build)))
+          pages_w = sorted(set(re.findall(WN, pages)))
           if len(api_w) != 1:
               sys.exit("API 版本戳缺失或有歧义")
           if len(pages_w) != 1:

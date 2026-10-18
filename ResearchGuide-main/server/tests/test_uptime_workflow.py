@@ -58,3 +58,13 @@ def _page(stamp):
 def test_real_build_and_persistence_contract(monkeypatch, build, stamp, require, db, code):
     health = {"ok": True, "db": db, "checks": {"build": build}}
     assert _run(monkeypatch, health, _page(stamp), require) == code
+
+
+@pytest.mark.parametrize("build,stamp,code", [
+    ("abc1234 w84 w84", "w84", 0),
+    ("abc1234 w84", "w84 w84", 0),
+    ("abc1234 w84 w85", "w84", 1),
+])
+def test_repeated_same_token_is_one_unique_version(monkeypatch, build, stamp, code):
+    health = {"ok": True, "db": {"ephemeral": False}, "checks": {"build": build}}
+    assert _run(monkeypatch, health, _page(stamp)) == code
