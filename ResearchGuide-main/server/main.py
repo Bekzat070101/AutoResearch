@@ -944,6 +944,7 @@ def task_hint(tid: str, req: TaskHintReq):
 
 class DraftReq(BaseModel):
     text: str = ""
+    base_rev: int = 0
 
 
 class PrefsReq(BaseModel):
@@ -972,7 +973,10 @@ def task_draft_put(tid: str, req: DraftReq, request: Request):
         raise HTTPException(404, "task not found")
     if t.status == "done" and (req.text or "").strip():
         raise HTTPException(400, "已完成的作业不用再改草稿")  # 交完之后前端会把草稿清空（空串），这一笔要放行，不然库里留着旧草稿
-    return store.set_draft_row(uid, tid, req.text)
+    try:
+        return store.set_draft_row(uid, tid, req.text, req.base_rev)
+    except store.DraftConflict:
+        raise HTTPException(409, "草稿已在别处更新，本地稿已保留")
 
 
 def _prefs_out(raw: dict) -> dict:

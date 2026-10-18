@@ -79,3 +79,26 @@ def test_no_per_user_sqlite_file(tmp_path, monkeypatch):
     assert not list(store.DB_PATH.parent.glob("users/*"))
     assert store.get_draft(a["uid"], "t1") == "hello"
     assert store.get_draft(b["uid"], "t1") == "other"
+
+
+def test_draft_revision_cas_and_done_clear(client):
+    a = _reg(client, "user_cas")
+    t = workbench.generate_task(a["uid"], "ai", 1, title="极限")
+    url = f"/api/tasks/{t.id}/draft"
+    first = client.put(url, json={"text": "先到", "base_rev": 0}, headers=_h(a["token"]))
+    assert first.status_code == 200
+    assert first.json()["rev"] == 1 and first.json()["text"] == "先到"
+    second = client.put(url, json={"text": "后到", "base_rev": 0}, headers=_h(a["token"]))
+    assert second.status_code == 409
+    assert second.json()["detail"] == "草稿已在别处更新，本地稿已保留"
+    got = client.get(url, headers=_h(a["token"])).json()
+    assert got["text"] == "先到" and got["rev"] == 1 and got["updated_at"]
+
+    t.status = "done"
+    store.save_task(t)
+    cleared = client.put(url, json={"text": "", "base_rev": 1}, headers=_h(a["token"]))
+    assert cleared.status_code == 200
+    assert cleared.json()["rev"] == 2 and cleared.json()["text"] == ""
+    assert client.get(url, headers=_h(a["token"])).json()["rev"] == 2
+    again = client.put(url, json={"text": "再改", "base_rev": 2}, headers=_h(a["token"]))
+    assert again.status_code == 400

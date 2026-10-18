@@ -3809,47 +3809,100 @@ function readDraft(tid) {
   } catch (_) { return ""; }
 }
 function readDraftMeta(tid) {
-  try { return JSON.parse(localStorage.getItem(`rg_draft_meta_${S.uid}_${tid}`) || "{}"); } catch (_) { return {}; }
+  let m = null;
+  try { m = JSON.parse(localStorage.getItem(`rg_draft_meta_${S.uid}_${tid}`) || "null"); } catch (_) { m = null; }
+  if (m && typeof m === "object" && typeof m.base_rev === "number" && typeof m.edit_seq === "number") {
+    return { base_rev: m.base_rev, edit_seq: m.edit_seq, dirty: !!m.dirty, conflict: !!m.conflict };
+  }
+  // 升级前的本地稿没有 rev：当作未同步的冲突稿先展示，不静默上传（排序只认服务端 rev，客户端时钟不算数）
+  const legacy = !!readDraft(tid);
+  return { base_rev: 0, edit_seq: 0, dirty: legacy, conflict: legacy };
 }
 function writeDraftMeta(tid, meta) {
   try { localStorage.setItem(`rg_draft_meta_${S.uid}_${tid}`, JSON.stringify(meta || {})); } catch (_) { /* ignore */ }
 }
+/* 本地记录 {text, base_rev, edit_seq, dirty}；每任务最多一个 PUT 在途。
+   text 为 undefined 时只把 dirty 的本地稿推上去（hydrate、冲突按钮用）。 */
 function writeDraft(tid, text) {
-  const at = new Date().toISOString();
-  try {
-    if (text) localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text);
-    else { localStorage.removeItem(`rg_draft_${S.uid}_${tid}`); localStorage.removeItem("rg_draft_" + tid); }  // 清空时旧键一起删
-    writeDraftMeta(tid, { updated_at: at, dirty: true });
-  } catch (_) { /* 存不了就算了，不影响提交 */ }
-  if (S.token) {
-    api("PUT", `/api/tasks/${tid}/draft`, { text: text || "", updated_at: at }).then((r) => {
-      writeDraftMeta(tid, { updated_at: (r && r.updated_at) || at, dirty: false });
-    }).catch(() => {
-      writeDraftMeta(tid, { updated_at: at, dirty: true });
-    });
+  const sync = (S.draftSync = S.draftSync || {});
+  const st = sync[tid] || (sync[tid] = { flight: null, onConflict: null });
+  if (text !== undefined) {
+    const prev = readDraftMeta(tid);
+    try {
+      localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text || "");  // 空稿也存：清空也要同步上去
+      localStorage.removeItem("rg_draft_" + tid);
+    } catch (_) { /* 存不了就算了，不影响提交 */ }
+    writeDraftMeta(tid, { base_rev: prev.base_rev, edit_seq: prev.edit_seq + 1, dirty: true, conflict: prev.conflict });
   }
+  if (!S.token) return Promise.resolve();
+  if (st.flight) return st.flight;  // 在途那笔回来后会接着发最新稿
+  const run = async () => {
+    for (;;) {
+      const sent = readDraftMeta(tid);
+      if (!sent.dirty || sent.conflict) return;
+      let r;
+      try {
+        r = await api("PUT", `/api/tasks/${tid}/draft`, { text: readDraft(tid), base_rev: sent.base_rev });
+      } catch (e) {
+        if (e && e.status === 409) {
+          writeDraftMeta(tid, Object.assign(readDraftMeta(tid), { conflict: true }));
+          if (st.onConflict) st.onConflict();
+        }
+        return;  // 断网：dirty 留着，下次输入或打开再试
+      }
+      const cur = readDraftMeta(tid);
+      const rev = r && typeof r.rev === "number" ? r.rev : sent.base_rev + 1;
+      // 旧 ack 只推进 base_rev；这期间又改过就不清 dirty，接着发
+      writeDraftMeta(tid, { base_rev: rev, edit_seq: cur.edit_seq, dirty: cur.edit_seq !== sent.edit_seq, conflict: cur.conflict });
+      if (cur.edit_seq === sent.edit_seq) return;
+    }
+  };
+  st.flight = run().finally(() => { st.flight = null; });
+  return st.flight;
 }
 async function hydrateDraft(tid, ta) {
   if (!S.token) return;
-  const local = readDraft(tid);
-  const meta = readDraftMeta(tid);
-  const localAt = Date.parse(meta.updated_at || "") || 0;
-  try {
-    const r = await api("GET", `/api/tasks/${tid}/draft`);
-    const remoteAt = Date.parse(r.updated_at || "") || 0;
-    if (r.text && remoteAt > localAt) {
-      try { localStorage.setItem(`rg_draft_${S.uid}_${tid}`, r.text); } catch (_) { /* 存不了就只填进框里 */ }
-      writeDraftMeta(tid, { updated_at: r.updated_at, dirty: false });
-      if (ta && document.activeElement !== ta) ta.value = r.text;
-      else if (ta && !ta.value) ta.value = r.text;
-    } else if (local && (meta.dirty || !r.text)) {
+  const sync = (S.draftSync = S.draftSync || {});
+  const st = sync[tid] || (sync[tid] = { flight: null, onConflict: null });
+  const url = `/api/tasks/${tid}/draft`;
+  st.onConflict = () => {
+    if (!ta || st.btn || !document.createElement) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn ghost small";
+    b.textContent = "用本地稿覆盖云端";
+    b.title = "草稿已在别处更新，本地稿已保留";
+    b.onclick = async () => {
+      b.disabled = true;
       try {
-        const saved = await api("PUT", `/api/tasks/${tid}/draft`, { text: local, updated_at: meta.updated_at || new Date().toISOString() });
-        writeDraftMeta(tid, { updated_at: (saved && saved.updated_at) || meta.updated_at, dirty: false });
-      } catch (_) { /* 下次再试 */ }
+        const r = await api("GET", url);
+        const cur = readDraftMeta(tid);
+        writeDraftMeta(tid, { base_rev: r && typeof r.rev === "number" ? r.rev : 0, edit_seq: cur.edit_seq, dirty: true, conflict: false });
+        await writeDraft(tid);
+      } catch (_) { /* 断网：按钮留着再点 */ }
+      const after = readDraftMeta(tid);
+      if (after.conflict || after.dirty) { b.disabled = false; return; }
+      b.remove();
+      st.btn = null;
+    };
+    st.btn = b;
+    if (ta.insertAdjacentElement) ta.insertAdjacentElement("afterend", b);
+  };
+  const seq0 = readDraftMeta(tid).edit_seq;
+  let r;
+  try { r = await api("GET", url); } catch (_) { return; }  // 断网先用本地
+  const local = readDraftMeta(tid);
+  const text = (r && r.text) || "";
+  const rev = r && typeof r.rev === "number" ? r.rev : 0;
+  if (local.edit_seq === seq0) {  // GET 等待期间有编辑就不碰输入框
+    if (!local.dirty || readDraft(tid) === text) {
+      try { localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text); } catch (_) { /* 存不了就只填进框里 */ }
+      writeDraftMeta(tid, { base_rev: rev, edit_seq: local.edit_seq, dirty: false, conflict: false });
+      if (ta) ta.value = text;
     }
-    if (ta && !ta.value && readDraft(tid)) ta.value = readDraft(tid);
-  } catch (_) { /* 断网先用本地 */ }
+  }
+  if (readDraftMeta(tid).conflict) st.onConflict();
+  await writeDraft(tid);
 }
 
 function renderProjectsSoon() {

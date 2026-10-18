@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS drafts (
   user_id TEXT NOT NULL,
   task_id TEXT NOT NULL,
   text TEXT NOT NULL DEFAULT '',
+  rev INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_id, task_id)
 );
@@ -455,6 +456,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("user_secrets", "key_id", "ALTER TABLE user_secrets ADD COLUMN key_id TEXT NOT NULL DEFAULT ''"),
     # 画像自命名：空串表示还没起过名，展示层会退到「按方向起的默认名 / 画像N」
     ("portraits", "name", "ALTER TABLE portraits ADD COLUMN name TEXT NOT NULL DEFAULT ''"),
+    # 草稿版本：排序只认服务端单调 rev，客户端时钟不参与
+    ("drafts", "rev", "ALTER TABLE drafts ADD COLUMN rev INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
@@ -773,15 +776,21 @@ def set_prefs(uid: str, kit_id: str | None = None, extra: dict[str, Any] | None 
     return get_prefs(uid)
 
 
-def get_draft_row(uid: str, task_id: str) -> dict[str, str]:
+class DraftConflict(Exception):
+    def __init__(self, rev: int):
+        super().__init__(rev)
+        self.rev = rev
+
+
+def get_draft_row(uid: str, task_id: str) -> dict[str, Any]:
     with _conn() as c:
         row = c.execute(
-            "SELECT text, updated_at FROM drafts WHERE user_id=? AND task_id=?",
+            "SELECT text, rev, updated_at FROM drafts WHERE user_id=? AND task_id=?",
             (uid, task_id),
         ).fetchone()
     if not row:
-        return {"text": "", "updated_at": ""}
-    return {"text": row["text"] or "", "updated_at": row["updated_at"] or ""}
+        return {"text": "", "rev": 0, "updated_at": ""}
+    return {"text": row["text"] or "", "rev": int(row["rev"] or 0), "updated_at": row["updated_at"] or ""}
 
 
 def get_draft(uid: str, task_id: str) -> str:
@@ -789,23 +798,26 @@ def get_draft(uid: str, task_id: str) -> str:
 
 
 def set_draft(uid: str, task_id: str, text: str) -> str:
-    return set_draft_row(uid, task_id, text)["text"]
+    return set_draft_row(uid, task_id, text, get_draft_row(uid, task_id)["rev"])["text"]
 
 
-def set_draft_row(uid: str, task_id: str, text: str) -> dict[str, str]:
+def set_draft_row(uid: str, task_id: str, text: str, base_rev: int) -> dict[str, Any]:
+    """CAS：base_rev 等于当前 rev 才写，rev+1；清空也留一行 text=""（tombstone），rev 照样递增。"""
     text = text or ""
     if not text.strip():
-        with _LOCK, _conn() as c:
-            c.execute("DELETE FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id))
-        return {"text": "", "updated_at": ""}
+        text = ""
     stamp = now_iso()
     with _LOCK, _conn() as c:
+        old = c.execute("SELECT rev FROM drafts WHERE user_id=? AND task_id=?", (uid, task_id)).fetchone()
+        cur = int(old["rev"] or 0) if old else 0
+        if cur != int(base_rev):
+            raise DraftConflict(cur)
         c.execute(
-            "INSERT INTO drafts(user_id, task_id, text, updated_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
-            (uid, task_id, text, stamp),
+            "INSERT INTO drafts(user_id, task_id, text, rev, updated_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(user_id, task_id) DO UPDATE SET text=excluded.text, rev=excluded.rev, updated_at=excluded.updated_at",
+            (uid, task_id, text, cur + 1, stamp),
         )
-    return {"text": text, "updated_at": stamp}
+    return {"text": text, "rev": cur + 1, "updated_at": stamp}
 
 
 def get_trail(uid: str, project_id: str) -> dict[str, Any]:
