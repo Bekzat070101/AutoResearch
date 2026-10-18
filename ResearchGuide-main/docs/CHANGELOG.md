@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 第三轮实施令第三批：Codex 第五轮复核指出的 2 处
+
+- 变更内容：Codex 第五轮在 bd20f1b 上复核第二批 12 条：10 条符合，R4-01 与 R4-12 各有一个新缺陷。R5-01（P0）：切画像时在途的方向操作（add/remove/choose 的 trail GET、prefs GET、choose POST）会在返回后把旧画像的 code/dir/tasks/dirs/sel 写进新画像；现在方向操作在开始时捕获 uid/token/pid/缓存键/纪元（`directionContext`），每次 await 前后校验（`dirAwait`），`portraitOp` 接纳切换/新建/删除以及 `setSession/clearSession` 都递增纪元，失效的操作抛 `STALE_DIR` 静默结束、零写入、不显示旧成功提示；`loadPrefs/putPrefs/saveTrail` 在写 S/缓存/发 PUT 前校验，`saveTrail` 用捕获的 pid/键。R5-02（P2）：`test_network_isolation.py` 的守卫只放行 `ipaddress.ip_address(...).is_loopback` 为真的数值地址，域名（含 localhost、`127.review.invalid`）、空值、通配地址一律记录并拒绝。新增 `test_frontend_state.py::test_direction_write_aborts_after_portrait_switch`（`verify_frontend_state.js` 场景 `direction-context`，六种在途时序 + 切走再切回 + 会话失效）、`test_network_isolation.py::test_guard_rejects_non_numeric_loopback_targets` 与子进程对照。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_frontend_state.py、server/tests/test_network_isolation.py
+- 决策来源：陈浩文（按 Codex 第五轮实施令）
+- 登记人：陈浩文
+
 ## [2026-10-18] [FIX] 第三轮实施令第二批：Codex 第四轮复核指出的 12 处
 
 - 变更内容：Codex 第四轮在 bca5c99 上复核第一批九项：R04/D13/D29 符合，R05/D11 偏离，R01/R02/R03/D02 有新缺陷；按其 12 条实施令由五个 Opus 5.5 会话分支实现后并入。R4-01 方向的 add/remove/choose 写入前先 GET 当前画像 trail（`readTrailForWrite`），以其为准构造修改，GET 失败零写入；R4-02 `pullTrail` 把带 dirs/sel 数组（含显式空数组）的 trail 视为现代数据不迁移，GET 失败不触发 prefs 迁移；R4-03 低于本地 base_rev 的 GET/ACK 不回退草稿版本；R4-04 旧格式「已清空未同步」的 meta 迁移为 dirty+conflict，不被云端旧稿吞掉；R4-05 冲突按钮随当前表单重绑；R4-06 恢复改为先取 `_LOCK` 再关恢复闸，共用五秒截止，排队写入不再与恢复互锁；R4-07 `assert_db_under_nas` 拒绝反斜线/非绝对路径并返回规范化路径，下发给 SDK 的就是校验过的值；R4-08 登录先校验用户名形状，非法名 401 且不建任何桶、不查用户表；R4-09 草稿非 409 失败 toast「草稿未同步，联网后重试」；R4-10 收藏未加载时「我的」显示「收藏未加载，请重试」与重试按钮；R4-11 uptime 版本戳按去重集合比对；R4-12 八个会外联的测试补桩（collect 锁测试 stub `_pin_kit`、缓存性能测试 stub `arxiv._get`、慢 DNS 测试用假解析器、admin 共用 fixture 清 `BACKUP_OSS_BUCKET`），新增 `test_network_isolation.py` 以子进程审计钩子断言零外联。`tools/verify/verify_frontend_loss.js` 加 `readTrailForWrite` 与 trail GET 桩。
