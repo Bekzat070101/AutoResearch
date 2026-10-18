@@ -1412,6 +1412,7 @@ function persistSession() {
 
 /* 记下会话。原来是另一个人（uid 变了）就返回 true，并且已经开始重载：调用方要立刻停手。 */
 function setSession(r, nextView, msg) {
+  ++directionEpoch;
   const switching = !!S.uid && r.uid !== S.uid;
   S.uid = r.uid;
   if (r.token) S.token = r.token;
@@ -1455,6 +1456,7 @@ function clearLocalDrafts(keep, owners) {
 /* purge：连这台浏览器里这个人的草稿一起清。只在明确退出、删号时清；登录过期（401）不清——
    草稿的键带着 uid，别人看不到，同一个人重新登录还能接着写。 */
 function clearSession(purge) {
+  ++directionEpoch;
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
   S.username = ""; S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
   S.entered = false;
@@ -2117,13 +2119,15 @@ async function openUserMenu() {
   wrap.appendChild(menu);  // 画像切换不再放菜单里（11 号：在「我的」页）
 }
 
-async function loadPrefs() {
+async function loadPrefs(c) {
   try {
-    const p = await api("GET", "/api/me/prefs");
+    const run = () => api("GET", "/api/me/prefs");
+    const p = await (c ? dirAwait(c, run) : run());
     S.myDirs = Array.isArray(p.directions) ? p.directions : [];
     if (p.kit_id) useKit(p.kit_id);
     return true;
-  } catch (_) {
+  } catch (e) {
+    if (e === STALE_DIR) throw e;
     S.myDirs = undefined;  // 渲染缓存不是写入授权：读失败就当不知道
     return false;
   }
@@ -2133,8 +2137,9 @@ async function ensureMyDirs() {
   return loadPrefs();  // 全量 PUT 之前每次都重新读
 }
 
-async function putPrefs(patch) {
-  const r = await api("PUT", "/api/me/prefs", patch);
+async function putPrefs(patch, c) {
+  const run = () => api("PUT", "/api/me/prefs", patch);
+  const r = await (c ? dirAwait(c, run) : run());
   S.myDirs = Array.isArray(r.directions) ? r.directions : (S.myDirs || []);
   return r;
 }
@@ -2164,81 +2169,111 @@ async function toggleDirSel(nodeId) {
   paintChrome();
 }
 
-async function readTrailForWrite() {
+/* 方向操作绑定发起时的会话/画像/纪元：切画像、换人、退出后，旧操作的回包不得写进新画像（R5-01） */
+const STALE_DIR = Symbol("stale-direction");
+let directionEpoch = 0;
+function directionContext() {
+  const c = { uid: S.uid, token: S.token, pid: S.portraitId || "default", key: trailStorageKey(), epoch: directionEpoch };
+  c.check = () => {
+    if (portraitBusy || c.epoch !== directionEpoch || c.uid !== S.uid || c.token !== S.token
+      || c.pid !== (S.portraitId || "default") || c.key !== trailStorageKey()) throw STALE_DIR;
+  };
+  return c;
+}
+
+async function dirAwait(c, run) { c.check(); const r = await run(); c.check(); return r; }
+
+async function readTrailForWrite(c) {
   try {
-    const t = await api("GET", "/api/projects/" + (S.portraitId || "default") + "/trail");
-    localStorage.setItem(trailStorageKey(), JSON.stringify(t));
+    const t = await dirAwait(c, () => api("GET", "/api/projects/" + c.pid + "/trail"));
+    localStorage.setItem(c.key, JSON.stringify(t));
     return t;
-  } catch (_) { toast("没读到已收藏的方向，这次没有改"); return null; }
+  } catch (e) {
+    if (e === STALE_DIR) throw e;
+    toast("没读到已收藏的方向，这次没有改"); return null;
+  }
 }
 
 async function addMyDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
-  const fresh = await readTrailForWrite();
-  if (!fresh) return;
-  const prev = trail();
-  if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
-  if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
-  await saveTrail(portraitDirsAdd(nodeId));
-  if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
-  paintChrome();
-  toast("已添加到我的方向");
-  if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    const prev = trail();
+    if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
+    if (!(await loadPrefs(c))) { toast("没读到已收藏的方向，这次没有改"); return; }
+    await saveTrail(portraitDirsAdd(nodeId), false, c);
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) }, c);
+    c.check();
+    paintChrome();
+    toast("已添加到我的方向");
+    if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 async function removeMyDirection(nodeId) {
-  const fresh = await readTrailForWrite();
-  if (!fresh) return;
-  if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
-  const t = trail();
-  const dirs = t.dirs.filter((x) => x !== nodeId);
-  const sel = selectedDirs(t).filter((x) => x !== nodeId);
-  const next = { ...t, dirs, sel };
-  if (t.dir === nodeId) {
-    const fallback = dirs[0];
-    if (fallback && window.RG_DIR) {
-      // 教程/这一步要有一条路可走：切到剩下的第一个，进度从 byDir 里接回来
-      const saved = (t.byDir || {})[fallback] || { done: [], tasks: {} };
-      next.code = RG_DIR.backendCode(fallback);
-      next.dir = fallback;
-      next.done = saved.done || [];
-      next.tasks = saved.tasks || {};
-    } else {
-      next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    if (!(await loadPrefs(c))) { toast("没读到已收藏的方向，这次没有改"); return; }
+    const t = trail();
+    const dirs = t.dirs.filter((x) => x !== nodeId);
+    const sel = selectedDirs(t).filter((x) => x !== nodeId);
+    const next = { ...t, dirs, sel };
+    if (t.dir === nodeId) {
+      const fallback = dirs[0];
+      if (fallback && window.RG_DIR) {
+        // 教程/这一步要有一条路可走：切到剩下的第一个，进度从 byDir 里接回来
+        const saved = (t.byDir || {})[fallback] || { done: [], tasks: {} };
+        next.code = RG_DIR.backendCode(fallback);
+        next.dir = fallback;
+        next.done = saved.done || [];
+        next.tasks = saved.tasks || {};
+      } else {
+        next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
+      }
     }
-  }
-  await saveTrail(next, true);
-  const kept = S.myDirs.filter((x) => x !== nodeId);
-  if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept });
-  S.myDir = undefined;
-  paintChrome();
+    await saveTrail(next, true, c);
+    c.check();
+    const kept = S.myDirs.filter((x) => x !== nodeId);
+    if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept }, c);
+    c.check();
+    S.myDir = undefined;
+    paintChrome();
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 async function chooseDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
-  const fresh = await readTrailForWrite();
-  if (!fresh) return;
-  const backend = RG_DIR.backendCode(nodeId);
-  await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
-  const withDirs = portraitDirsAdd(nodeId);
-  const prev = trail();
-  const byDir = Object.assign({}, prev.byDir || {});
-  if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
-  const nxt = byDir[nodeId] || { done: [], tasks: {} };
-  await saveTrail({
-    code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
-    dirs: withDirs.dirs, sel: withDirs.sel,
-  }, true);
-  if (!(await loadPrefs())) {
+  const c = directionContext();
+  try {
+    const fresh = await readTrailForWrite(c);
+    if (!fresh) return;
+    const backend = RG_DIR.backendCode(nodeId);
+    await dirAwait(c, () => api("POST", "/api/directions/choose", { uid: c.uid, code: backend }));
+    const withDirs = portraitDirsAdd(nodeId);
+    const prev = trail();
+    const byDir = Object.assign({}, prev.byDir || {});
+    if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
+    const nxt = byDir[nodeId] || { done: [], tasks: {} };
+    await saveTrail({
+      code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
+      dirs: withDirs.dirs, sel: withDirs.sel,
+    }, true, c);
+    if (!(await loadPrefs(c))) {
+      S.myDir = undefined;
+      paintChrome();
+      toast("方向已确认，收藏列表没读到，没有改「我的」");
+      return;
+    }
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) }, c);
+    c.check();
     S.myDir = undefined;
     paintChrome();
-    toast("方向已确认，收藏列表没读到，没有改「我的」");
-    return;
-  }
-  if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
-  S.myDir = undefined;
-  paintChrome();
-  toast(`已确认「${dirTitle(nodeId)}」`);
+    toast(`已确认「${dirTitle(nodeId)}」`);
+  } catch (e) { if (e !== STALE_DIR) throw e; }
 }
 
 /* ---------- 画像 × 方向（我的页） ----------
@@ -2969,6 +3004,7 @@ let portraitBusy = false;
 async function portraitOp(run, nextView, wasActive = false, after = null) {
   if (portraitBusy) { toast("正在切换画像，稍等"); return; }
   portraitBusy = true;
+  ++directionEpoch;
   try {
     const r = await run();
     if (r === null) return;
@@ -3057,7 +3093,8 @@ function trail() {
   return { code: "", dir: "", done: [], tasks: {}, byDir: {}, dirs: [], sel: [] };
 }
 
-function saveTrail(t, force) {
+function saveTrail(t, force, c) {
+  if (c) c.check();
   const prev = trail();
   const code = t.code || "";
   let done = t.done || [];
@@ -3079,9 +3116,9 @@ function saveTrail(t, force) {
     dirs: Array.isArray(t.dirs) ? t.dirs.map(String) : prev.dirs,
     sel: Array.isArray(t.sel) ? t.sel.map(String) : prev.sel,
   };
-  localStorage.setItem(trailStorageKey(), JSON.stringify(packed));
-  if (S.token) {
-    const pid = S.portraitId || "default";
+  localStorage.setItem(c ? c.key : trailStorageKey(), JSON.stringify(packed));
+  if (c ? c.token : S.token) {
+    const pid = c ? c.pid : (S.portraitId || "default");
     return api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
   }
   return Promise.resolve();

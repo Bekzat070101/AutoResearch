@@ -49,3 +49,7 @@ def test_boot_preserves_explicit_trail_state():
 
 def test_prefs_failure_has_visible_retry():
     _run("r4-retry")
+
+
+def test_direction_write_aborts_after_portrait_switch():
+    _run("direction-context")
