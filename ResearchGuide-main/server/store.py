@@ -555,6 +555,12 @@ def init_db() -> None:
                       "WHEN EXISTS (SELECT 1 FROM deleted_users WHERE id = NEW.user_id) "
                       f"BEGIN SELECT RAISE(ABORT, '{USER_DELETED}'); END")
     migrate_legacy_secrets()
+    try:
+        import account_store
+        account_store.hydrate_if_empty()
+    except Exception as exc:
+        print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
+                         ensure_ascii=False))
 
 
 def migrate_legacy_secrets() -> None:
@@ -641,6 +647,7 @@ def register_user(username: str, password: str, nickname: str) -> dict[str, Any]
             " VALUES(?,?,?,?,?,?,?,?,?)",
             (uid, nick, token, "{}", now, now, name, salt, hashed),
         )
+    _accounts_changed()
     return {"uid": uid, "token": token, "nickname": nick, "username": name}
 
 
@@ -666,6 +673,7 @@ def upgrade_user(uid: str, username: str, password: str) -> dict[str, Any]:
     out = get_user(uid)
     if not out:
         raise KeyError("user")
+    _accounts_changed()
     return out
 
 
@@ -981,6 +989,7 @@ def bind_wechat(uid: str, openid: str) -> bool:
 def record_consent(uid: str, version: str) -> None:
     with _LOCK, _conn() as c:
         c.execute("UPDATE users SET consent_at=?, consent_version=? WHERE id=?", (now_iso(), version, uid))
+    _accounts_changed()
 
 
 def claim_legacy(uid: str) -> bool:
@@ -1148,7 +1157,18 @@ def delete_user(uid: str) -> dict[str, int]:
         c.execute("DELETE FROM wechat_tickets WHERE guest_uid=?", (uid,))
         counts["users"] = c.execute("DELETE FROM users WHERE id=?", (uid,)).rowcount
     print(json.dumps({"event": "user_deleted", "uid": uid, "at": now_iso()}, ensure_ascii=False))
+    _accounts_changed()
     return counts
+
+
+def _accounts_changed() -> None:
+    """把已注册账号的用户名和密码哈希写到独立副本。失败不影响主路径。"""
+    try:
+        import account_store
+        account_store.dump_accounts()
+    except Exception as exc:
+        print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
+                         ensure_ascii=False))
 
 
 def set_onboard_state(uid: str, state: dict[str, Any]) -> None:

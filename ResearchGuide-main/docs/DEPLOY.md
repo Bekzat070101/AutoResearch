@@ -51,6 +51,7 @@ uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_opena
   3. 设 `WECHAT_ACCOUNT_ID`（公众号原始 ID，gh_ 开头，在「设置与开发 → 公众号设置」里）和 `WECHAT_ACCOUNT_NAME`，登录页就会显示关注二维码。二维码也可以下载下来放到页面里，用 `WECHAT_QR_URL` 指过去。
   没配公众号时页面只给用户名密码。`AUTH_DEV_CODES=1` 只在本机用（登录页多一个「模拟微信发送」），配了 `WECHAT_TOKEN` 就自动失效。
 - 函数计算必须尽量只跑一个实例，且库在会保留的盘上。微信的消息回调和网页的轮询是两个请求：落到两个实例上，各自的库里只有一半，登录就永远等不到。线上 SQLite 若仍写 `/tmp`，实例回收会丢掉账号和记录。`/api/health` 的 `db.ephemeral` 为 true 就是这种情况。前端遇到 `user not found` / 401 会清掉过期会话，请重新进入，不再把研读工具包显示成加载失败。`QIYAN_DB` 应指到会保留的盘。
+- 已注册账号跨发版：密码哈希在 SQLite `users` 表。库被换成空文件时，登录会显示「用户名或密码不对」，同名可以再注册——不是密码坏了，是人没了。设 `QIYAN_ACCOUNT_STORE` 指向**不和 QIYAN_DB 同块临时盘**的加密副本（例如 `/mnt/nas/qiyan-accounts.json.enc`），或设 `BACKUP_OSS_BUCKET` + `BACKUP_KEY`（对象在 `durable/`，不要放进 `daily/`）。注册/删号会更新副本；新空库启动时灌回同一批用户名和密码哈希，原密码仍能登录。对话、个人 DeepSeek、方向仍只在主库里，完整保留还是要挂 NAS。`/api/health` 的 `db.account_store.enabled` 为 true 表示副本开了。A5 仍待确认，没挂盘不准把生产发版写成已完成。
 - 微信要求消息接口五秒内回复，超时会重发两次；处理是幂等的。冷启动太慢的话，学生会看到「该公众号暂时无法提供服务」，重发一次就行。
 - 备份：以 OSS 生命周期为准（`POST /api/admin/backup` → `VACUUM INTO` → gzip → AES-GCM → `BACKUP_DIR` / OSS `daily/`）。隐私说明承诺删号后备份最多留 7 天；生命周期改成 >7 天必须同时改 `PRIVACY_HTML`、`PRIVACY_VERSION`、`PRIVACY_DIGEST` 并记 CHANGELOG。本机 `tools/backup_db.py` 只作开发备用。
 - 上线顺序：前端和接口一起发。旧前端不带令牌，新接口会一律回 401；老用户浏览器里只有 uid 的，新前端会自动认领一次（`/api/auth/legacy`）。

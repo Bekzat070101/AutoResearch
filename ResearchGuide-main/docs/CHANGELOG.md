@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FIX] 发版换空库后已注册账号密码仍能登录
+
+- 变更内容：叠在 GitHub main 35db933（PR #19/#20，界面 w102）上。对照现网「过一会账号密码无效、只能再注册」。根因仍是库在 `/tmp`（`health.db.ephemeral=true`），发版或实例回收换空 SQLite，原用户名不在库里，登录被说成密码不对。新增独立加密副本：注册/升级/删号后写入 `QIYAN_ACCOUNT_STORE` 或 OSS `durable/accounts.json.enc`（不走 `daily/` 的 7 天删除）。新空库启动时若还没有已注册用户，把同一批 uid、用户名、密码哈希灌回，原密码可登录。副本不含明文密码。对话记录、个人 key、方向仍随主库走；A5 NAS 未挂上，本轮不发生产函数。`/api/health` 的 `db` 保留上游 `writable`，并加 `account_store`。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、.env.example
+- 影响模块：server/account_store.py、server/store.py、server/main.py、server/tests/test_account_store.py
+- 决策来源：邬程灿（2026-10-18：版本更新保留已注册账号密码）
+- 登记人：助手
+
 ## [2026-10-18] [FIX] 并入 PR #19 后：规则版五问的轮次不再被 gathering 抹掉
 
 - 变更内容：上游 PR #19 的 `dialogue._sync_onboard_state` 每轮把 onboard 的 `phase` 改写成 `gathering`，而模型不可用时的规则版五问（`onboarding.advance`）把当前轮次记在 `phase` 里，结果没模型的新同学被一遍遍问同一句（本分支 `test_degraded_onboarding` 抓到，Codex 第四轮曾复现过同类问题）。现在只有第一轮/空状态记成 `gathering`，已经往后走的轮次与「问完」原样保留，`guide.assess` 判定就绪时仍记 `done`；上游 `test_enter` 对首轮 `gathering` 的期待不变。随上游契约改写了五个本分支测试：对话不再布置任务（接受 → ValueError、拒绝 → abandoned）、开场白是固定文案不调模型（`_voice` 的截断保护单测）、没模型时问完后的提示指向研读模块、`same_user_races` 的 env 桩补 `guidance`。
@@ -118,7 +126,6 @@
 - 影响模块：.gitattributes、server/auth.py、server/budget.py、server/llm.py、server/main.py、tools/deploy/deploy_fc.py、web/index.html、web/js/app.js
 - 决策来源：陈浩文（并入上游）
 - 登记人：陈浩文
-
 ## [2026-10-16] [OPS] Pages 发到 w83，生产 API 仍是 w74
 
 - 变更内容：前端同步 GitHub Pages（w83）。现网 API 仍是 w74，新页面打旧接口的 P0 未解除（ranking / 搜索 / PDF / `/metrics` 等在现网上不可用或行为不同）。A5 未挂盘，本轮不发生产函数，未把 `/metrics` 发到现网。

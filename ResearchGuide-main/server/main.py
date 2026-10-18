@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import account_store
 import admin
 import auth
 import catalog
@@ -2102,7 +2103,11 @@ async def health():
             "base_url": cfg["base_url"] if cfg["enabled"] else "",
         },
         "auth": auth.status(),
-        "db": {"ephemeral": store.ephemeral(), "writable": store.db_writable()},  # true 就是库会随实例一起没：上线前必须是 false
+        "db": {  # ephemeral true 就是库会随实例一起没：上线前必须是 false
+            "ephemeral": store.ephemeral(),
+            "writable": store.db_writable(),
+            "account_store": account_store.status(),
+        },
         "threads": THREADS,
         "model_pool": _model_pool(),  # 模型池实值 + 公用线程借用 + pdf 池
         "checks": {
