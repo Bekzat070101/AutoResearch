@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 第三轮实施令第二批：Codex 第四轮复核指出的 12 处
+
+- 变更内容：Codex 第四轮在 bca5c99 上复核第一批九项：R04/D13/D29 符合，R05/D11 偏离，R01/R02/R03/D02 有新缺陷；按其 12 条实施令由五个 Opus 5.5 会话分支实现后并入。R4-01 方向的 add/remove/choose 写入前先 GET 当前画像 trail（`readTrailForWrite`），以其为准构造修改，GET 失败零写入；R4-02 `pullTrail` 把带 dirs/sel 数组（含显式空数组）的 trail 视为现代数据不迁移，GET 失败不触发 prefs 迁移；R4-03 低于本地 base_rev 的 GET/ACK 不回退草稿版本；R4-04 旧格式「已清空未同步」的 meta 迁移为 dirty+conflict，不被云端旧稿吞掉；R4-05 冲突按钮随当前表单重绑；R4-06 恢复改为先取 `_LOCK` 再关恢复闸，共用五秒截止，排队写入不再与恢复互锁；R4-07 `assert_db_under_nas` 拒绝反斜线/非绝对路径并返回规范化路径，下发给 SDK 的就是校验过的值；R4-08 登录先校验用户名形状，非法名 401 且不建任何桶、不查用户表；R4-09 草稿非 409 失败 toast「草稿未同步，联网后重试」；R4-10 收藏未加载时「我的」显示「收藏未加载，请重试」与重试按钮；R4-11 uptime 版本戳按去重集合比对；R4-12 八个会外联的测试补桩（collect 锁测试 stub `_pin_kit`、缓存性能测试 stub `arxiv._get`、慢 DNS 测试用假解析器、admin 共用 fixture 清 `BACKUP_OSS_BUCKET`），新增 `test_network_isolation.py` 以子进程审计钩子断言零外联。`tools/verify/verify_frontend_loss.js` 加 `readTrailForWrite` 与 trail GET 桩。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/js/app.js、server/admin.py、server/auth.py、tools/deploy/fc_safety.py、tools/verify/verify_frontend_state.js、tools/verify/verify_frontend_loss.js、.github/workflows/uptime.yml、server/tests/
+- 决策来源：陈浩文（按 Codex 第四轮实施令）
+- 登记人：陈浩文
+
 ## [2026-10-18] [FIX] 第三轮实施令第一批：恢复/换钥/草稿/收藏/登录桶/发布门/探活
 
 - 变更内容：按 docs/tasks/20、21 的实施令，由四个 Opus 5.5 实现会话在各自分支完成后并入：20-R01 恢复用唯一 stage 文件 + 连接闸（`store.restore_gate`），写入/校验/替换失败保留原库，换入后清理失败返回 200 带 `cleanup_pending`/`warning`；20-R02 `drafts` 表加 `rev`，`PUT /api/tasks/{tid}/draft` 按 `base_rev` 做 CAS（不等 → 409「草稿已在别处更新，本地稿已保留」），前端草稿按 uid/tid 记 `edit_seq/dirty`，旧响应不再覆盖新稿，409 给「用本地稿覆盖云端」；20-R03 `loadPrefs` 失败置 `undefined`，写收藏前重新 GET，`boot()` 恢复 directions；20-R04 rewrap 按快照密文 CAS，学生并发重存 → 409 `secret_changed`；20-R05 `_HITS` 总数上限 10000、用户名桶 600 秒过期、满时拒绝新桶，形状不对的用户名直接 401 不建桶；21-D02 生产发布须 `QIYAN_DB` 落在函数已配置的 NAS 挂载目录（`fc_safety.nas_mount_dirs/assert_db_under_nas`），缺探活地址或 health 非 `ephemeral=false && writable=true` 不写成功状态，health 增加 `db.writable`；21-D11 uptime 按唯一 wN 比对 Pages 与 API，`QIYAN_REQUIRE_PERSISTENT` 时 ephemeral 必须是 JSON false；21-D13 `deploy_fc.llm_settings()` 只取第一个有密钥的源整组配置；21-D29 备份 OSS 失败 502 回包补 `ok:false`。新测试：`test_admin.py`（恢复并发/清理/连接闸、rewrap CAS、备份回包）、`test_user_store.py`（草稿 CAS）、`test_frontend_state.py` + `tools/verify/verify_frontend_state.js`（草稿同步、收藏重读、boot 恢复）、`test_auth_password.py`（桶上限）、`test_uptime_workflow.py`、`test_deploy_fc.py`（NAS 门、模型配置源）。全量 1173 passed（3.12、3.11）。Codex 第四轮复核进行中，结论回写 docs/tasks/20、21。
