@@ -347,3 +347,77 @@ def test_oss_failure_has_false_ok_contract(client, monkeypatch):
     ok = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN})
     assert ok.status_code == 200, ok.text
     assert ok.json()["oss"] == "ok"
+
+
+def test_restore_waiting_reader_does_not_invert_writer_lock(client, tmp_path, monkeypatch):
+    """R4-06：A 持 reader、B 恢复关闸等 A、C 写入排在 _LOCK 后；放开 A 后 B 200，C 的行在新库可读。"""
+    import threading
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    a_open, release_a, gate_waiting, c_blocked = (threading.Event() for _ in range(4))
+
+    class SpyGate(threading.Condition):
+        def wait(self, timeout=None):
+            me = threading.get_ident()
+            owner = store._GATE_STATE["owner"]
+            if owner == me:
+                gate_waiting.set()
+            if threading.current_thread().name == "C" and owner not in (None, me):
+                c_blocked.set()
+            return super().wait(timeout)
+
+    class SpyLock:
+        def __init__(self):
+            self._l = threading.Lock()
+
+        def acquire(self, blocking=True, timeout=-1):
+            if threading.current_thread().name == "C":
+                if self._l.acquire(False):
+                    return True
+                c_blocked.set()
+            return self._l.acquire(blocking, timeout)
+
+        def release(self):
+            self._l.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *a):
+            self.release()
+            return False
+
+    monkeypatch.setattr(store, "_GATE", SpyGate())
+    monkeypatch.setattr(store, "_LOCK", SpyLock())
+    res = {}
+
+    def run_a():
+        with store._conn() as c:
+            c.execute("SELECT COUNT(*) FROM users").fetchone()
+            a_open.set()
+            assert release_a.wait(15)
+
+    def run_b():
+        res["b"] = client.post("/api/admin/restore", json={"object": out["object"]},
+                               headers={"X-Admin-Token": TOKEN})
+
+    def run_c():
+        res["c"] = store.create_user("排队写入")
+
+    ta = threading.Thread(target=run_a, name="A")
+    tb = threading.Thread(target=run_b, name="B")
+    tc = threading.Thread(target=run_c, name="C")
+    ta.start()
+    assert a_open.wait(10)
+    tb.start()
+    assert gate_waiting.wait(10)
+    tc.start()
+    assert c_blocked.wait(10)
+    release_a.set()
+    for t in (ta, tb, tc):
+        t.join(15)
+    assert res["b"].status_code == 200, res["b"].text
+    body = res["b"].json()
+    assert body["ok"] is True and body["object"] == out["object"]
+    assert store.get_user(res["c"]["uid"])["nickname"] == "排队写入"
+    assert not list(Path(store.DB_PATH).parent.glob("*.incoming-*"))

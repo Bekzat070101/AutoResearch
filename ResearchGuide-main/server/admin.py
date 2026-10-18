@@ -180,18 +180,21 @@ def install_restored_db(raw: bytes) -> list[str]:
         _write_restore_bytes(stage, raw)
         _check_integrity_and_close(stage)
         try:
-            with store.restore_gate(timeout=5):
-                if not store._LOCK.acquire(timeout=5):
-                    raise HTTPException(503, _BUSY)
-                try:
+            deadline = time.monotonic() + 5
+            if not store._LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+                raise HTTPException(503, _BUSY)
+            try:
+                with store.restore_gate(timeout=max(0, deadline - time.monotonic())):
                     with store._conn() as c:
+                        left_ms = max(0, int(1000 * (deadline - time.monotonic())))
+                        c.execute(f"PRAGMA busy_timeout={left_ms}")
                         busy = c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
                     if busy:
                         raise HTTPException(503, _BUSY)
                     os.replace(stage, target)
                     return _remove_sidecars_collect_errors(target)
-                finally:
-                    store._LOCK.release()
+            finally:
+                store._LOCK.release()
         except store.RestoreBusy as exc:
             raise HTTPException(503, _BUSY) from exc
     finally:
