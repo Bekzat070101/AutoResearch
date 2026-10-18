@@ -2124,13 +2124,13 @@ async function loadPrefs() {
     if (p.kit_id) useKit(p.kit_id);
     return true;
   } catch (_) {
+    S.myDirs = undefined;  // 渲染缓存不是写入授权：读失败就当不知道
     return false;
   }
 }
 
 async function ensureMyDirs() {
-  if (Array.isArray(S.myDirs)) return true;
-  return loadPrefs();
+  return loadPrefs();  // 全量 PUT 之前每次都重新读
 }
 
 async function putPrefs(patch) {
@@ -2168,16 +2168,16 @@ async function addMyDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
   const prev = trail();
   if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
+  if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
   await saveTrail(portraitDirsAdd(nodeId));
-  if (await ensureMyDirs()) {
-    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
-  }
+  if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
   paintChrome();
   toast("已添加到我的方向");
   if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
 }
 
 async function removeMyDirection(nodeId) {
+  if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
   const t = trail();
   const dirs = t.dirs.filter((x) => x !== nodeId);
   const sel = selectedDirs(t).filter((x) => x !== nodeId);
@@ -2196,10 +2196,8 @@ async function removeMyDirection(nodeId) {
     }
   }
   await saveTrail(next, true);
-  if (await ensureMyDirs()) {
-    const kept = S.myDirs.filter((x) => x !== nodeId);
-    if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept });
-  }
+  const kept = S.myDirs.filter((x) => x !== nodeId);
+  if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept });
   S.myDir = undefined;
   paintChrome();
 }
@@ -2217,9 +2215,13 @@ async function chooseDirection(nodeId) {
     code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
     dirs: withDirs.dirs, sel: withDirs.sel,
   }, true);
-  if (await ensureMyDirs()) {
-    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
+  if (!(await loadPrefs())) {
+    S.myDir = undefined;
+    paintChrome();
+    toast("方向已确认，收藏列表没读到，没有改「我的」");
+    return;
   }
+  if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
   S.myDir = undefined;
   paintChrome();
   toast(`已确认「${dirTitle(nodeId)}」`);
@@ -7237,13 +7239,7 @@ document.addEventListener("keydown", (e) => {
       const me = await api("GET", "/api/auth/me");
       setSession(me);
       needConsent = !me.consent_ok;
-      try {
-        const prefs = await api("GET", "/api/me/prefs");  // 研读工具包的选择进库了（上游 w68）：换浏览器也跟着人走
-        if (prefs.kit_id) {
-          S.kitId = prefs.kit_id;
-          try { localStorage.setItem("rg_kit", prefs.kit_id); } catch (_) { /* 存不了就这一页有效 */ }
-        }
-      } catch (_) { /* 没有偏好就用本地的 */ }
+      await loadPrefs();  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
       await ensurePortrait();
     } catch (e) {
       if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么

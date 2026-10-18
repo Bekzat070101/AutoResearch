@@ -16,3 +16,10 @@ def _run(which: str) -> None:
 def test_draft_concurrent_sync():
     _run("drafts")
 
+
+def test_prefs_reload_failure_blocks_replace():
+    _run("prefs")
+
+
+def test_boot_restores_directions():
+    _run("boot")
