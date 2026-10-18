@@ -35,6 +35,7 @@ function extract(src, name) {
       store.prefs = { directions: body.directions };
       return JSON.parse(JSON.stringify(store.prefs));
     }
+    if (m === "GET" && url.startsWith("/api/projects/")) return { code: "", dir: "", dirs: [], sel: [], done: [], tasks: {}, byDir: {} };
     return {};
   };
   const toast = () => {};
@@ -51,7 +52,7 @@ function extract(src, name) {
   const window = { RG_DIR };
   const FIELD_TREES = {};
   const fns = ["loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
-    "selectedDirs", "portraitDirsAdd", "addMyDirection"].map((n) => extract(appSrc, n)).join("\n");
+    "selectedDirs", "portraitDirsAdd", "readTrailForWrite", "addMyDirection"].map((n) => extract(appSrc, n)).join("\n");
   const fn = new Function("S", "api", "toast", "paintChrome", "useKit",
     "window", "RG_DIR", "FIELD_TREES", "localStorage",
     fns + "; return {loadPrefs, ensureMyDirs, addMyDirection};");

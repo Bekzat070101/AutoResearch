@@ -186,6 +186,7 @@ function prefsEnv(remoteDirs) {
       if (body.directions) store.prefs.directions = body.directions.slice();
       return JSON.parse(JSON.stringify(store.prefs));
     }
+    if (url.startsWith("/api/projects/") && m === "GET") return JSON.parse(JSON.stringify(store.trail || {}));
     if (url.startsWith("/api/projects/") && m === "PUT") { calls.trailPuts.push(body.data); store.trail = body.data; return {}; }
     if (url === "/api/directions/choose") return {};
     return {};
@@ -196,7 +197,7 @@ function prefsEnv(remoteDirs) {
   const RG_DIR = { byId: { A: {}, B: {}, C: {} }, legacyDir: {}, backendCode: (x) => "code-" + x };
   const window = { RG_DIR };
   const names = ["loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
-    "selectedDirs", "portraitDirsAdd", "addMyDirection", "removeMyDirection", "chooseDirection"];
+    "selectedDirs", "portraitDirsAdd", "readTrailForWrite", "addMyDirection", "removeMyDirection", "chooseDirection"];
   const src = names.map((n) => extract(appSrc, n)).join("\n");
   const f = new Function("S", "api", "toast", "paintChrome", "useKit", "window", "RG_DIR", "FIELD_TREES",
     "localStorage", "setView", "dirTitle",
@@ -395,6 +396,224 @@ async function retry() {
   if (which === "legacy" || which === "all") await legacy();
   if (which === "reopen" || which === "all") await reopen();
   if (which === "retry" || which === "all") await retry();
+  if (which === "r4-dirs" || which === "all") await r4Dirs();
+  if (which === "r4-boot" || which === "all") await r4Boot();
+  if (which === "r4-retry" || which === "all") await r4Retry();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
+
+/* ===================== R4-01 / R4-02 / R4-10（第四轮，独立区块） =====================
+   只用函数声明：上面的调度 IIFE 同步调用到这里时，顶层 const 还在 TDZ。 */
+function r4LoadDir() {
+  const w = {};
+  new Function("window", fs.readFileSync(path.join(root, "web", "js", "directions.js"), "utf8"))(w);
+  return w.RG_DIR;
+}
+
+function r4Pick(names) {
+  return names.map((n) => { try { return extract(appSrc, n); } catch (_) { return ""; } }).join("\n");
+}
+
+function r4Env(o) {
+  const RG_DIR = r4LoadDir();
+  const window = { RG_DIR };
+  const store = { prefs: { directions: o.prefs.slice() }, trail: o.remote === undefined ? null : JSON.parse(JSON.stringify(o.remote)) };
+  const net = { trailGetFail: !!o.trailGetFail, prefsGetFail: !!o.prefsGetFail };
+  const calls = { choose: [], trailPuts: [], prefsPuts: [], trailGets: 0 };
+  const S = { myDirs: undefined, uid: "u1", token: "t", portraitId: o.portraitId === undefined ? "p1" : o.portraitId, view: "today" };
+  const api = async (m, url, body) => {
+    if (url === "/api/me/prefs" && m === "GET") {
+      if (net.prefsGetFail) { const e = new Error("服务器出错"); e.status = 500; throw e; }
+      return JSON.parse(JSON.stringify(store.prefs));
+    }
+    if (url === "/api/me/prefs" && m === "PUT") {
+      calls.prefsPuts.push(body);
+      if (body.directions) store.prefs.directions = body.directions.slice();
+      return JSON.parse(JSON.stringify(store.prefs));
+    }
+    if (url === "/api/projects/p1/trail" && m === "GET") {
+      calls.trailGets++;
+      if (net.trailGetFail) { const e = new Error("服务器出错"); e.status = 500; throw e; }
+      return JSON.parse(JSON.stringify(store.trail || {}));
+    }
+    if (url === "/api/projects/p1/trail" && m === "PUT") { calls.trailPuts.push(body.data); store.trail = body.data; return {}; }
+    if (url === "/api/directions/choose") { calls.choose.push(body); return {}; }
+    if (url === "/api/portraits?uid=u1") return { portraits: [{ id: "p1", active: true, name: "", label: "画像一", dirs: [], sel: [] }] };
+    throw new Error("未预期的请求 " + m + " " + url);
+  };
+  const toasts = [];
+  const toast = (t) => toasts.push(t);
+  const ls = memStorage();
+  if (o.local !== undefined) ls.setItem("rg_trail_u1_p1", JSON.stringify(o.local));
+  ls.setItem("rg_trail_owner_u1", "p1");
+  return { RG_DIR, window, store, net, calls, S, api, toasts, toast, ls };
+}
+
+function r4Writes(env) { return env.calls.choose.length + env.calls.trailPuts.length + env.calls.prefsPuts.length; }
+
+async function r4Dirs() {
+  console.log("=== R4-01 方向写入以新读的 trail 为准 ===");
+  const remote = {
+    code: "", dir: "", done: [], tasks: { t1: { note: "keep" } },
+    byDir: { "110.67": { done: [], tasks: { k: 1 } } },
+    dirs: ["190.20", "110.67"], sel: ["110.67"],
+  };
+  const local = { code: "", dir: "", done: [], tasks: {}, byDir: {}, dirs: ["190.20"], sel: ["190.20"] };
+  const mk = (extra) => {
+    const env = r4Env(Object.assign({ prefs: ["190.20"], remote, local }, extra));
+    const names = ["loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
+      "selectedDirs", "portraitDirsAdd", "readTrailForWrite", "addMyDirection", "removeMyDirection", "chooseDirection"];
+    const f = new Function("S", "api", "toast", "paintChrome", "useKit", "window", "RG_DIR", "FIELD_TREES",
+      "localStorage", "setView", "dirTitle",
+      r4Pick(names) + "; return {trail, addMyDirection, removeMyDirection, chooseDirection};");
+    return Object.assign(env, f(env.S, env.api, env.toast, () => {}, () => {}, env.window, env.RG_DIR, {}, env.ls, () => {}, (x) => x));
+  };
+  const J = JSON.stringify;
+  const run = (env, op) => (op === "add" ? env.addMyDirection("520.20")
+    : op === "choose" ? env.chooseDirection("520.20") : env.removeMyDirection("190.20"));
+  for (const op of ["add", "choose", "remove"]) {
+    // trail 200 + prefs 200
+    {
+      const env = mk({});
+      await run(env, op);
+      const last = env.calls.trailPuts[env.calls.trailPuts.length - 1] || {};
+      const wantDirs = op === "remove" ? ["110.67"] : ["190.20", "110.67", "520.20"];
+      const wantSel = op === "remove" ? ["110.67"] : ["110.67", "520.20"];
+      check(env.calls.trailGets >= 1, `${op} trail200: 写前读了 trail`, String(env.calls.trailGets));
+      check(env.calls.trailPuts.length === 1, `${op} trail200: 恰 1 次 trail PUT`, String(env.calls.trailPuts.length));
+      check(J(last.dirs) === J(wantDirs) && J(last.sel) === J(wantSel), `${op} trail200: dirs/sel 按新读值构造`, J({ dirs: last.dirs, sel: last.sel }));
+      check(last.byDir && J(last.byDir["110.67"]) === J(remote.byDir["110.67"]), `${op} trail200: byDir 保留`, J(last.byDir));
+      if (op !== "choose") check(J(last.tasks) === J(remote.tasks), `${op} trail200: tasks 保留`, J(last.tasks));
+      check(env.calls.choose.length === (op === "choose" ? 1 : 0), `${op} trail200: choose POST 次数`, String(env.calls.choose.length));
+      const wantPrefs = op === "remove" ? 1 : 1;
+      check(env.calls.prefsPuts.length === wantPrefs, `${op} trail200: prefs PUT 次数`, J(env.calls.prefsPuts));
+    }
+    // trail 500：零写入、精确提示
+    {
+      const env = mk({ trailGetFail: true });
+      const before = J(env.trail());
+      await run(env, op);
+      check(r4Writes(env) === 0, `${op} trail500: 零写入`, J(env.calls));
+      check(env.toasts.length === 1 && env.toasts[0] === "没读到已收藏的方向，这次没有改", `${op} trail500: 精确提示`, J(env.toasts));
+      check(J(env.trail()) === before, `${op} trail500: 本地 trail 不变`, J(env.trail()));
+    }
+  }
+  // choose + prefs 500：trail 已按新值写入，保留原提示，不 PUT prefs
+  {
+    const env = mk({ prefsGetFail: true });
+    await env.chooseDirection("520.20");
+    const last = env.calls.trailPuts[env.calls.trailPuts.length - 1] || {};
+    check(J(last.dirs) === J(["190.20", "110.67", "520.20"]) && J(last.sel) === J(["110.67", "520.20"]), "choose prefs500: trail 按新读值写", J(last));
+    check(env.calls.prefsPuts.length === 0, "choose prefs500: 0 次 prefs PUT", J(env.calls.prefsPuts));
+    check(env.toasts.includes("方向已确认，收藏列表没读到，没有改「我的」"), "choose prefs500: 原提示", J(env.toasts));
+  }
+  // add 已在新读的 trail 里：按新值判重，零写入
+  {
+    const env = mk({});
+    await env.addMyDirection("110.67");
+    check(r4Writes(env) === 0 && env.toasts.includes("已经在我的方向里"), "add 已在远端 trail：按新值判重", J(env.toasts));
+  }
+}
+
+async function r4Boot() {
+  console.log("=== R4-02 boot 不覆盖明确的 trail 状态 ===");
+  const bootSrc = extract(appSrc, "boot");
+  const start = bootSrc.indexOf("needConsent = !me.consent_ok;");
+  const endMark = "await ensurePortrait();";
+  const end = bootSrc.indexOf(endMark, start);
+  if (start < 0 || end < 0) throw new Error("找不到 boot 里的 prefs/画像段");
+  const block = bootSrc.slice(start + "needConsent = !me.consent_ok;".length, end + endMark.length);
+  const J = JSON.stringify;
+  const cases = [
+    { name: "远端 dirs 有、sel 显式空", remote: { code: "", dirs: ["190.20", "110.67"], sel: [] }, puts: 0, dirs: ["190.20", "110.67"], sel: [] },
+    { name: "远端 dirs/sel 都显式空", remote: { code: "", dirs: [], sel: [] }, puts: 0, dirs: [], sel: [] },
+    { name: "trail GET 500（本地空）", fail: true, puts: 0, dirs: [], sel: [] },
+    { name: "trail GET 500（本地缺 sel）", fail: true, local: { code: "", dirs: ["190.20"] }, puts: 0, dirs: ["190.20"], sel: [] },
+    { name: "旧 schema 成功读到：从 prefs 迁移一次", remote: { code: "" }, puts: 1, dirs: ["190.20", "110.67"], sel: ["190.20", "110.67"] },
+    { name: "远端仅缺 sel：保留补全", remote: { code: "", dirs: ["190.20"] }, puts: 1, dirs: ["190.20"], sel: ["190.20"] },
+  ];
+  for (const c of cases) {
+    const env = r4Env({ prefs: ["190.20", "110.67"], remote: c.remote, trailGetFail: c.fail, local: c.local, portraitId: "" });
+    const names = ["loadPrefs", "trailStorageKey", "trail", "saveTrail", "pullTrail", "ensureSelKey", "adoptLegacyTrail", "ensurePortrait"];
+    const fns = new Function("S", "api", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
+      r4Pick(names) + "; return {loadPrefs, ensurePortrait, trail};")(
+      env.S, env.api, () => {}, env.window, env.RG_DIR, {}, env.ls);
+    const run = new Function("S", "api", "loadPrefs", "ensurePortrait", "localStorage",
+      "return (async () => { let needConsent = false; " + block + " })();");
+    await run(env.S, env.api, fns.loadPrefs, fns.ensurePortrait, env.ls);
+    const t = fns.trail();
+    check(J(env.S.myDirs) === J(["190.20", "110.67"]), `${c.name}: S.myDirs 恢复`, J(env.S.myDirs));
+    check(env.calls.trailPuts.length === c.puts, `${c.name}: trail PUT ${c.puts} 次`, J(env.calls.trailPuts));
+    check(J(t.dirs) === J(c.dirs) && J(t.sel) === J(c.sel), `${c.name}: 最终 dirs/sel`, J({ dirs: t.dirs, sel: t.sel }));
+  }
+}
+
+function r4Dom() {
+  const mk = (tag) => {
+    const n = {
+      tag, className: "", innerHTML: "", children: [], hidden: false, onclick: null, onsubmit: null,
+      attrs: {}, value: "", type: "",
+      appendChild(c) { n.children.push(c); return c; },
+      append(...cs) { cs.forEach((c) => n.children.push(c)); },
+      setAttribute(k, v) { n.attrs[k] = v; },
+      focus() {},
+    };
+    return n;
+  };
+  return { createElement: mk };
+}
+
+function r4Walk(n, out = []) { out.push(n); (n.children || []).forEach((c) => r4Walk(c, out)); return out; }
+
+async function r4Retry() {
+  console.log("=== R4-10 prefs 失败有可见重试 ===");
+  const J = JSON.stringify;
+  const mk = (o) => {
+    const env = r4Env(Object.assign({ prefs: ["110.67"], prefsGetFail: true }, o));
+    env.views = [];
+    const document = r4Dom();
+    const names = ["el", "esc", "loadPrefs", "trailStorageKey", "trail", "saveTrail", "selectedDirs",
+      "ensureSelKey", "pullTrail", "portraitSection"];
+    const fns = new Function("S", "api", "toast", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
+      "document", "setView", "dirTitle", "paintChrome", "portraitOp", "removeMyDirection", "ensurePortrait", "enterApp",
+      r4Pick(names) + "; return {loadPrefs, portraitSection, trail};")(
+      env.S, env.api, env.toast, () => {}, env.window, env.RG_DIR, {}, env.ls,
+      document, (v) => env.views.push(v), (x) => "T" + x, () => {}, () => {}, () => {}, () => {}, () => {});
+    return Object.assign(env, fns);
+  };
+  const texts = (box) => r4Walk(box).map((n) => n.innerHTML);
+  // 1. prefs500 + 本地无 trail：显示提示与同名按钮，不显示假空态
+  {
+    const env = mk({ local: { code: "", dirs: [], sel: [] }, remote: { code: "", dirs: ["110.67"], sel: ["110.67"] } });
+    const ok = await env.loadPrefs();
+    check(ok === false && env.S.myDirs === undefined, "loadPrefs500 → S.myDirs undefined");
+    const box = await env.portraitSection();
+    const nodes = r4Walk(box);
+    const tip = nodes.filter((n) => n.tag === "p" && n.innerHTML === "收藏未加载，请重试");
+    const btn = nodes.filter((n) => n.tag === "button" && n.innerHTML === "收藏未加载，请重试");
+    check(tip.length === 1 && btn.length === 1, "显示「收藏未加载，请重试」文字与同名按钮", J(texts(box)));
+    check(!texts(box).some((x) => String(x).includes("这份画像还没有加方向")), "不显示「这份画像还没有加方向」");
+    // 仍失败：点击后不重绘、状态保留
+    if (btn[0] && btn[0].onclick) await btn[0].onclick();
+    check(env.views.length === 0 && env.S.myDirs === undefined, "重试仍失败：不重绘、保留未加载状态", J(env.views));
+    // 恢复 200：点击 → loadPrefs → pullTrail → 重绘
+    env.net.prefsGetFail = false;
+    const g0 = env.calls.trailGets;
+    if (btn[0] && btn[0].onclick) await btn[0].onclick();
+    check(J(env.S.myDirs) === J(["110.67"]), "重试成功：S.myDirs 恢复", J(env.S.myDirs));
+    check(env.calls.trailGets === g0 + 1 && J(env.trail().dirs) === J(["110.67"]), "重试成功后拉了 trail", J(env.trail()));
+    check(env.views.length === 1 && env.views[0] === "me", "重试成功后重绘「我的」", J(env.views));
+    const box2 = await env.portraitSection();
+    check(!texts(box2).some((x) => String(x).includes("收藏未加载")) && texts(box2).some((x) => String(x).includes("T110.67")),
+      "重绘后显示收藏、不再提示未加载", J(texts(box2)));
+  }
+  // 2. prefs500 但已确认的 trail 非空：照常展示
+  {
+    const env = mk({ local: { code: "", dirs: ["110.67"], sel: ["110.67"] } });
+    await env.loadPrefs();
+    const box = await env.portraitSection();
+    check(texts(box).some((x) => String(x).includes("T110.67")), "未加载时已确认的 trail 仍展示", J(texts(box)));
+    check(!texts(box).some((x) => String(x).includes("这份画像还没有加方向")), "未加载时不显示空收藏结论");
+  }
+}

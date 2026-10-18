@@ -39,3 +39,13 @@ def test_conflict_action_survives_task_reopen():
 
 def test_draft_failure_shows_retry_notice():
     _run("retry")
+def test_direction_writes_preserve_fresh_trail():
+    _run("r4-dirs")
+
+
+def test_boot_preserves_explicit_trail_state():
+    _run("r4-boot")
+
+
+def test_prefs_failure_has_visible_retry():
+    _run("r4-retry")
