@@ -400,6 +400,9 @@ async function retry() {
   if (which === "r4-boot" || which === "all") await r4Boot();
   if (which === "r4-retry" || which === "all") await r4Retry();
   if (which === "direction-context" || which === "all") await directionCtx();
+  if (which === "direction-context-errors" || which === "all") await directionCtxErrors();
+  if (which === "direction-context-save" || which === "all") await directionCtxSave();
+  if (which === "direction-context-ui" || which === "all") await directionCtxUi();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -738,5 +741,349 @@ async function directionCtx() {
     check(J(env.store.trails.p1) === J(env.A) && J(env.store.prefs.directions) === J(["190.20"]), "clearSession: 远端不变", J(env.store));
     check(env.writes.length === w0, "clearSession: 放行后零 POST/PUT", J(env.writes.slice(w0)));
     check(env.toasts.length === t0, "clearSession: 无旧操作提示", J(env.toasts.slice(t0)));
+  }
+}
+
+/* ===================== R6-01 / R6-02 拒绝响应、保存完成与 UI 后续动作也校验纪元（第六轮，独立区块） ===================== */
+function r6Storage() {
+  const mem = {};
+  return {
+    mem,
+    get length() { return Object.keys(mem).length; },
+    key: (i) => Object.keys(mem)[i] ?? null,
+    getItem: (k) => (k in mem ? mem[k] : null),
+    setItem: (k, v) => { mem[k] = String(v); },
+    removeItem: (k) => { delete mem[k]; },
+  };
+}
+
+function r6Dom() {
+  const parse = (sel) => {
+    if (sel.includes("[")) return null;
+    const m = /^([a-z0-9]*)((?:[.#][\w-]+)*)$/i.exec(sel);
+    if (!m) return null;
+    const parts = m[2].match(/[.#][\w-]+/g) || [];
+    return { tag: m[1].toLowerCase(), cls: parts.filter((p) => p[0] === ".").map((p) => p.slice(1)),
+      id: (parts.find((p) => p[0] === "#") || "").slice(1) };
+  };
+  const matches = (n, q) => q && (!q.tag || n.tag === q.tag) && (!q.id || n.id === q.id)
+    && q.cls.every((c) => String(n.className).split(/\s+/).includes(c));
+  const walk = (n, out = []) => { n.children.forEach((c) => { out.push(c); walk(c, out); }); return out; };
+  const mk = (tag) => {
+    let html = "";
+    const n = {
+      tag: String(tag).toLowerCase(), id: "", className: "", children: [], parent: null, hidden: false,
+      onclick: null, onsubmit: null, attrs: {}, dataset: {}, value: "", type: "", textContent: "",
+      get innerHTML() { return html; },
+      set innerHTML(v) { html = String(v); n.children.forEach((c) => { c.parent = null; }); n.children = []; },
+      appendChild(c) { if (c.parent) c.remove(); c.parent = n; n.children.push(c); return c; },
+      append(...cs) { cs.forEach((c) => n.appendChild(c)); },
+      remove() { if (n.parent) { n.parent.children = n.parent.children.filter((x) => x !== n); n.parent = null; } },
+      setAttribute(k, v) { n.attrs[k] = v; },
+      removeAttribute(k) { delete n.attrs[k]; },
+      focus() {},
+      querySelector(s) { const q = parse(s); return walk(n).find((x) => matches(x, q)) || null; },
+      querySelectorAll(s) { const q = parse(s); return walk(n).filter((x) => matches(x, q)); },
+      classList: {
+        contains: (c) => String(n.className).split(/\s+/).includes(c),
+        add: (c) => { if (!n.classList.contains(c)) n.className = (n.className + " " + c).trim(); },
+        remove: (c) => { n.className = String(n.className).split(/\s+/).filter((x) => x && x !== c).join(" "); },
+        toggle: (c, on) => { const v = on === undefined ? !n.classList.contains(c) : !!on; if (v) n.classList.add(c); else n.classList.remove(c); return v; },
+      },
+    };
+    return n;
+  };
+  const body = mk("body");
+  return {
+    body,
+    createElement: mk,
+    getElementById: (id) => walk(body).find((x) => x.id === id) || null,
+    querySelector: (s) => body.querySelector(s),
+    querySelectorAll: (s) => body.querySelectorAll(s),
+  };
+}
+
+function r6Walk(n, out = []) { out.push(n); (n.children || []).forEach((c) => r6Walk(c, out)); return out; }
+
+function r6Env() {
+  const RG_DIR = r4LoadDir();
+  const window = { RG_DIR, confirm: () => true, scrollTo: () => {}, innerWidth: 1280 };
+  const A = { code: "", dir: "190.20", dirs: ["190.20"], sel: ["190.20"], tasks: { a: { note: "A keep" } }, done: [], byDir: {} };
+  const B = { code: "", dir: "110.67", dirs: ["110.67"], sel: ["110.67"], tasks: { b: { note: "B keep" } }, done: [], byDir: {} };
+  const C = (x) => JSON.parse(JSON.stringify(x));
+  const store = { active: "p1", trails: { p1: C(A), p2: C(B) }, prefs: { directions: ["190.20"] } };
+  const calls = [];
+  const env = { A, B, store, calls, toasts: [], draws: [], holdOn: null, gate: hold(), st: { held: false }, fail: [] };
+  const list = () => ({ portraits: ["p1", "p2"].map((id, i) => ({
+    id, active: store.active === id, name: "", label: i ? "画像二" : "画像一", default_label: "", custom: false, dirs: [], sel: [] })) });
+  const err500 = () => { const e = new Error("服务器出错"); e.status = 500; return e; };
+  const serve = (m, url, body) => {
+    if (env.fail.some((f) => f(m, url))) throw err500();
+    if (url === "/api/me/prefs" && m === "GET") return C(store.prefs);
+    if (url === "/api/me/prefs" && m === "PUT") { if (body.directions) store.prefs.directions = body.directions.slice(); return C(store.prefs); }
+    const tm = /^\/api\/projects\/(p1|p2)\/trail$/.exec(url);
+    if (tm && m === "GET") return C(store.trails[tm[1]]);
+    if (tm && m === "PUT") { store.trails[tm[1]] = C(body.data); return {}; }
+    if (url === "/api/directions/choose" && m === "POST") return {};
+    if (url === "/api/portraits/activate" && m === "POST") { store.active = body.id; return list(); }
+    if (url === "/api/portraits?uid=u1" && m === "GET") return list();
+    if (url === "/api/tasks?uid=u1" && m === "GET") return { tasks: [] };
+    if (url === "/api/onboard/result?uid=u1" && m === "GET") return { facts: [] };
+    if (url === "/api/directions/recommend?uid=u1" && m === "GET") return { cards: [] };
+    if (url.startsWith("/api/explore/courses?") && m === "GET") return { ok: true, source: "catalog", items: [] };
+    throw new Error("未预期的请求 " + m + " " + url);
+  };
+  const api = async (m, url, body) => {
+    calls.push({ m, url, body: C(body || {}) });
+    await null;
+    if (env.holdOn && !env.st.held && env.holdOn(m, url)) {
+      env.st.held = true;
+      let res, err;
+      try { res = serve(m, url, body); } catch (e) { err = e; }  // 写已落库，回包挂起
+      const mode = await env.gate.p;
+      if (mode === "fail") throw err500();
+      if (err) throw err;
+      return res;
+    }
+    return serve(m, url, body);
+  };
+  const ls = r6Storage();
+  ls.setItem("rg_trail_u1_p1", JSON.stringify(A));
+  ls.setItem("rg_trail_owner_u1", "p1");
+  const ss = r6Storage();
+  const document = r6Dom();
+  const $app = document.createElement("main");
+  document.body.appendChild($app);
+  const S = { myDirs: ["190.20"], uid: "u1", token: "t", nickname: "N", portraitId: "p1", portraitName: "", mePortrait: "",
+    view: "me", entered: true, dirPicked: null };
+  const decl = [/^const PARK_KEY\b.*$/m].map((re) => (re.exec(appSrc) || [""])[0]).join("\n");
+  const names = ["el", "esc", "dirTitle", "loadPrefs", "putPrefs", "trailStorageKey", "trail", "saveTrail", "selectedDirs",
+    "portraitDirsAdd", "readTrailForWrite", "addMyDirection", "removeMyDirection", "chooseDirection",
+    "ensureSelKey", "pullTrail", "ensurePortrait", "adoptLegacyTrail", "portraitOp", "portraitSection",
+    "clearLocalDrafts", "clearSession", "persistSession", "setSession", "setView", "stale",
+    "visibleTaxonomy", "cloneDirNode", "recDirIds", "openDirSheet", "renderCards", "loadCourses"];
+  const fns = new Function("S", "api", "toast", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage", "sessionStorage",
+    "document", "$app", "$nav", "$header", "paintChrome", "render", "enterApp", "closeUserMenu", "applyLlmPill", "reloadInto",
+    "drawFieldTree", "TUTORIALS", "WORKSPACE", "RESUMABLE", "stopField",
+    dirCtxSrc() + "\n" + decl + "\n" + r4Pick(names) +
+    "; return {addMyDirection, removeMyDirection, chooseDirection, loadPrefs, portraitSection, clearSession, setSession, setView, renderCards};")(
+    S, api, (t) => env.toasts.push(t), () => {}, window, RG_DIR, {}, ls, ss,
+    document, $app, { hidden: false }, { hidden: false },
+    () => env.draws.push("paintChrome"), () => { S.renderSeq = (S.renderSeq || 0) + 1; env.draws.push("render:" + S.view); },
+    () => { throw new Error("enterApp 不应被调用"); }, () => {}, () => {}, () => { throw new Error("reloadInto 不应被调用"); },
+    (tax, picked, onPick) => { env.pick = onPick; return document.createElement("svg"); },
+    { stub: {} }, {}, {}, null);
+  return Object.assign(env, { RG_DIR, ls, S, document }, fns);
+}
+
+async function r6WaitHeld(env) { for (let i = 0; i < 100 && !env.st.held; i++) await tick(); return env.st.held; }
+
+async function r6Swap(env, to) {
+  env.S.mePortrait = to;
+  const box = await env.portraitSection();
+  const btn = r6Walk(box).find((n) => n.tag === "button" && n.innerHTML === "更换到该画像");
+  if (!btn || !btn.onclick) return false;
+  await btn.onclick();
+  return true;
+}
+
+function r6Holds() {
+  return {
+    trailGet: (m, url) => m === "GET" && url === "/api/projects/p1/trail",
+    prefsGet: (m, url) => m === "GET" && url === "/api/me/prefs",
+    trailPut: (m, url) => m === "PUT" && url === "/api/projects/p1/trail",
+    prefsPut: (m, url) => m === "PUT" && url === "/api/me/prefs",
+    choose: (m, url) => m === "POST" && url === "/api/directions/choose",
+  };
+}
+
+function r6Run(env, op) {
+  return op === "add" ? env.addMyDirection("520.20") : op === "choose" ? env.chooseDirection("520.20") : env.removeMyDirection("190.20");
+}
+
+function r6Snap(env) {
+  const J = (x) => JSON.stringify(x, (k, v) => (v === undefined ? "__undefined__" : v));
+  return { S: J(env.S), ls: J(env.ls.mem), remote: J(env.store), calls: env.calls.length, toasts: env.toasts.length, draws: env.draws.length };
+}
+
+function r6Same(env, name, before) {
+  const J = JSON.stringify;
+  const now = r6Snap(env);
+  check(now.S === before.S, `${name}: 当前 S 每个字段不变`, now.S === before.S ? "" : now.S);
+  check(now.ls === before.ls, `${name}: localStorage 不变`, now.ls === before.ls ? "" : now.ls);
+  check(now.remote === before.remote, `${name}: 远端不变`, now.remote === before.remote ? "" : now.remote);
+  check(now.calls === before.calls, `${name}: 零后续请求`, J(env.calls.slice(before.calls)));
+  check(now.toasts === before.toasts, `${name}: 零提示`, J(env.toasts.slice(before.toasts)));
+  check(now.draws === before.draws, `${name}: 零绘制`, J(env.draws.slice(before.draws)));
+}
+
+function r6Lifecycles() {
+  return {
+    "切p2": async (env) => (await r6Swap(env, "p2")) && env.S.portraitId === "p2",
+    "p1→p2→p1": async (env) => (await r6Swap(env, "p2")) && (await r6Swap(env, "p1")) && env.S.portraitId === "p1",
+    "clearSession()": async (env) => { env.clearSession(); return env.S.uid === ""; },
+    "clearSession(true)": async (env) => { env.clearSession(true); return env.S.uid === ""; },
+    "setSession同人": async (env) => !env.setSession({ uid: "u1", token: "t", nickname: "N" }) && env.S.uid === "u1",
+    "切换请求失败": async (env) => {
+      env.fail.push((m, url) => url === "/api/portraits/activate");
+      const ok = await r6Swap(env, "p2");
+      return ok && env.S.portraitId === "p1";
+    },
+  };
+}
+
+async function directionCtxErrors() {
+  console.log("=== R6-01 拒绝回包与成功回包在生命周期变化后同样作废 ===");
+  const H = r6Holds();
+  const plan = { add: ["trailGet", "prefsGet", "trailPut", "prefsPut"], remove: ["trailGet", "prefsGet", "trailPut", "prefsPut"],
+    choose: ["trailGet", "choose", "trailPut", "prefsGet", "prefsPut"] };
+  const lifes = r6Lifecycles();
+  for (const op of Object.keys(plan)) {
+    for (const h of plan[op]) {
+      for (const life of Object.keys(lifes)) {
+        for (const mode of ["ok", "fail"]) {
+          const name = `${op} 挂起 ${h} → ${life} → 放行${mode === "ok" ? "成功" : "500"}`;
+          const env = r6Env();
+          env.holdOn = H[h];
+          const p = r6Run(env, op);
+          let thrown = null;
+          p.catch((e) => { thrown = e; });
+          if (!(await r6WaitHeld(env))) { check(false, `${name}: 请求已挂起`); continue; }
+          check(await lifes[life](env), `${name}: 生命周期已变化`);
+          const before = r6Snap(env);
+          env.gate.open(mode);
+          await p.catch(() => {});
+          await tick();
+          check(thrown === null, `${name}: 旧操作不抛错`, String(thrown));
+          r6Same(env, name, before);
+        }
+      }
+    }
+  }
+}
+
+async function directionCtxSave() {
+  console.log("=== R6-01 trail 保存完成后先校验纪元，再读当前收藏 ===");
+  const H = r6Holds();
+  for (const op of ["add", "remove", "choose"]) {
+    for (const how of ["原「移出」读prefs500", "直接loadPrefs500"]) {
+      for (const mode of ["ok", "fail"]) {
+        const name = `${op} 挂起 trail PUT → 切p2 → ${how} → 放行${mode === "ok" ? "成功" : "500"}`;
+        const env = r6Env();
+        env.holdOn = H.trailPut;
+        const p = r6Run(env, op);
+        let thrown = null;
+        p.catch((e) => { thrown = e; });
+        if (!(await r6WaitHeld(env))) { check(false, `${name}: 请求已挂起`); continue; }
+        check(await r6Swap(env, "p2") && env.S.portraitId === "p2", `${name}: 已切到 p2`);
+        env.fail.push((m, url) => m === "GET" && url === "/api/me/prefs");
+        if (how === "直接loadPrefs500") {
+          check((await env.loadPrefs()) === false, `${name}: 当前 loadPrefs 失败`);
+        } else {
+          env.S.mePortrait = "";
+          const box = await env.portraitSection();
+          const drop = r6Walk(box).find((n) => n.tag === "button" && n.innerHTML === "移出");
+          check(!!(drop && drop.onclick), `${name}: 找到 p2 原「移出」按钮`);
+          if (drop && drop.onclick) await drop.onclick();
+          check(env.toasts[env.toasts.length - 1] === "没读到已收藏的方向，这次没有改", `${name}: 当前移出如实提示`, JSON.stringify(env.toasts));
+        }
+        check(env.S.myDirs === undefined, `${name}: 当前 S.myDirs 合法变为未知`);
+        const before = r6Snap(env);
+        env.gate.open(mode);
+        await p.catch(() => {});
+        await tick();
+        check(thrown === null, `${name}: 旧操作不抛错`, String(thrown));
+        check(env.S.myDirs === undefined, `${name}: 当前 S.myDirs 仍是未知`);
+        r6Same(env, name, before);
+      }
+    }
+  }
+  // 失败的 portraitOp：pid 不变、纪元已变，旧 prefs GET 回包不得清当前收藏
+  for (const mode of ["ok", "fail"]) {
+    const name = `add 挂起 prefs GET → 切换请求失败 → 放行${mode === "ok" ? "成功" : "500"}`;
+    const env = r6Env();
+    env.holdOn = H.prefsGet;
+    const p = env.addMyDirection("520.20");
+    let thrown = null;
+    p.catch((e) => { thrown = e; });
+    check(await r6WaitHeld(env), `${name}: 请求已挂起`);
+    check(await r6Lifecycles()["切换请求失败"](env), `${name}: 切换失败，pid 仍 p1`);
+    const before = r6Snap(env);
+    env.gate.open(mode);
+    await p.catch(() => {});
+    await tick();
+    check(thrown === null, `${name}: 旧操作不抛错`, String(thrown));
+    check(Array.isArray(env.S.myDirs) && env.S.myDirs.length === 1 && env.S.myDirs[0] === "190.20", `${name}: S.myDirs 仍是 ['190.20']`, String(env.S.myDirs));
+    check(!env.toasts.slice(before.toasts).includes("没读到已收藏的方向，这次没有改"), `${name}: 无「没读到」提示`);
+    r6Same(env, name, before);
+  }
+}
+
+async function directionCtxUi() {
+  console.log("=== R6-02 原 UI 调用方在切画像后不再执行后续动作 ===");
+  const J = JSON.stringify;
+  const H = r6Holds();
+  const courses = (env) => env.calls.filter((c) => c.m === "GET" && c.url.startsWith("/api/explore/courses?")).length;
+  const caches = (env) => J([env.ls.getItem("rg_trail_u1_p1"), env.ls.getItem("rg_trail_u1_p2"), env.store.trails, env.store.prefs]);
+  const cases = [["添加到我的方向", "520.20"], ["取消添加", "190.20"], ["确认这个方向", "520.20"]];
+  for (const [label, id] of cases) {
+    for (const mode of ["ok", "fail"]) {
+      const name = `原弹层「${label}」挂起 trail GET → 切p2 → 放行${mode === "ok" ? "成功" : "500"}`;
+      const env = r6Env();
+      env.S.view = "cards";
+      await env.renderCards();
+      await tick();
+      check(typeof env.pick === "function", `${name}: 原 renderCards 已画树`);
+      env.pick({ id });
+      const sheet = env.document.getElementById("nodeSheet");
+      check(!!sheet && env.S.dirPicked === id, `${name}: 原方向弹层已打开`);
+      const btn = sheet && r6Walk(sheet).find((n) => n.tag === "button" && n.innerHTML === label);
+      check(!!(btn && btn.onclick), `${name}: 找到弹层「${label}」按钮`);
+      if (!btn || !btn.onclick) continue;
+      await tick();
+      env.holdOn = H.trailGet;
+      const p = btn.onclick();
+      let thrown = null;
+      Promise.resolve(p).catch((e) => { thrown = e; });
+      check(await r6WaitHeld(env), `${name}: trail GET 已挂起`);
+      check(await r6Swap(env, "p2"), `${name}: 点了真实「更换到该画像」`);
+      check(env.S.portraitId === "p2" && env.S.view === "me" && !env.document.getElementById("nodeSheet") && env.S.dirPicked === null,
+        `${name}: 已切 p2 且旧弹层被原 setView 删除`, J({ pid: env.S.portraitId, view: env.S.view, picked: env.S.dirPicked }));
+      const c0 = courses(env), k0 = caches(env), t0 = env.toasts.length;
+      env.gate.open(mode);
+      await Promise.resolve(p).catch(() => {});
+      await tick();
+      check(thrown === null, `${name}: 旧操作不抛错`, String(thrown));
+      check(!env.document.getElementById("nodeSheet"), `${name}: 旧弹层没有被重新插入`);
+      check(env.S.dirPicked === null, `${name}: S.dirPicked 仍是 null`, String(env.S.dirPicked));
+      check(courses(env) === c0, `${name}: 没有额外课程 GET`);
+      check(caches(env) === k0, `${name}: 两画像缓存/远端不变`, caches(env));
+      check(env.toasts.length === t0, `${name}: 无旧操作提示`, J(env.toasts.slice(t0)));
+    }
+  }
+  for (const mode of ["ok", "fail"]) {
+    const name = `原「移出」挂起 trail GET → 切p2 → 进今日 → 放行${mode === "ok" ? "成功" : "500"}`;
+    const env = r6Env();
+    env.S.view = "me";
+    const box = await env.portraitSection();
+    const drop = r6Walk(box).find((n) => n.tag === "button" && n.innerHTML === "移出");
+    check(!!(drop && drop.onclick), `${name}: 找到 p1 原「移出」按钮`);
+    if (!drop || !drop.onclick) continue;
+    env.holdOn = H.trailGet;
+    const p = drop.onclick();
+    let thrown = null;
+    Promise.resolve(p).catch((e) => { thrown = e; });
+    check(await r6WaitHeld(env), `${name}: trail GET 已挂起`);
+    check(await r6Swap(env, "p2") && env.S.portraitId === "p2", `${name}: 已切 p2`);
+    env.setView("today");
+    check(env.S.view === "today", `${name}: 已进今日页`);
+    const k0 = caches(env), t0 = env.toasts.length;
+    env.gate.open(mode);
+    await Promise.resolve(p).catch(() => {});
+    await tick();
+    check(thrown === null, `${name}: 旧操作不抛错`, String(thrown));
+    check(env.S.view === "today", `${name}: 最终仍停在今日页`, env.S.view);
+    check(caches(env) === k0, `${name}: 两画像缓存/远端不变`, caches(env));
+    check(env.toasts.length === t0, `${name}: 无旧操作提示`, J(env.toasts.slice(t0)));
   }
 }

@@ -2181,7 +2181,11 @@ function directionContext() {
   return c;
 }
 
-async function dirAwait(c, run) { c.check(); const r = await run(); c.check(); return r; }
+async function dirAwait(c, run) {
+  c.check();
+  try { return await run(); }
+  finally { c.check(); }
+}
 
 async function readTrailForWrite(c) {
   try {
@@ -2406,7 +2410,10 @@ async function portraitSection() {
       if (isActive) {
         const drop = el("button", "btn small ghost", "移出");
         drop.type = "button";
-        drop.onclick = async () => { await removeMyDirection(nodeId); setView("me"); };
+        drop.onclick = async () => {
+          const c = directionContext();
+          try { await removeMyDirection(nodeId); c.check(); setView("me"); } catch (e) { if (e !== STALE_DIR) throw e; }
+        };
         row.appendChild(drop);
       }
       list.appendChild(row);
@@ -3119,7 +3126,8 @@ function saveTrail(t, force, c) {
   localStorage.setItem(c ? c.key : trailStorageKey(), JSON.stringify(packed));
   if (c ? c.token : S.token) {
     const pid = c ? c.pid : (S.portraitId || "default");
-    return api("PUT", `/api/projects/${pid}/trail`, { data: packed }).catch(() => {});
+    const run = () => api("PUT", `/api/projects/${pid}/trail`, { data: packed });
+    return (c ? dirAwait(c, run) : run()).catch((e) => { if (e === STALE_DIR) throw e; });
   }
   return Promise.resolve();
 }
@@ -3468,10 +3476,14 @@ function openDirSheet(node, ctx) {
   const add = el("button", "btn secondary", dirAdded ? "取消添加" : "添加到我的方向");
   add.type = "button";
   add.onclick = async () => {
-    if (dirAdded) await removeMyDirection(node.id);
-    else await addMyDirection(node.id);
-    // 重建浮层：对勾和按钮当场换过来，树也跟着重画
-    ctx.onPick(node.id);
+    const c = directionContext();
+    try {
+      if (dirAdded) await removeMyDirection(node.id);
+      else await addMyDirection(node.id);
+      c.check();
+      // 重建浮层：对勾和按钮当场换过来，树也跟着重画
+      ctx.onPick(node.id);
+    } catch (e) { if (e !== STALE_DIR) throw e; }
   };
   sheet.appendChild(add);
   sheet.querySelector(".sheet-x").focus({ preventScroll: true });
@@ -3555,8 +3567,10 @@ async function renderCards() {
   const chooseFocus = async () => {
     if (!window.RG_DIR || !RG_DIR.byId[focus]) { toast("先点树上的一个方向"); return; }
     const hadSheet = !!document.getElementById("nodeSheet");
+    const c = directionContext();
     try {
       await chooseDirection(focus);
+      c.check();
       chosenCode = RG_DIR.backendCode(focus);
       chosenDir = focus;
       picked = null;
@@ -3564,7 +3578,7 @@ async function renderCards() {
       paint();
       // 浮层本来开着就刷它：确认即已添加，对勾和「取消添加」当场可见
       if (hadSheet) showDir(focus);
-    } catch (e) { toast(e.message); }
+    } catch (e) { if (e !== STALE_DIR) toast(e.message); }
   };
 
   const paintRec = () => {

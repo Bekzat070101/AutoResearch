@@ -53,3 +53,15 @@ def test_prefs_failure_has_visible_retry():
 
 def test_direction_write_aborts_after_portrait_switch():
     _run("direction-context")
+
+
+def test_direction_rejection_aborts_after_lifecycle_change():
+    _run("direction-context-errors")
+
+
+def test_direction_save_completion_aborts_before_reading_current_prefs():
+    _run("direction-context-save")
+
+
+def test_direction_ui_continuation_aborts_after_portrait_switch():
+    _run("direction-context-ui")
