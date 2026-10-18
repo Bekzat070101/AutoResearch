@@ -88,10 +88,32 @@ def test_history_has_onboard_done(client):
     store.set_onboard_state(uid, {**st, "keep": 1})
     dialogue._sync_onboard_state(uid, {"active_plan": {"direction": "ai"}})
     after = store.get_onboard_state(uid)
-    assert after["phase"] == "done"
+    assert after["phase"] == "gathering"
     assert after.get("keep") == 1
     h1 = client.get("/api/dialogue/history", params={"uid": uid}, headers=_h(token)).json()
-    assert h1["onboard_done"] is True
+    assert h1["onboard_done"] is False
+    assert h1["guide"]["known_count"] == 0
+
+
+def test_message_and_reload_do_not_enter_new_account(client):
+    body = _register(client, "still_guiding")
+    uid, token = body["uid"], body["token"]
+    store.add_message(uid, "user", "我是大一，想先聊聊")
+    me = client.get("/api/auth/me", headers=_h(token)).json()
+    assert me["entered"] is False
+    profile = client.get("/api/onboard/readiness", params={"uid": uid}, headers=_h(token))
+    assert profile.status_code == 200
+    assert profile.json()["first_visit"] is True
+    assert profile.json()["ready"] is False
+    # 提醒不是权限闸门；零信息也可以显式进入。
+    assert client.post("/api/onboard/enter", json={"uid": uid}, headers=_h(token)).json()["entered"]
+
+
+def test_readiness_does_not_disclose_another_accounts_profile(client):
+    a = _register(client, "profile_owner")
+    b = _register(client, "other_owner")
+    assert client.get("/api/onboard/readiness", params={"uid": a['uid']}).status_code == 401
+    assert client.get("/api/onboard/readiness", params={"uid": a['uid']}, headers=_h(b['token'])).status_code == 403
 
 
 def test_enter_during_stream_is_not_409(client):

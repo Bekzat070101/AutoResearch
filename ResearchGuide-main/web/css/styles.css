@@ -424,7 +424,7 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
    不然它会把整页拉得很长，对话面板却停在原地，看起来像错位。
    上限和 .chat-panel 用同一套算法，两列的底边才对得上。 */
 .two-col-chat > .side-panel {
-  max-height: clamp(520px, calc(100vh - 250px), 880px);
+  max-height: clamp(360px, calc(100dvh - 300px), 800px);
   overflow-y: auto;
 }
 
@@ -514,6 +514,13 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
 /* ---------- 登录 ---------- */
 
 .hero { max-width: 460px; margin: 14vh auto 0; }
+.hero.auth-hero {
+  width: 100%; max-width: 440px; margin: clamp(24px, 7vh, 80px) auto 32px;
+  padding: var(--gap-6); border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.auth-hero .hero-lead { line-height: 1.7; }
+.auth-hero .hero-links { flex-wrap: wrap; gap: var(--gap-3); }
 .hero-kicker { font-size: 12px; letter-spacing: 0.2em; color: var(--ink-3); }
 .hero h2 { margin: var(--gap-3) 0 var(--gap-3); font-family: var(--serif); font-size: 36px; letter-spacing: 0.04em; }
 .hero-lead { color: var(--ink-2); margin-bottom: var(--gap-5); }
@@ -523,12 +530,18 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
   min-height: 36px; padding: 0 14px; border-radius: 999px; cursor: pointer;
 }
 .login-tab.on { border-color: var(--teal); color: var(--teal); background: var(--teal-soft); }
-.login-body { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
-.login-body input {
-  min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px;
-  background: #fff; font: inherit;
+.login-body { display: flex; flex-direction: column; gap: var(--gap-4); width: 100%; }
+.login-field { display: grid; gap: var(--gap-2); min-width: 0; }
+.login-field > label { font-size: 14px; color: var(--ink-2); }
+.login-privacy > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+.login-privacy[open] > summary { margin-bottom: var(--gap-2); }
+.login-field > input {
+  width: 100%; min-width: 0; min-height: 46px; padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: var(--bg); color: var(--ink); font: inherit;
 }
-.login-body input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); outline: none; }
+.login-body input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; accent-color: var(--teal); }
+.login-field > input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); outline: none; }
 .login-note { color: var(--ink-2); font-size: 14px; margin: 0; }
 .login-row { display: flex; gap: var(--gap-2); }
 .login-row input {
@@ -638,7 +651,7 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
 .chat-panel {
   display: flex; flex-direction: column; padding: 0; overflow: hidden;
   /* 整块有确定高度，三个区才有稳定的相对大小 */
-  height: clamp(520px, calc(100vh - 250px), 880px);
+  height: clamp(360px, calc(100dvh - 300px), 800px);
 }
 .chat-scroll {
   flex: 1 1 auto; min-height: 180px;
@@ -647,13 +660,28 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
   padding: var(--gap-5) var(--gap-5) var(--gap-4);
 }
 /* 行动区：放得下就撑开，放不下自己滚，绝不占满整屏 */
-.chat-next {
-  flex: 0 1 auto; max-height: 46%; overflow-y: auto;
-  padding: var(--gap-4) var(--gap-5);
-  border-top: 1px solid var(--line);
-  background: var(--bg);
-}
-.chat-next > :last-child { margin-bottom: 0; }
+.chat-followup { flex: 0 0 auto; min-width: 0; }
+.chat-followup:empty, .chat-suggestions:empty { display: none; }
+.chat-followup > :last-child { margin-bottom: 0; }
+.chat-followup .receipt { border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; padding: 12px 0; }
+.chat-followup .receipt > summary { cursor: pointer; margin: 0; color: var(--ink-2); }
+.chat-followup .receipt[open] > summary { margin-bottom: 12px; }
+.chat-suggestions .offer-row { margin: 0 0 var(--gap-3); gap: var(--gap-2); }
+.chat-suggestions .chip { white-space: normal; text-align: left; line-height: 1.5; padding: 7px 12px; }
+.composer-hint { font-size: 11px; color: var(--ink-3); margin: 8px 0 0; }
+.bubble-transcript { width: min(84%, 680px); }
+.pasted-transcript > summary { cursor: pointer; font-size: 13px; }
+.pasted-text { white-space: pre-wrap; max-height: 280px; overflow-y: auto; margin-top: 12px; }
+.guide-area { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.guide-area-label { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 0 0 4px; font-size: 14px; }
+.guide-area-state { color: var(--ink-3); font-size: 12px; }
+.guide-area.is-known .guide-area-state { color: var(--teal); }
+.guide-area-note, .guide-note { font-size: 13px; line-height: 1.7; color: var(--ink-2); margin: 0; overflow-wrap: anywhere; }
+.entry-confirm { width: min(480px, calc(100vw - 40px)); padding: var(--gap-5); border: 1px solid var(--line-strong); border-radius: var(--r-lg); color: var(--ink); background: var(--surface); }
+.entry-confirm::backdrop { background: rgba(28, 40, 35, .3); }
+.entry-confirm h2 { font-size: 24px; margin: 0 0 16px; }
+.entry-confirm > p { margin-bottom: 16px; line-height: 1.8; }
+.entry-confirm .submit-actions { flex-wrap: wrap; }
 /* 刚交完任务回对话时，finishedNote 是插在行动区**前面**的兄弟节点，
    所以它的父节点是 .chat-panel 而不是 .chat-next——它拿不到行动区的内边距，
    会贴着面板边缘。这里补上对齐用的边距。 */
@@ -1502,11 +1530,13 @@ body.is-home .site-footer { display: none; }
   .ws-head h2 { font-size: 26px; }
   .panel { padding: var(--gap-4); }
   .two-col { grid-template-columns: 1fr; }
+  .two-col:has(> .chat-wide) { grid-template-columns: minmax(0, 1fr); }
+  .two-col-chat > .chat-panel { padding: 0; }
+  .two-col-chat > .side-panel { max-height: none; overflow-y: visible; }
   /* 窄屏：不要 fixed 高度的对话面板。页面本身会滚，
      面板再限高会让输入框被挤在一个小格子里。 */
   .chat-panel { height: auto; min-height: 0; }
   .chat-scroll { min-height: 200px; max-height: 56vh; padding: var(--gap-4); }
-  .chat-next { max-height: none; padding: var(--gap-3) var(--gap-4); }
   .chat-input { padding: var(--gap-3) var(--gap-4) var(--gap-4); }
   .task-head { flex-direction: column; gap: var(--gap-1); }
   .stage-pick, .stage-pick.path { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1569,7 +1599,7 @@ body.is-home .site-footer { display: none; }
 /* 对话输入框是 textarea（能换行），上面那条 input 规则是给选课搜索框的。
    align-items 已经并进主规则，这里不再重复写一条。 */
 .chat-input-row textarea {
-  flex: 1; min-width: 0; min-height: 40px; max-height: 160px;
+  flex: 1; min-width: 0; min-height: 48px; max-height: 160px;
   padding: 9px 14px; resize: none; overflow-y: auto;
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: var(--surface); outline: none;
@@ -1861,7 +1891,7 @@ body.is-home .site-footer { display: none; }
 .login-step { margin: var(--gap-3) 0; }
 .login-nick { width: 100%; }
 .login-note { font-size: 13px; color: var(--ink-3); }
-.consent-row { display: flex; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.consent-row { display: flex; gap: var(--gap-2); align-items: center; font-size: 13px; line-height: 1.6; }
 .privacy-box { width: min(560px, 100%); }
 .privacy-body { max-height: 220px; overflow-y: auto; font-size: 14px; line-height: 1.7; padding: 8px 0; }
 .wx-box { margin-top: var(--gap-3); }
@@ -1869,3 +1899,77 @@ body.is-home .site-footer { display: none; }
 .wx-steps { padding-left: 1.2em; font-size: 14px; }
 .wx-code { font-family: var(--mono); letter-spacing: 0.12em; }
 .wx-status { font-size: 13px; color: var(--ink-3); }
+
+@media (max-width: 480px) {
+  .auth-hero { margin-top: 24px; padding: var(--gap-5) var(--gap-4); }
+  .auth-hero h2 { font-size: 28px; }
+}
+
+/* 我的：先看学习背景与可核对的理解，设置按需展开。 */
+.me-page { width: 100%; max-width: 1120px; margin: 0 auto; }
+.me-page > .ws-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center; }
+.me-page > .ws-head h2 { grid-column: 1; margin: 0; }
+.me-page > .ws-head p { grid-column: 1; margin: 0; max-width: 640px; line-height: 1.7; }
+.me-page > .ws-head > button { grid-column: 2; grid-row: 1 / 3; }
+.me-overview { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 20px 24px; margin: 24px 0; border: 1px solid var(--line); border-left: 3px solid var(--teal); border-radius: var(--r-lg); background: var(--surface); }
+.me-overview h3 { font-family: var(--serif); font-size: 24px; margin: 4px 0 6px; }
+.me-kicker { color: var(--teal); font-size: 12px; margin: 0; }
+.me-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; align-items: start; }
+.me-main, .me-aside { display: grid; gap: 20px; min-width: 0; }
+.me-page .panel { margin: 0; padding: 24px; min-width: 0; }
+.me-section-title { font-size: 17px; margin: 0 0 12px; font-weight: 600; }
+.me-course-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.me-course-stat { display: grid; gap: 6px; padding: 12px; background: var(--bg); border-radius: var(--r-md); }
+.me-course-stat span { font-size: 12px; color: var(--ink-2); }
+.me-course-stat strong { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.me-basis-note { margin: 0 0 16px; font-size: 12px; line-height: 1.7; color: var(--ink-2); }
+.me-derived-list { display: grid; gap: 10px; }
+.me-page .mem-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 12px; padding: 13px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.me-page .mem-card:last-child { border-bottom: 0; }
+.me-page .mem-value { grid-column: 1; font-size: 14px; line-height: 1.65; }
+.me-page .mem-meta { grid-column: 1; margin: 0; }
+.me-page .mem-acts { grid-column: 2; grid-row: 1 / 3; align-self: start; margin: 0; font-size: 12px; }
+.me-page .mem-evidence { grid-column: 1 / -1; margin-top: 3px; font-size: 12px; color: var(--ink-2); }
+.mem-evidence > summary { cursor: pointer; }
+.mem-evidence[open] > summary { margin-bottom: 8px; }
+.me-page .mem-basis { font-size: 12px; line-height: 1.7; word-break: break-word; }
+.me-page .mem-layer { border: 0; padding: 0; margin-top: 20px; }
+.me-page .mem-layer-head { font-size: 13px; margin-bottom: 10px; color: var(--ink-2); }
+.me-page .mem-layer-list { gap: 10px; }
+.me-empty { margin: 16px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.7; }
+.me-course-details, .me-import-fold { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
+.me-course-details > summary, .me-import-fold > summary { cursor: pointer; font-size: 13px; color: var(--teal-ink); line-height: 1.7; }
+.me-course-details[open] > summary, .me-import-fold[open] > summary { margin-bottom: 14px; }
+.me-table-scroll { overflow-x: auto; max-height: 360px; margin-top: 12px; }
+.me-course-table { border-collapse: collapse; width: 100%; min-width: 480px; font-size: 12px; }
+.me-course-table th, .me-course-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.me-course-table th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 500; }
+.me-settings-fold > summary { cursor: pointer; font-size: 14px; font-weight: 600; line-height: 1.6; }
+.me-settings-fold > .form-note { margin: 10px 0 0; }
+.me-settings-fold > .panel { padding: 0; border: 0; background: none; margin-top: 16px; }
+.me-aside .account-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.me-page .coverage { margin: 16px 0 0; }
+.me-page .cov-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.me-page .cov-col { border-left: 1px solid var(--line); }
+.me-page .cov-head { justify-content: space-between; }
+.me-page .cov-slot { width: 100%; border: 0; background: none; text-align: left; font: inherit; cursor: pointer; padding: 9px 0; }
+.me-page .cov-label { display: grid; gap: 4px; }
+.me-page .cov-value { max-width: none; white-space: normal; overflow-wrap: anywhere; font-weight: 400; }
+.me-page .cov-empty { font-size: 12px; color: var(--ink-3); }
+.receipt-import > summary { cursor: pointer; margin-bottom: 0; line-height: 1.7; }
+.receipt-import[open] > summary { margin-bottom: 12px; }
+@media (max-width: 1000px) {
+  .me-layout { grid-template-columns: minmax(0, 1fr); }
+  .me-aside { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+}
+@media (max-width: 600px) {
+  .me-page > .ws-head { grid-template-columns: minmax(0, 1fr); }
+  .me-page > .ws-head > button { grid-column: 1; grid-row: auto; justify-self: start; }
+  .me-overview { padding: 16px; gap: 12px; align-items: start; }
+  .me-page .panel { padding: 18px 16px; }
+  .me-course-stats { gap: 6px; }
+  .me-course-stat { padding: 10px 8px; }
+  .me-course-stat strong { font-size: 18px; }
+  .me-aside, .me-page .cov-grid { grid-template-columns: minmax(0, 1fr); }
+  .me-page .mem-card { padding: 12px 0; gap: 6px; }
+}

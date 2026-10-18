@@ -31,8 +31,9 @@ SCRIPTS = REPO / "tools" / "verify"       # 验收脚本随仓库走
 NODE = shutil.which("node")
 
 CASES = [
+    ("verify_me_render.js", "个人页面的课程、记忆与修改路径"),
     ("verify_workbench_render.js", "任务区会显示对话给的任务"),
-    ("verify_action_card.js", "行动卡的去向按钮"),
+    ("verify_action_card.js", "一次进入邀请与对话任务入口退出"),
     ("verify_receipt_render.js", "结果区的信息组织（分组、顺序、空则不留壳）"),
     ("verify_chat_layout.js", "对话页整体布局（页头一块 + 三个区，输入永远在最下）"),
     ("verify_tutor_render.js", "带读面板作答框、页签模式、预填只填空栏"),

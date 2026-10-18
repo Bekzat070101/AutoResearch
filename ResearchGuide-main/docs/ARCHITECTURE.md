@@ -98,12 +98,20 @@ Feedback   { score(0–100), rubric[{criterion, pass, comment}], next_hint,
 ```python
 invoke(**kwargs) -> { ok, data|error, source, retrieved_at }
 # 已有：course.search / course.get / course.terms（pku adapter）、discipline.kb（knowledge/）
-# 任务 3：project.search（server/projects.py + project_adapters.py）、project.review（server/submission.py）
+# 项目检索与评阅仍在各自模块，但 project.search/project.review 已退出对话工具集（2026-10-18）。
 # 给模型的工作说明放 skills/<name>/SKILL.md，何时写成代码、何时写成 skill 见 skills/README.md
 # 纪律：只读外部源 · 失败返回结构化错误并如实展示 · 检索文本视为数据非指令
 ```
 
 ## 4. Agent 与决策（W1 真实化方向）
+
+2026-10-18 对话职责收窄：`dialogue.py` 只负责背景获取、画像记忆和答疑；`tutor.py` 的 paper-tutor / paper-quiz-grade 独立负责带读与判答。
+对话七个只读工具保留课程、专业、辅修、成绩查询与匹配，删除项目检索/评阅；major_lookup 的院系简称识别和专业背景注入保留。
+TurnResult 的 next_action / pending_action 固定 null，不从对话创建任务。既有项目、历史任务和研读练习保留。
+2026-10-18 本地 w99：成绩单确定性解析提交后继续正常 TurnProposal/TurnReply，同轮合并短回执与自然接话；`transcript_import` 向模型及前端提供模式、实际写入和统计，预览不写课程/派生能力。SSE 与普通请求共用该路径，模型失败不撤销已完成的导入。前端“我的”按课程基础、可修改记忆、选填背景组织，账号及画像设置折叠；字段类型、进入条件及研读 Agent 均不变。
+旧向导/Planner 仍为兼容模块；下述旧阶段流程不再约束当前首次对话。首次使用说明与完整契约见 DIALOGUE_CONTRACT v2。
+2026-10-18 本地 w100：`guide.py` 汇总五方面的有依据自述及课程底稿；主题/目的明确且至少四方面已知才推荐开始。兼容 onboard_done 不再使用旧 phase/方向/身份+兴趣捷径。新号发消息不等于 entered；前端所有进入入口通过统一 enterApp，低覆盖弹可跳过确认，POST enter 保持无硬门槛。新增三个阅读自述 key，无新工具。引导完成回顾与长聊预览摘要不增加模型调用。
+
 
 - **Onboarding**：状态机 `greet→background→courses→interest_1→interest_2→work_style→done`，≤8 轮，每轮 `{reply, options, facts, done}`。W1：`_extract` 换 LLM 结构化输出，两次解析失败降级回规则。
 - **Planner**：规则层在外（阶段判定 S0 无方向→推荐方向 / S1 已选→首个任务 / S2 已完成→进阶；频控、疲劳保护），LLM 在内（候选集择优 + rationale 措辞）。降级链：LLM 失败 → 规则层 Top1。
@@ -122,7 +130,7 @@ DELETE /api/portraits/{pid}    ?uid                          # 删；删最后�
 # ---- 对话内核（任务 2）----
 POST /api/dialogue/turn         {uid, message, conversation_id?} → TurnResult
 POST /api/dialogue/stream       {uid, message, conversation_id?} → SSE         # 同内核，事件为 stage/delta/result/error
-POST /api/dialogue/action       {uid, action_id, event} → {action}             # event: accept|decline|complete
+POST /api/dialogue/action       {uid, action_id, event} → {action}             # 仅 decline 关闭历史卡；已有卡 accept/complete 返回 400
 GET  /api/dialogue/history     ?uid&conversation_id? → {messages, conversations, pending_action, onboard_done}
 # ---- 向导（保留兼容：配了模型时内部由对话内核接管，见 DIALOGUE_CONTRACT §10）----
 POST /api/onboard/start         {uid} → {reply, options, state}
@@ -130,6 +138,7 @@ POST /api/onboard/message       {uid, msg} → {reply, hint?, options, facts, st
 GET  /api/onboard/result       ?uid → {messages, facts, state}
 POST /api/onboard/confirm       {uid, edits[{id,value?,dismissed?}]} → {facts}
 POST /api/onboard/enter         {uid} → account（按人记下 entered_at）
+GET  /api/onboard/readiness     ?uid → {version, first_visit, ready, known_count, areas, missing, rule} # 仅提醒，非权限
 # ---- 决策与方向 ----
 # POST /api/nba 已删（今日不再调模型排下一步）
 GET  /api/directions/recommend ?uid → {directions, reason}
@@ -205,7 +214,7 @@ GET  /api/health
 
 前端课程懒加载走 `/api/explore/courses?query=<节点名>`；有学期快照时本地返回。
 对话内调用外部信息走 `server/tools.py` 的 registry（全部只读），不走 REST：
-除课程/项目/成绩单外，院系-专业知识库的 5 个工具（`major_lookup`·`major_detail`·
+除课程/成绩单外，院系-专业知识库的 5 个工具（`major_lookup`·`major_detail`·
 `match_transcript`·`minor_programs`·`course_lookup`）也在里面，与 MCP 服务共用
 `server/mcp_curriculum.py` 的工具表和 `server/curriculum.py` 的查询层——同一份数据、
 同一套口径，只有「怎么把工具讲给模型听」不同（MCP 用 JSON Schema，对话用文字清单）。

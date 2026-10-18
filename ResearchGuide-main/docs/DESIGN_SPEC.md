@@ -73,6 +73,10 @@
 | 竞争地图卡 | `.map-card` | 一条开放问题一张卡，不要五列表格 |
 | 登录页签 | `.login-tabs` + `.login-tab` + `.login-body` | 首页进入：登录 / 注册。打开页面不沿用上次登录 |
 | 我的密钥 | `.connect-box`（复用） | 学生填自己的 DeepSeek；管理员「服务器共用模型」另走 `/api/llm/connect` |
+| 我的页面 | `.me-page` + `.me-layout` | 先显示当前画像与课程基础，再显示可修改的记忆；选填背景、画像设置、账号数据默认折叠；不显示“还差几项” |
+| 课程依据 | `.me-page .mem-card` + `.me-course-table` | 记忆用分隔行，课程明细和来源按需展开；课程记录不等于熟练掌握；窄屏仅表格内部横滑 |
+| 对话输入区 | `.chat-scroll` + `.chat-input` | 只有对话和输入两区；记录回执随本轮回复，建议按钮在输入框上方，无中间小滚动带；长成绩单折叠原文 |
+| 首次引导 | `.guide-area` + `.entry-confirm` | 五方面展示已了解的真实摘要，预计约五分钟，可跳过；低覆盖进入只提示，再聊/直接进入两个选项，默认聚焦再聊 |
 
 **事实类别色**：background 蓝 · interest 主色 · capability 金 · preference 紫 · experience 珊瑚（只用作圆点）。
 

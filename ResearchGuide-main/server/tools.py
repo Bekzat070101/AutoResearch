@@ -13,7 +13,6 @@ from typing import Any, Callable
 
 import curriculum
 import mcp_curriculum
-import projects
 import store
 import transcript
 from pku_adapter import search_courses
@@ -26,16 +25,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "desc": "检索北大公开课。用户问到「有没有课」「该上什么课」时用。失败会返回 ok=false，照实说。",
         "params": {"query": "检索词，如「机器学习」「社会心理学」", "limit": "可选，1-10，默认 5"},
     },
-    "project.search": {
-        "desc": "按方向与当前阶段检索可做的公开练手项目。用户想动手做点什么时用。",
-        "params": {"direction": "可选，方向代码如 ai/math/psy/econ；缺省用当前方向",
-                   "stage": "可选，0=只学了概念 1=做过小任务 2=学完一块 3=做过项目",
-                   "keywords": "可选，附加关键词"},
-    },
-    "project.review": {
-        "desc": "取回本画像某个项目最近一次评阅结果，用于回顾或决定下一步。",
-        "params": {"project_id": "项目 id，必须来自本项目列表"},
-    },
     "transcript.summary": {
         "desc": ("查他的成绩单。**默认只给汇总**（总绩点/学分/分学期），"
                  "不整份倒给你；要具体某门课或某类课，传 keyword。"
@@ -45,10 +34,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                    "limit": "可选，1-50。只有传 keyword 时才起作用"},
     },
 }
-
-# 方向代码白名单，避免模型编造方向
-_DIRECTIONS = ("ai", "math", "psy", "econ", "bio", "stat")
-
 
 def _as_int(raw: Any, default: int, lo: int, hi: int) -> int:
     try:
@@ -90,35 +75,6 @@ def _course_search(uid: str, args: dict[str, Any], context: dict[str, Any] | Non
     ]
     return {"ok": True, "query": query, "query_from": query_from, "term": res.get("term"),
             "retrieved_at": res.get("retrieved_at"), "items": items}
-
-
-def _project_search(uid: str, args: dict[str, Any]) -> dict[str, Any]:
-    ctx = projects.context(uid)
-    direction = _as_text(args.get("direction"), 20) or ctx.get("direction") or ""
-    if direction not in _DIRECTIONS:
-        direction = ctx.get("direction") or ""
-    if not direction:
-        return {"ok": False, "error": "还没有确定方向，先去方向区选一个"}
-    stage = _as_int(args.get("stage"), int(ctx.get("stage") or 0), 0, 3)
-    keywords = _as_text(args.get("keywords"), 40)
-    res = projects.search(uid, direction, stage, keywords=keywords)
-    return {"ok": True, "direction": direction, "stage": stage,
-            "items": res.get("items") or [],
-            "sources": res.get("sources") or [],
-            "empty_reason": res.get("empty_reason")}
-
-
-def _project_review(uid: str, args: dict[str, Any]) -> dict[str, Any]:
-    pid = _as_text(args.get("project_id"), 64)
-    if not pid:
-        return {"ok": False, "error": "project_id is required"}
-    p = store.get_project(uid, pid)  # 按 uid 取，跨画像取不到
-    if not p:
-        return {"ok": False, "error": "找不到这个项目（或它不属于当前画像）"}
-    reviews = p.get("reviews") or []
-    return {"ok": True, "project_id": pid, "name": p.get("name"),
-            "status": p.get("status"), "review": reviews[-1] if reviews else None,
-            "review_count": len(reviews)}
 
 
 def _transcript_summary(uid: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -265,8 +221,6 @@ def _kb_tool(name: str, uid: str, args: dict[str, Any],
 
 _HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "course.search": _course_search,
-    "project.search": _project_search,
-    "project.review": _project_review,
     "transcript.summary": _transcript_summary,
 }
 for _t in mcp_curriculum.TOOLS:

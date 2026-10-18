@@ -5,7 +5,7 @@
 只能在核对页面手动输入才能识别」
 
 这里钉住三件事：
-  ① 粘成绩单 → 真的识别、落库、推出能力结论，**不调模型**
+  ① 解析与落库由代码完成，随后必须接回对话；模型不决定课程/分数
   ② 随口说「高数 85、线代 90」→ **不能**被当成成绩单（那是自述，不是底稿）
   ③ 像成绩单但读不出来 → 如实说为什么，并指向核对页
 """
@@ -116,11 +116,12 @@ def test_the_reply_says_what_was_read(uid):
     r = dialogue.turn(uid, REAL)
     reply = r["reply"]
     assert "7 门课" in reply, f"要说清读了几门：{reply[:120]}"
-    assert "绩点" in reply
-    # 没有算进绩点的字母等级必须**明说**，否则用户以为绩点算全了
-    assert "中国美术简史" in reply, "要报出没算进绩点的是哪几门"
-    assert "没有算进绩点" in reply
-    assert "军事理论（上）" in reply, "要报出还在修的课"
+    assert "下方" in reply
+    imp = r["transcript_import"]
+    assert imp["summary"]["gpa"] is not None
+    assert any(c["course"] == "中国美术简史" for c in imp["summary"]["ungraded"])
+    assert any(c["course"] == "军事理论（上）" for c in imp["summary"]["in_progress"])
+    assert "你现在读什么专业" in reply, "仅有课程时要自然接话，不能停在回执"
 
 
 def test_it_derives_capability_facts(uid):
@@ -132,7 +133,7 @@ def test_it_derives_capability_facts(uid):
     assert any(k.startswith("transcript:") for k in keys), keys
 
 
-def test_it_does_not_call_the_model(uid, monkeypatch):
+def test_parser_and_commit_do_not_depend_on_model(uid, monkeypatch):
     """成绩单是确定性数据，这一轮不该花一次模型调用。
 
     如果哪天有人把它改成「先问模型」，这条会红。
@@ -147,7 +148,7 @@ def test_it_does_not_call_the_model(uid, monkeypatch):
     monkeypatch.setattr(llm, "chat_json", boom)
     monkeypatch.setattr(llm, "chat_text", boom, raising=False)
 
-    r = dialogue.turn(uid, REAL)
+    r = dialogue._transcript_turn(uid, "parser-only", REAL)
     assert called["n"] == 0
     assert (r.get("transcript_import") or {}).get("written") == 7
 
@@ -177,6 +178,28 @@ def test_pasting_twice_does_not_duplicate_courses(uid):
     assert len(store.list_enrollments(uid)) == 7, "重复粘贴不该产生重复课程"
 
 
+@pytest.mark.parametrize("instruction", ["这是合成示例，只检查，不要保存。", "先别导入，只预览。"])
+def test_preview_does_not_save_or_derive_capabilities(uid, instruction):
+    r = dialogue.turn(uid, instruction + "\n" + REAL)
+    assert r["transcript_import"]["mode"] == "preview"
+    assert r["transcript_import"]["written"] == 0
+    assert store.list_enrollments(uid) == []
+    assert not any(f.key.startswith("transcript:") for f in memory.active_facts(uid))
+    assert "没有保存" in r["reply"]
+
+
+def test_appending_keeps_existing_courses_and_is_idempotent(uid):
+    dialogue.turn(uid, REAL)
+    extra = "25-26学年度2学期\n3\n学分\n数据库系统概论\n专业必修\n85\n2\n学分\n信息检索\n专业必修\n92\n"
+    r = dialogue.turn(uid, "补充这两门，不要替换原来的课程。\n" + extra)
+    assert r["transcript_import"]["mode"] == "append"
+    assert r["transcript_import"]["written"] == 2
+    assert len(store.list_enrollments(uid)) == 9
+    r = dialogue.turn(uid, "追加这两门。\n" + extra)
+    assert r["transcript_import"]["written"] == 0
+    assert len(store.list_enrollments(uid)) == 9
+
+
 def test_a_transcript_without_semester_headers_explains_itself(uid):
     """像成绩单但缺学期标题 → 说清为什么读不出来，并指向核对页。"""
     body = "\n".join([
@@ -203,7 +226,7 @@ def test_partial_parse_reports_warnings(uid):
     assert transcript.looks_like_transcript(broken)
     r = dialogue.turn(uid, broken)
     assert "没看懂" in r["reply"], f"回复里要说出来：{r['reply'][-200:]}"
-    assert "神秘课程" in r["reply"], "要指出是哪一门"
+    assert any("神秘课程" in w for w in r["transcript_import"]["warnings"]), "在展开详情中指出是哪一门"
     # 读不懂的那门不该被凭空补一条
     assert len(store.list_enrollments(uid)) == 7
 
