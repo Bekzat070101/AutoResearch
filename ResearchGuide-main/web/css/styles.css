@@ -136,6 +136,21 @@ body.app-mode.is-onboarding .app-frame { display: block; }
   width: 28px; height: 2px; margin-top: 10px;
   background: var(--teal); border-radius: 2px;
 }
+/* 侧栏最底部的反馈入口：高亮加粗小字带下划线，靠左；下面一行小字说明 */
+.side-feedback {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  margin: 0; padding: 2px 2px 4px;
+  border: 0; background: none; cursor: pointer; text-align: left;
+}
+.side-feedback .sf-main {
+  font-size: 12px; font-weight: 700; color: var(--teal);
+  text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1.5px;
+}
+.side-feedback:hover .sf-main { color: var(--teal-ink); }
+.side-feedback .sf-sub {
+  font-size: 10px; line-height: 1.5; color: var(--ink-3);
+  max-width: 13em;
+}
 .side-links { display: flex; flex-direction: column; gap: 2px; }
 .nav-btn {
   position: relative;
@@ -188,13 +203,14 @@ body.app-mode.is-onboarding .app-frame { display: block; }
 
 .app-top {
   display: flex; justify-content: flex-end; align-items: center;
-  padding: 16px var(--gap-7) 0;
+  flex-wrap: wrap; gap: 8px;
+  padding: 16px var(--gap-7) 8px;
   position: sticky; top: 0; z-index: 40;
   background: color-mix(in srgb, var(--bg) 90%, transparent);
 }
-.app-top-right { position: relative; display: flex; align-items: center; gap: 8px; }
+.app-top-right { position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .dir-chip {
-  max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 13em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 6px 12px;
   border: 1px solid var(--line); border-radius: var(--pill);
   background: var(--surface);
@@ -203,18 +219,25 @@ body.app-mode.is-onboarding .app-frame { display: block; }
 .dir-chip::after { content: " ▾"; font-size: 11px; color: var(--ink-3); }
 .dir-chip:hover { border-color: var(--line-strong); color: var(--ink); }
 .dir-chip.empty { color: var(--ink-3); }
+.dir-menu-wrap { position: relative; }
+/* 菜单挂在自己的按钮下面：以前 right:120px 是按用户按钮宽度猜的，
+   方向名一长菜单就压到按钮上（用户反馈「上方的按钮挤在一起」）。 */
 .dir-menu {
-  position: absolute; right: 120px; top: calc(100% + 8px);
-  min-width: 200px; padding: 8px;
+  position: absolute; right: 0; top: calc(100% + 8px);
+  min-width: 240px; max-width: 320px; padding: 8px;
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface);
   box-shadow: 0 16px 40px rgba(28, 40, 35, 0.12);
   z-index: 50;
 }
+.dir-menu-head {
+  margin: 2px 10px 6px; font-size: 12px; letter-spacing: 0.06em; color: var(--ink-3);
+}
 .dir-menu-item {
   display: block; width: 100%;
   padding: 8px 10px; border: 0; border-radius: 8px;
   background: none; text-align: left; font-size: 14px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dir-menu-item:hover, .dir-menu-item.on { background: var(--sunken); }
 .user-menu-wrap { position: relative; }
@@ -303,18 +326,17 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
 .cards-head .ws-tabs { margin-bottom: 0; flex-shrink: 0; }
 .dir-now { margin-top: var(--gap-2); font-family: var(--serif); font-size: 20px; color: var(--ink); }
 
-/* 对话页的页头：标题 + 主标签同行，画像管理退到右侧，说明另起一行。
-   以前是三层竖着叠（标题/画像 chip/标签），画像管理占了一整行中间位置。 */
-.ws-head-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-3) var(--gap-4); }
-.ws-bar-main { display: flex; align-items: center; gap: var(--gap-4); flex-wrap: wrap; }
-.ws-bar-side { display: flex; align-items: center; gap: var(--gap-2); margin-left: auto; }
-.ws-bar-label { font-size: 12px; color: var(--ink-3); }
-.ws-head-bar .ws-tabs { margin-bottom: 0; }
-/* 画像 chip 原来靠负外边距去贴上一个元素，进了页头就不需要了 */
-.ws-head-bar .portrait-bar { margin: 0; }
-.ws-head-bar .ws-lead {
-  flex: 1 0 100%; margin-top: calc(-1 * var(--gap-1));
-  font-size: 13px; color: var(--ink-2); max-width: 46em;
+/* 研读页头：标题 + 说明（说明在标题下面），工具栏平铺不加卡片底色。 */
+.ws-head-bar { display: flex; flex-direction: column; gap: var(--gap-3); margin-bottom: var(--gap-4); }
+.ws-bar-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.ws-bar-main .ws-lead { margin: 0; font-size: 13px; color: var(--ink-2); max-width: 40em; }
+.read-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-2); }
+.read-toolbar .ws-tabs { margin-bottom: 0; flex-shrink: 0; overflow: visible; }
+.read-toolbar .btn { flex-shrink: 0; }
+.read-search { display: flex; gap: 6px; flex: 1 1 14em; min-width: 12em; }
+.read-search input {
+  flex: 1 1 auto; width: 100%; min-width: 0;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
 }
 
 .ws-tabs { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: var(--gap-5); border-radius: var(--pill); background: var(--sunken); }
@@ -545,23 +567,68 @@ body[data-view="card"] .site-footer { max-width: 1600px; }
 .connect-box input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); }
 .connect-actions { display: flex; justify-content: flex-end; gap: var(--gap-2); margin-top: var(--gap-2); }
 
-/* ---------- 画像：切换 / 对话 / 核对 ---------- */
+/* ---------- 意见反馈页 ---------- */
 
-.portrait-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-2); margin: calc(-1 * var(--gap-3)) 0 var(--gap-4); }
+/* 开场是一封短信：三行致谢 + 右下署名 */
+.fb-head .fb-lead p { margin: var(--gap-2) 0 0; max-width: 36em; }
+.fb-head .fb-sign { margin-top: var(--gap-3); text-align: right; color: var(--ink-2); }
+.fb-form-panel { max-width: 46em; }
+.fb-form textarea {
+  width: 100%; min-height: 150px; padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: var(--bg); font: inherit; font-size: 14px; color: var(--ink);
+  resize: vertical; outline: none;
+}
+.fb-form textarea:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); }
+.fb-count { margin: 4px 2px 0; font-size: 12px; color: var(--ink-3); text-align: right; }
+
+/* ---------- 画像 × 方向：我的页 ---------- */
+
+/* 画像条在方向卡上方、正常文档流（用户反馈过负 margin 会叠到上一张卡上） */
+.portrait-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap-2); margin: var(--gap-3) 0; }
 .portrait-chip {
   display: inline-flex; align-items: center; gap: 2px;
+  max-width: 100%;
   border: 1px solid var(--line); border-radius: var(--pill);
   background: transparent;
 }
 .portrait-chip.on { border-color: var(--line-strong); background: var(--surface); }
-.portrait-name, .portrait-x, .portrait-add { border: 0; background: none; font-size: 13px; }
-.portrait-name { padding: 4px 4px 4px 12px; color: var(--ink-2); }
+.portrait-name, .portrait-add { border: 0; background: none; font-size: 13px; }
+.portrait-name {
+  padding: 5px 12px; color: var(--ink-2);
+  max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .portrait-chip.on .portrait-name { color: var(--ink); font-weight: 600; }
-.portrait-x { padding: 4px 10px 4px 4px; color: var(--ink-3); font-size: 12px; }
-.portrait-x:hover { color: var(--coral); }
-.portrait-add { padding: 4px 10px; color: var(--ink-3); }
+.portrait-add { padding: 5px 10px; color: var(--ink-3); }
 .portrait-add:hover { color: var(--teal); }
 .portrait-add::before { content: "+ "; }
+.portrait-card {
+  margin-top: var(--gap-2);
+  padding: var(--gap-4);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface);
+}
+.portrait-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--gap-2); margin-bottom: var(--gap-2); }
+.portrait-card-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
+.portrait-preview-tag {
+  margin-left: 6px; padding: 1px 8px;
+  border-radius: var(--pill); background: var(--gold-soft); color: var(--gold);
+  font-size: 11px; font-style: normal;
+}
+.portrait-rename { display: flex; flex-wrap: wrap; gap: var(--gap-2); margin: 0 0 var(--gap-3); }
+.portrait-rename input {
+  flex: 1 1 14em; height: 34px; padding: 0 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: var(--bg); font-size: 13px; color: var(--ink); outline: none;
+}
+.portrait-rename input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); }
+/* 方向说明浮层：名字后面的「✓ 已添加」 */
+.added-tag {
+  margin-left: 10px; padding: 2px 10px;
+  border-radius: var(--pill);
+  background: var(--teal-soft); color: var(--teal-ink);
+  font-size: 12px; font-weight: 500; letter-spacing: 0.02em;
+}
 
 /* ---------- 对话页：三个区，各管一件事 ----------
    以前对话流、行动卡、输入框都塞在一个 .chat-foot 里，
@@ -1064,8 +1131,17 @@ code { font-family: var(--mono); font-size: 0.92em; padding: 1px 5px; border-rad
 .bench { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(380px, 1fr); gap: var(--gap-4); align-items: start; }
 .bench-modes { margin: 0 0 var(--gap-3); }
 .bench-paper { position: sticky; top: var(--gap-4); display: flex; flex-direction: column; max-height: calc(100vh - 2 * var(--gap-4)); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; }
-.quote-tools { display: flex; flex-wrap: nowrap; overflow-x: auto; align-items: center; gap: 6px; padding: 6px var(--gap-3); border-bottom: 1px solid var(--line); background: var(--bg); font-size: 12px; color: var(--ink-3); }
-.sec-jump { display: flex; flex-wrap: nowrap; overflow-x: auto; align-items: center; gap: 6px 8px; padding: 4px var(--gap-3); border-bottom: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+/* 论文页顶部工具栏：引文按钮 + 跳到章节收在一起，放不下就换行。
+   以前两条都是 nowrap + 横向滚动，按钮挤成一条（用户反馈「按钮挤压在一起」）。 */
+.paper-tools {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--gap-2) var(--gap-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.quote-tools { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-3); }
+.quote-tutor-tools, .quote-card-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sec-jump { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 14px; color: var(--ink-2); }
 .sec-jump > span { font-size: 13px; color: var(--ink-3); margin-right: 4px; }
 .sec-chip {
   min-height: 36px; padding: 6px 12px; border: 1px solid var(--line);
@@ -1095,8 +1171,6 @@ code { font-family: var(--mono); font-size: 0.92em; padding: 1px 5px; border-rad
 .kp-kw { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0; font-size: 12px; color: var(--ink-3); }
 .kp-kw span { padding: 0 6px; border: 1px solid var(--line); border-radius: var(--pill); }
 .kp-lib { margin-left: 6px; padding: 0 6px; border-radius: var(--pill); background: var(--teal-soft); color: var(--teal-ink); font-size: 11px; font-style: normal; }
-.read-search { display: flex; gap: 6px; }
-.read-search input { min-width: 12em; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
 .tex { font-family: var(--mono); font-size: 0.92em; background: var(--sunken); padding: 0 2px; border-radius: 3px; }
 .paper-front { margin: 0 0 1em; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 13px; color: var(--ink-2); }
 .paper-front summary { cursor: pointer; font-weight: 600; }
@@ -1404,6 +1478,8 @@ body.is-home .site-footer { display: none; }
   .side-brand { padding: 0; font-size: 19px; flex-direction: row; align-items: baseline; gap: 8px; }
   .side-brand small { display: none; }
   .side-brand::after { display: none; }
+  .side-feedback { margin: 0 0 0 var(--gap-2); padding: 0; align-self: center; }
+  .side-feedback .sf-sub { display: none; }
   .side-foot { order: 2; margin: 0 0 0 auto; padding: 0; flex-direction: row; align-items: center; }
   .side-links { order: 3; flex-basis: 100%; flex-direction: row; gap: 0; overflow-x: auto; scrollbar-width: none; }
   .side-links::-webkit-scrollbar { display: none; }
@@ -1454,7 +1530,6 @@ body.is-home .site-footer { display: none; }
   .land-closing { margin-top: var(--gap-5); font-size: 16px; }
   .bench { grid-template-columns: 1fr; }
   .bench-paper { position: static; max-height: 78vh; }
-  .quote-tools, .sec-jump { flex-wrap: nowrap; overflow-x: auto; }
   .matrix tbody th { min-width: 120px; }
   body[data-view="card"] .ws-head h2 { font-size: 22px; }
   .dims-grid { grid-template-columns: 1fr; }

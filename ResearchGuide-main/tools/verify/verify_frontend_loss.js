@@ -24,7 +24,7 @@ function extract(src, name) {
   const store = { prefs: { directions: ["190.20"] } };
   const puts = [];
   let failGet = false;
-  const S = { myDirs: undefined, uid: "u1", token: "t" };
+  const S = { myDirs: undefined, uid: "u1", token: "t", portraitId: "p1" };
   const api = async (m, url, body) => {
     if (m === "GET" && url === "/api/me/prefs") {
       if (failGet) throw new Error("offline");
@@ -40,10 +40,22 @@ function extract(src, name) {
   const toast = () => {};
   const paintChrome = () => {};
   const useKit = () => {};
-  const fns = ["loadPrefs", "ensureMyDirs", "putPrefs", "addMyDirection"].map((n) => extract(appSrc, n)).join("\n");
-  const g = { S, api, toast, paintChrome, useKit, console };
-  const fn = new Function("S", "api", "toast", "paintChrome", "useKit", fns + "; return {loadPrefs, ensureMyDirs, addMyDirection};");
-  const { loadPrefs, addMyDirection } = fn(S, api, toast, paintChrome, useKit);
+  // addMyDirection 现在还会写本机 trail（方向跟着画像走），沙箱里给最小桩
+  const memF01 = {};
+  const lsF01 = {
+    getItem: (k) => (k in memF01 ? memF01[k] : null),
+    setItem: (k, v) => { memF01[k] = String(v); },
+    removeItem: (k) => { delete memF01[k]; },
+  };
+  const RG_DIR = { byId: { "190.20": {}, "520.20": {}, "110.67": {} }, legacyDir: {} };
+  const window = { RG_DIR };
+  const FIELD_TREES = {};
+  const fns = ["loadPrefs", "ensureMyDirs", "putPrefs", "trailStorageKey", "trail", "saveTrail",
+    "selectedDirs", "portraitDirsAdd", "addMyDirection"].map((n) => extract(appSrc, n)).join("\n");
+  const fn = new Function("S", "api", "toast", "paintChrome", "useKit",
+    "window", "RG_DIR", "FIELD_TREES", "localStorage",
+    fns + "; return {loadPrefs, ensureMyDirs, addMyDirection};");
+  const { loadPrefs, addMyDirection } = fn(S, api, toast, paintChrome, useKit, window, RG_DIR, FIELD_TREES, lsF01);
   await loadPrefs();
   S.myDirs = undefined;
   await addMyDirection("520.20");

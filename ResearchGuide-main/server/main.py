@@ -309,6 +309,12 @@ class PortraitReq(BaseModel):
     id: str = ""
 
 
+class PortraitRenameReq(BaseModel):
+    uid: str
+    id: str
+    name: str = ""
+
+
 class DialogueTurnReq(BaseModel):
     uid: str
     message: str
@@ -487,10 +493,50 @@ def dialogue_history(uid: str, conversation_id: str | None = None):
     return dialogue.history(uid, conversation_id)
 
 
+def _portrait_dir_nodes(trail: dict) -> list[str]:
+    """画像收藏过的方向：trail.dirs 优先，老数据退到当前方向 trail.dir。"""
+    import interests
+    nodes = interests.table()["nodes"]
+    out: list[str] = []
+    for n in (trail.get("dirs") or []) if isinstance(trail.get("dirs"), list) else []:
+        n = str(n or "")
+        if n in nodes and n not in out:
+            out.append(n)
+    cur = str(trail.get("dir") or "")
+    if cur in nodes and cur not in out:
+        out.append(cur)
+    return out
+
+
 @app.get("/api/portraits")
 def portraits_list(uid: str):
     _user_or_404(uid)
-    return {"portraits": store.list_portraits(uid)}
+    import interests
+    out = []
+    for p in store.list_portraits(uid):
+        trail = store.get_trail(uid, p["id"])
+        dirs = _portrait_dir_nodes(trail)
+        named = [{"node": n, "name": interests.direction_name(n)} for n in dirs]
+        # 默认名：一个方向 = 方向名；多个 = 最先加的两个，形如 方向1·方向2
+        default = "·".join([d["name"] for d in named if d["name"]][:2])[:40]
+        # 勾选状态：sel 是列表就按它来（空 = 全没勾）；没有 sel 键的老数据视为全选
+        raw_sel = trail.get("sel")
+        if isinstance(raw_sel, list):
+            ok = {d["node"] for d in named}
+            sel_ids = [str(n or "") for n in raw_sel if str(n or "") in ok]
+        else:
+            sel_ids = [d["node"] for d in named]
+        out.append({
+            **p,
+            # 展示名优先级：自己起的 > 按方向生成的默认名 > 画像N
+            "label": p["name"] or default or p["fallback"],
+            "default_label": default or p["fallback"],
+            "custom": bool(p["name"]),
+            "dir": str(trail.get("dir") or ""),
+            "dirs": named,
+            "sel": sel_ids,
+        })
+    return {"portraits": out}
 
 
 @app.get("/api/memory")
@@ -624,6 +670,19 @@ def portraits_activate(req: PortraitReq):
     except KeyError:
         raise HTTPException(404, "portrait not found")
     return {"portraits": store.list_portraits(req.uid)}
+
+
+@app.post("/api/portraits/rename")
+def portraits_rename(req: PortraitRenameReq):
+    _user_or_404(req.uid)
+    if not req.id:
+        raise HTTPException(400, "id is required")
+    name = req.name.strip()[:24]
+    try:
+        store.rename_portrait(req.uid, req.id, name)
+    except KeyError:
+        raise HTTPException(404, "portrait not found")
+    return {"ok": True, "name": name}
 
 
 @app.delete("/api/portraits/{pid}")
@@ -806,6 +865,32 @@ def trail_get(pid: str, request: Request):
 def trail_put(pid: str, req: TrailReq, request: Request):
     data = req.data if isinstance(req.data, dict) else {}
     return store.set_trail(auth.me(request), pid, data)
+
+
+# ---------- feedback（用户意见反馈） ----------
+
+class FeedbackReq(BaseModel):
+    uid: str
+    text: str = ""
+
+
+@app.post("/api/feedback")
+def feedback_post(req: FeedbackReq):
+    _user_or_404(req.uid)
+    text = (req.text or "").strip()
+    if len(text) < 10:
+        raise HTTPException(400, "至少写 10 个字，说清哪里不对")
+    if len(text) > 4000:
+        raise HTTPException(400, "太长了（最多 4000 字），拆成几条分开提")
+    item = store.add_feedback(req.uid, text)
+    store.add_event(req.uid, "feedback_sent", "", {"id": item["id"]})
+    return {"ok": True, "item": item}
+
+
+@app.get("/api/feedback")
+def feedback_list(uid: str):
+    _user_or_404(uid)
+    return {"items": store.list_feedback(uid)}
 
 
 # ---------- me（AI 认识的我） ----------

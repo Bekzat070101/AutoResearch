@@ -308,7 +308,7 @@ def test_new_class_names_all_have_rules():
     """
     css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
     for cls in ("two-col-chat", "chat-next", "chat-input", "ws-head-bar",
-                "ws-bar-main", "ws-bar-side", "ws-bar-label", "ws-lead",
+                "ws-bar-main", "read-toolbar", "paper-tools", "ws-lead",
                 "app-top", "dir-chip", "user-menu-btn", "user-menu",
                 "snap-inner", "land-skip", "land-steps", "land-hint",
                 "land-closing", "snap-no", "room-guide",

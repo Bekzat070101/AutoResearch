@@ -29,6 +29,9 @@ const S = {
   posTab: "edges",
   posDraft: null,
   mapSort: "order",
+  mePortrait: "",
+  portraitId: "",
+  portraitName: "",
 };
 
 const $app = document.getElementById("app");
@@ -134,6 +137,9 @@ function clearSession() {
   S.entered = false;
   S.myDir = undefined;
   S.kitId = "";
+  S.portraitId = "";
+  S.portraitName = "";
+  S.mePortrait = "";
   try { localStorage.removeItem("rg_kit"); } catch (_) { /* ignore */ }
   dropPersistedSession();
 }
@@ -246,6 +252,7 @@ const WORKSPACE = {
   read: "read",
   card: "read",
   me: "me",
+  feedback: "feedback",
 };
 
 /* ---------- 视图切换 ---------- */
@@ -318,6 +325,7 @@ async function render() {
     case "position": renderPositionSoon(); break;
     case "read": await renderRead(); break;
     case "card": await renderCard(); break;
+    case "feedback": await renderFeedback(); break;
     case "me": await renderMe(); break;
     case "today":
     default: await renderToday(); break;
@@ -1654,10 +1662,13 @@ function openMineKey() {
   };
 }
 
-function currentDirLabel() {
-  const saved = trail();
-  const field = activeField(saved);
-  return field ? dirTitle(saved.dir, field) : "";
+/* 右上角按钮显示画像名：自己起的名优先；没起过就按方向生成默认名
+   （一个方向 = 方向名；多个 = 最先加的两个，形如 方向1·方向2）。 */
+function portraitChipLabel() {
+  if (S.portraitName) return S.portraitName;
+  const t = trail();
+  const names = t.dirs.slice(0, 2).map((id) => dirTitle(id) || id).filter(Boolean);
+  return names.join("·");
 }
 
 function navCollapsed() {
@@ -1682,7 +1693,7 @@ function paintChrome() {
   applyNavCollapsed();
   const chip = document.getElementById("dirChip");
   if (!chip) return;
-  const name = currentDirLabel();
+  const name = portraitChipLabel();
   chip.textContent = name || "还没有方向";
   chip.classList.toggle("empty", !name);
 }
@@ -1746,70 +1757,275 @@ async function putPrefs(patch) {
   return r;
 }
 
+/* 一份画像的方向写进 trail：trail 本来就按画像存在服务端，方向跟着画像走。
+   dirs = 添加过的方向（菜单里的选项池，常驻可勾）；sel = 勾选中的，推荐按 sel 来。
+   加方向默认勾上；全部取消也可以（推荐回落到泛兴趣）。
+   S.myDirs（全局 prefs）继续同步维护。 */
+function selectedDirs(t) {
+  const x = t || trail();
+  return x.sel.filter((id) => x.dirs.includes(id));
+}
+
+function portraitDirsAdd(nodeId) {
+  const t = trail();
+  const dirs = t.dirs.includes(nodeId) ? t.dirs : t.dirs.concat(nodeId);
+  const sel = selectedDirs(t);
+  return { ...t, dirs, sel: sel.includes(nodeId) ? sel : sel.concat(nodeId) };
+}
+
+/* 菜单里勾/取消不打 toast：✓ 本身就是反馈，角上的画像名也不因此变 */
+async function toggleDirSel(nodeId) {
+  const t = trail();
+  const sel = selectedDirs(t);
+  const next = sel.includes(nodeId) ? sel.filter((x) => x !== nodeId) : sel.concat(nodeId);
+  await saveTrail({ ...t, sel: next });
+  paintChrome();
+}
+
 async function addMyDirection(nodeId) {
-  if (!(await ensureMyDirs())) { toast("没读到已收藏的方向，这次没有改"); return; }
-  const cur = S.myDirs;
-  if (cur.includes(nodeId)) { toast("已经在我的方向里"); return; }
-  await putPrefs({ directions: cur.concat(nodeId) });
+  if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
+  const prev = trail();
+  if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
+  await saveTrail(portraitDirsAdd(nodeId));
+  if (await ensureMyDirs()) {
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
+  }
   paintChrome();
   toast("已添加到我的方向");
+  if (S.view === "me") setView("me");   // 「我的」页正开着就要当场能看到
+}
+
+async function removeMyDirection(nodeId) {
+  const t = trail();
+  const dirs = t.dirs.filter((x) => x !== nodeId);
+  const sel = selectedDirs(t).filter((x) => x !== nodeId);
+  const next = { ...t, dirs, sel };
+  if (t.dir === nodeId) {
+    const fallback = dirs[0];
+    if (fallback && window.RG_DIR) {
+      // 教程/这一步要有一条路可走：切到剩下的第一个，进度从 byDir 里接回来
+      const saved = (t.byDir || {})[fallback] || { done: [], tasks: {} };
+      next.code = RG_DIR.backendCode(fallback);
+      next.dir = fallback;
+      next.done = saved.done || [];
+      next.tasks = saved.tasks || {};
+    } else {
+      next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
+    }
+  }
+  await saveTrail(next, true);
+  if (await ensureMyDirs()) {
+    const kept = S.myDirs.filter((x) => x !== nodeId);
+    if (kept.length !== S.myDirs.length) await putPrefs({ directions: kept });
+  }
+  S.myDir = undefined;
+  paintChrome();
 }
 
 async function chooseDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
   const backend = RG_DIR.backendCode(nodeId);
   await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
+  const withDirs = portraitDirsAdd(nodeId);
   const prev = trail();
   const byDir = Object.assign({}, prev.byDir || {});
   if (prev.dir) byDir[prev.dir] = { done: prev.done || [], tasks: prev.tasks || {} };
   const nxt = byDir[nodeId] || { done: [], tasks: {} };
   await saveTrail({
     code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
+    dirs: withDirs.dirs, sel: withDirs.sel,
   }, true);
-  if (!(await ensureMyDirs())) { toast("方向已确认，收藏列表没读到，没有改「我的」"); return; }
-  const dirs = S.myDirs;
-  if (!dirs.includes(nodeId)) await putPrefs({ directions: dirs.concat(nodeId) });
+  if (await ensureMyDirs()) {
+    if (!S.myDirs.includes(nodeId)) await putPrefs({ directions: S.myDirs.concat(nodeId) });
+  }
   S.myDir = undefined;
   paintChrome();
   toast(`已确认「${dirTitle(nodeId)}」`);
 }
 
-/* ---------- 画像切换 ---------- */
+/* ---------- 画像 × 方向（我的页） ----------
+   画像 = 一套完整记录（对话、事实、任务、方向、进度）。
+   切画像是换整套记录；同画像里的「可见组合」只换推荐口径——
+   这两件事容易混，所以这里把画像摆在方向卡上方，卡里只讲方向。 */
 
-async function portraitBar() {
-  const r = await api("GET", `/api/portraits?uid=${S.uid}`);
+async function portraitSection() {
+  const box = el("section", "panel portrait-section");
+  box.appendChild(el("h3", "section-label", "画像与方向"));
+  let portraits = [];
+  try {
+    portraits = (await api("GET", `/api/portraits?uid=${S.uid}`)).portraits || [];
+  } catch (e) {
+    box.appendChild(el("p", "panel-sub", `画像列表没读到：${esc(e.message || "接口没有响应")}`));
+    return box;
+  }
+  if (!portraits.length) {
+    box.appendChild(el("p", "panel-sub", "还没有画像。"));
+    return box;
+  }
+  const active = portraits.find((p) => p.active) || portraits[0];
+  const previewId = S.mePortrait && portraits.some((p) => p.id === S.mePortrait) ? S.mePortrait : "";
+  const shown = previewId ? portraits.find((p) => p.id === previewId) : active;
+  const isActive = shown.id === active.id;
+
+  box.appendChild(el("p", "panel-sub",
+    "一份画像可以选几个方向（多选），推荐按所选的组合来。点别的画像是先看它选了哪些方向，确认了再换。"));
+
+  // 画像条：在方向卡上方，不与卡片重叠
   const bar = el("div", "portrait-bar");
-  (r.portraits || []).forEach((p) => {
-    const chip = el("div", "portrait-chip" + (p.active ? " on" : ""));
-    const name = el("button", "portrait-name", p.name);
+  portraits.forEach((p) => {
+    const chip = el("div", "portrait-chip" + (p.id === shown.id ? " on" : ""));
+    const name = el("button", "portrait-name", esc(p.label));
     name.type = "button";
-    name.onclick = async () => {
-      if (p.active) return;
-      S.portraitId = p.id;
-      await api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
-      setView(S.view === "me" ? "me" : "dialogue");
+    name.title = p.id === active.id ? "当前画像" : "看看这份画像收了哪些方向";
+    name.onclick = () => {
+      if (p.id === shown.id) return;
+      S.mePortrait = p.id === active.id ? "" : p.id;
+      setView("me");
     };
-    const del = el("button", "portrait-x", "删除");
-    del.type = "button";
-    del.onclick = async () => {
-      if (!window.confirm(`删除「${p.name}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
-      S.portraitId = "";
-      await api("DELETE", `/api/portraits/${p.id}?uid=${S.uid}`);
-      setView("dialogue");
-    };
-    chip.append(name, del);
+    chip.appendChild(name);
     bar.appendChild(chip);
   });
-  const add = el("button", "portrait-add", "新建");
+  const add = el("button", "portrait-add", "新建画像");
   add.type = "button";
   add.onclick = async () => {
     const created = await api("POST", "/api/portraits", { uid: S.uid });
-    const active = (created.portraits || []).find((item) => item.active);
-    S.portraitId = active ? active.id : "";
+    const next = (created.portraits || []).find((i) => i.active);
+    S.portraitId = next ? next.id : "";
+    S.portraitName = (next && next.name) || "";
+    S.mePortrait = "";
+    await pullTrail();
+    paintChrome();
     setView("dialogue");
   };
   bar.appendChild(add);
-  return bar;
+  box.appendChild(bar);
+
+  // 方向卡：显示所选画像收的方向
+  const card = el("div", "portrait-card");
+  const head = el("div", "portrait-card-head");
+  const titleRow = el("p", "portrait-card-title");
+  titleRow.appendChild(el("span", "", esc(shown.label)));
+  if (!isActive) titleRow.appendChild(el("em", "portrait-preview-tag", "预览中，还没有切换"));
+  head.appendChild(titleRow);
+  const renameBtn = el("button", "linkish", shown.custom ? "改名" : "起个名字");
+  renameBtn.type = "button";
+  head.appendChild(renameBtn);
+  card.appendChild(head);
+
+  const renameBox = el("form", "portrait-rename");
+  renameBox.hidden = true;
+  const input = el("input");
+  input.maxLength = 24;
+  input.placeholder = shown.custom ? "" : `默认叫「${shown.default_label}」，可以自己起一个`;
+  input.value = shown.custom ? shown.name : "";
+  input.setAttribute("aria-label", "画像名");
+  const saveName = el("button", "btn small", "保存");
+  saveName.type = "submit";
+  const cancelName = el("button", "btn small ghost", "取消");
+  cancelName.type = "button";
+  cancelName.onclick = () => { renameBox.hidden = true; };
+  renameBox.append(input, saveName, cancelName);
+  renameBtn.onclick = () => { renameBox.hidden = false; input.focus(); };
+  renameBox.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("POST", "/api/portraits/rename", { uid: S.uid, id: shown.id, name: input.value });
+      if (isActive) { S.portraitName = input.value.trim(); paintChrome(); }
+      toast("名字已保存");
+      setView("me");
+    } catch (err) { toast(err.message); }
+  };
+  card.appendChild(renameBox);
+
+  // 活画像读本机 trail（最新），预览的画像读后端快照
+  const t = trail();
+  const backendDirs = shown.dirs || [];
+  const localIds = isActive
+    ? (t.dirs.length ? t.dirs : (t.dir ? [t.dir] : []))
+      .filter((id) => !window.RG_DIR || RG_DIR.byId[id])
+    : backendDirs.map((d) => d.node);
+  const nameOf = (nodeId) => {
+    const hit = backendDirs.find((x) => x.node === nodeId);
+    return (hit && hit.name) || dirTitle(nodeId) || nodeId;
+  };
+
+  if (!localIds.length) {
+    const empty = el("p", "panel-sub",
+      "这份画像还没有加方向。换一份画像，或先回到当前画像去方向树添加。");
+    card.appendChild(empty);
+    if (isActive) {
+      const go = el("button", "btn small", "去方向树添加");
+      go.type = "button";
+      go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+      card.appendChild(go);
+    }
+  } else {
+    const list = el("div", "my-dir-list");
+    const selSet = new Set(isActive ? selectedDirs(t) : (shown.sel || []).map((x) => x.node || x));
+    localIds.forEach((nodeId) => {
+      const row = el("div", "my-dir-row");
+      const mark = selSet.has(nodeId) ? "✓ " : "○ ";
+      const label = el("span", "", `${mark}${esc(nameOf(nodeId))}`);
+      row.appendChild(label);
+      if (isActive) {
+        const drop = el("button", "btn small ghost", "移出");
+        drop.type = "button";
+        drop.onclick = async () => { await removeMyDirection(nodeId); setView("me"); };
+        row.appendChild(drop);
+      }
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+    if (isActive) {
+      const hint = el("p", "form-note", "✓ = 勾选进推荐，在右上角的「方向」菜单里勾选或取消。");
+      card.appendChild(hint);
+      const go = el("button", "linkish", "去方向树添加");
+      go.type = "button";
+      go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+      card.appendChild(go);
+    }
+  }
+
+  if (!isActive) {
+    const swapRow = el("div", "submit-actions");
+    const swap = el("button", "btn", "更换到该画像");
+    swap.type = "button";
+    swap.onclick = async () => {
+      try {
+        const r = await api("POST", "/api/portraits/activate", { uid: S.uid, id: shown.id });
+        const next = (r.portraits || []).find((i) => i.id === shown.id);
+        S.portraitName = (next && next.name) || "";
+      } catch (err) { toast(err.message); return; }
+      S.portraitId = shown.id;
+      S.mePortrait = "";
+      await pullTrail();
+      paintChrome();
+      toast(`已换到「${shown.label}」`);
+      setView("me");
+    };
+    swapRow.appendChild(swap);
+    card.appendChild(swapRow);
+  } else if (portraits.length > 1) {
+    const delRow = el("div", "submit-actions");
+    const del = el("button", "btn small ghost", `删除当前画像「${shown.label}」`);
+    del.type = "button";
+    del.onclick = async () => {
+      if (!window.confirm(`删除「${shown.label}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
+      try {
+        await api("DELETE", `/api/portraits/${shown.id}?uid=${S.uid}`);
+      } catch (err) { toast(err.message); return; }
+      S.portraitId = "";
+      S.mePortrait = "";
+      await ensurePortrait();
+      paintChrome();
+      toast("已删除，换到剩下的画像");
+      setView("me");
+    };
+    delRow.appendChild(del);
+    card.appendChild(delRow);
+  }
+  box.appendChild(card);
+  return box;
 }
 
 /* ② 原「问卷」视图已删除：问卷现在全靠对话实现（server/onboarding.py 的固定五问
@@ -2352,12 +2568,33 @@ async function ensurePortrait() {
     const r = await api("GET", `/api/portraits?uid=${S.uid}`);
     const active = (r.portraits || []).find((p) => p.active);
     S.portraitId = active ? active.id : "";
+    S.portraitName = (active && active.name) || "";
   } catch (_) {
     S.portraitId = "";
+    S.portraitName = "";
   }
   if (S.portraitId) adoptLegacyTrail(S.portraitId);
   await pullTrail();
+  // 老数据迁移：方向原来存在全局 prefs 里，第一次进画像时收进这份画像的 trail
+  const t = trail();
+  if (!t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
+    const dirs = S.myDirs.filter((id) => !window.RG_DIR || RG_DIR.byId[id]);
+    if (dirs.length) await saveTrail({ ...t, dirs, sel: dirs });
+  }
+  ensureSelKey();
   return S.portraitId;
+}
+
+/* sel 现在是权威状态：空 = 一个都没勾（推荐回落到泛兴趣）。
+   老 trail 没有 sel 键的，补成「全选」，别让老用户一进来全灭。 */
+function ensureSelKey() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(trailStorageKey()) || "null");
+    if (raw && typeof raw === "object" && !Array.isArray(raw.sel)
+      && Array.isArray(raw.dirs) && raw.dirs.length) {
+      saveTrail({ ...trail(), sel: trail().dirs });
+    }
+  } catch (_) { /* 下次再补 */ }
 }
 
 function adoptLegacyTrail(pid) {
@@ -2380,10 +2617,13 @@ function trail() {
         done: Array.isArray(t.done) ? t.done : [],
         tasks: t.tasks && typeof t.tasks === "object" ? t.tasks : {},
         byDir: t.byDir && typeof t.byDir === "object" ? t.byDir : {},
+        // dirs = 这份画像添加过的方向（菜单里的选项池）；sel = 勾选中的（推荐按它来）
+        dirs: Array.isArray(t.dirs) ? t.dirs.map(String) : [],
+        sel: Array.isArray(t.sel) ? t.sel.map(String) : [],
       };
     }
   } catch (_) { /* 坏数据就当没有进度 */ }
-  return { code: "", dir: "", done: [], tasks: {}, byDir: {} };
+  return { code: "", dir: "", done: [], tasks: {}, byDir: {}, dirs: [], sel: [] };
 }
 
 function saveTrail(t, force) {
@@ -2405,6 +2645,8 @@ function saveTrail(t, force) {
     done,
     tasks: force ? (t.tasks || {}) : Object.assign({}, prev.code === code && prev.dir === (t.dir || prev.dir) ? prev.tasks : {}, t.tasks || {}),
     byDir: t.byDir && typeof t.byDir === "object" ? t.byDir : (prev.byDir || {}),
+    dirs: Array.isArray(t.dirs) ? t.dirs.map(String) : prev.dirs,
+    sel: Array.isArray(t.sel) ? t.sel.map(String) : prev.sel,
   };
   localStorage.setItem(trailStorageKey(), JSON.stringify(packed));
   if (S.token) {
@@ -2426,6 +2668,7 @@ async function pullTrail() {
       if (local.code) await api("PUT", `/api/projects/${pid}/trail`, { data: local });
     }
   } catch (_) { /* 先用本地 */ }
+  ensureSelKey();
 }
 
 function inferredDone(code, tasks) {
@@ -2648,7 +2891,7 @@ function openNodeSheet(field, node, ctx) {
   sheet.appendChild(courses);
   loadCourses(courses, node.label || field.query);
   if (node.id === entry.id && !ctx.chosen) {
-    const choose = el("button", "btn", ctx.hasCurrent ? "确认切换方向" : "确认这个方向");
+    const choose = el("button", "btn", "确认这个方向");
     choose.type = "button";
     choose.onclick = () => ctx.onChoose();
     sheet.appendChild(choose);
@@ -2708,7 +2951,11 @@ function openDirSheet(node, ctx) {
   const level = meta ? (["", "一级", "二级", "三级"][meta.depth] || "方向") : "方向";
   head.append(el("p", "sheet-kicker", `${level}${meta && meta.parent ? ` · 上属${esc(dirTitle(meta.parent))}` : ""}`), x);
   sheet.appendChild(head);
-  sheet.appendChild(el("h3", "", esc(node.name || node.label)));
+  const title = el("h3", "", esc(node.name || node.label));
+  // 已在我的方向里：名字后面直接给对勾，别让用户再猜能不能点添加
+  const dirAdded = trail().dirs.includes(node.id);
+  if (dirAdded) title.appendChild(el("span", "added-tag", "✓ 已添加"));
+  sheet.appendChild(title);
   if (node.name && node.label && node.name !== node.label) {
     sheet.appendChild(el("p", "sheet-kicker", esc(node.label)));
   }
@@ -2738,7 +2985,7 @@ function openDirSheet(node, ctx) {
   sheet.appendChild(courses);
   loadCourses(courses, (meta && meta.query) || node.query || node.label);
   if (!ctx.chosen) {
-    const choose = el("button", "btn", ctx.hasCurrent ? "确认切换方向" : "确认这个方向");
+    const choose = el("button", "btn", "确认这个方向");
     choose.type = "button";
     choose.onclick = () => ctx.onChoose();
     sheet.appendChild(choose);
@@ -2748,9 +2995,14 @@ function openDirSheet(node, ctx) {
     go.onclick = () => { sheet.remove(); S.cardsPane = "tutorial"; render(); };
     sheet.appendChild(go);
   }
-  const add = el("button", "btn secondary", "添加到我的方向");
+  const add = el("button", "btn secondary", dirAdded ? "取消添加" : "添加到我的方向");
   add.type = "button";
-  add.onclick = () => addMyDirection(node.id);
+  add.onclick = async () => {
+    if (dirAdded) await removeMyDirection(node.id);
+    else await addMyDirection(node.id);
+    // 重建浮层：对勾和按钮当场换过来，树也跟着重画
+    ctx.onPick(node.id);
+  };
   sheet.appendChild(add);
   sheet.querySelector(".sheet-x").focus({ preventScroll: true });
 }
@@ -2832,14 +3084,16 @@ async function renderCards() {
 
   const chooseFocus = async () => {
     if (!window.RG_DIR || !RG_DIR.byId[focus]) { toast("先点树上的一个方向"); return; }
+    const hadSheet = !!document.getElementById("nodeSheet");
     try {
       await chooseDirection(focus);
       chosenCode = RG_DIR.backendCode(focus);
       chosenDir = focus;
-      document.getElementById("nodeSheet")?.remove();
       picked = null;
       S.dirPicked = null;
       paint();
+      // 浮层本来开着就刷它：确认即已添加，对勾和「取消添加」当场可见
+      if (hadSheet) showDir(focus);
     } catch (e) { toast(e.message); }
   };
 
@@ -2867,15 +3121,13 @@ async function renderCards() {
     const name = viewName();
     if (pane === "direction") {
       if (!chosenDir || focus !== chosenDir) {
-        const note = el("p", "", chosenDir
-          ? `正在看「${name}」。当前方向仍是「${dirTitle(chosenDir)}」。`
-          : `正在看「${name}」。确认之后，它才会成为当前方向。`);
-        const ok = el("button", "btn small", chosenDir ? "确认切换方向" : "确认这个方向");
+        const note = el("p", "", `正在看「${name}」。确认之后，教程和任务会按它开始。`);
+        const ok = el("button", "btn small", "确认这个方向");
         ok.type = "button";
         ok.onclick = () => chooseFocus();
         confirmBar.append(note, ok);
       } else {
-        const note = el("p", "", `当前方向「${name}」。切换到教程看这条学习流程。`);
+        const note = el("p", "", `「${name}」的教程和学习流程在这里。`);
         const go = el("button", "btn small", "看教程");
         go.type = "button";
         go.onclick = () => { S.cardsPane = "tutorial"; pane = "tutorial"; grew = true; paint(); };
@@ -2889,11 +3141,11 @@ async function renderCards() {
       return;
     }
     const lead = el("p", "", chosenDir === focus
-      ? (here ? `当前方向「${name}」，你在「${here.label}」。` : `当前方向「${name}」。`)
+      ? (here ? `你在「${here.label}」，接着往下走。` : `「${name}」的流程已经确认。`)
       : `教程跟着正在看的「${name}」走。确认之后，任务才会按它开始。`);
     confirmBar.appendChild(lead);
     if (chosenDir !== focus) {
-      const ok = el("button", "btn small", chosenDir ? "确认切换方向" : "确认这个方向");
+      const ok = el("button", "btn small", "确认这个方向");
       ok.type = "button";
       ok.onclick = () => chooseFocus();
       confirmBar.appendChild(ok);
@@ -2924,7 +3176,6 @@ async function renderCards() {
       why: recWhy(),
       reading: (recCard() || {}).reading,
       chosen: id === chosenDir,
-      hasCurrent: !!chosenDir,
       onPick: showDir,
       onChoose: chooseFocus,
     });
@@ -2943,7 +3194,6 @@ async function renderCards() {
     openNodeSheet(field, node, {
       why: recWhy(),
       chosen: focus === chosenDir,
-      hasCurrent: !!chosenDir,
       here: here && here.id,
       onPick: showTut,
       onChoose: chooseFocus,
@@ -2962,7 +3212,7 @@ async function renderCards() {
     if (pane === "tutorial") {
       const name = viewName();
       titles.querySelector("p")?.remove();
-      const lead = el("p", "dir-now", name === "未选方向" ? "还没有选方向" : `当前方向 · ${name}`);
+      const lead = el("p", "dir-now", name === "未选方向" ? "还没有选方向" : `跟着「${name}」走`);
       titles.appendChild(lead);
     } else {
       titles.querySelector("p")?.remove();
@@ -3892,8 +4142,9 @@ async function renderRead() {
   const bar = el("header", "ws-head ws-head-bar");
   const leftH = el("div", "ws-bar-main");
   leftH.appendChild(el("h2", "", "研读"));
-  leftH.appendChild(el("p", "ws-lead", esc((catalog.length ? "当前方向目录" : (kit.goal || "")).slice(0, 42))));
-  const rightH = el("div", "ws-bar-side");
+  leftH.appendChild(el("p", "ws-lead", esc((catalog.length ? "方向论文目录" : (kit.goal || "")).slice(0, 42))));
+  // 控件不塞在标题右侧了：整行工具栏，放不下就换行，不出横向滚动条
+  const rightH = el("div", "read-toolbar");
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
   const q = el("input");
@@ -4606,6 +4857,7 @@ async function renderCard() {
     return node;
   };
   const lineIndex = [];
+  const jumpTargets = [];   // 有「跳到」按钮的章节标题，滚动联动用
   let off = 0;
   let currentJump = null;
   let sawSec = false;
@@ -4661,6 +4913,7 @@ async function renderCard() {
       pane.scrollTo({ top: node.offsetTop - 8, behavior: "smooth" });
     };
     jump.appendChild(b);
+    jumpTargets.push({ node, btn: b });
   });
   if (frontWrap) {
     const sum = frontWrap.querySelector("summary");
@@ -4678,7 +4931,34 @@ async function renderCard() {
     };
     cardQuote.appendChild(b);
   });
-  left.append(tools, jump, pane);
+  // 「跳到」滚动联动：读到哪一节，对应按钮就亮哪一节。
+  // 判定标准是「最后一个已经滚过视口上沿的标题」；还在最前面的作者区时都不亮。
+  const spy = () => {
+    const base = pane.getBoundingClientRect().top;
+    let hit = null;
+    for (const t of jumpTargets) {
+      if (t.node.getBoundingClientRect().top - base <= 28) hit = t;
+      else break;
+    }
+    const next = hit ? hit.btn : null;
+    if (next === currentJump) return;
+    if (currentJump) currentJump.classList.remove("on");
+    if (next) next.classList.add("on");
+    currentJump = next;
+  };
+  let spyTick = false;
+  pane.addEventListener("scroll", () => {
+    if (spyTick) return;
+    spyTick = true;
+    window.requestAnimationFrame(() => { spyTick = false; spy(); });
+  }, { passive: true });
+  // 初次判定要等面板挂进页面之后再做：挂载前坐标全是 0，会把最后一节误判成当前节
+  window.requestAnimationFrame(() => window.requestAnimationFrame(spy));
+
+  // 「选中原文」和「跳到章节」的按钮收进同一个工具栏，放不下就换行，不再横向滚动
+  const toolBar = el("div", "paper-tools");
+  toolBar.append(tools, jump);
+  left.append(toolBar, pane);
 
   // 右：卡
   const right = el("section", "bench-card");
@@ -5556,12 +5836,60 @@ function memoryCard(f) {
   return card;
 }
 
+/* ---------- 意见反馈 ---------- */
+
+async function renderFeedback() {
+  const seq = S.renderSeq;
+  if (stale(seq)) return;
+  $app.innerHTML = "";
+  // 致谢三行 + 署名：这页的开场是一封短信，不是功能说明
+  const head = el("header", "ws-head fb-head");
+  head.appendChild(el("h2", "", "意见反馈"));
+  const lead = el("div", "fb-lead");
+  lead.appendChild(el("p", "", "感谢您体验“启研”项目！"));
+  lead.appendChild(el("p", "", "目前项目仍处于开发阶段，部分功能尚不完善。我们真诚期待您畅所欲言，您的每一条反馈，都对项目的改进至关重要！"));
+  lead.appendChild(el("p", "fb-sign", "“启研”项目团队"));
+  head.appendChild(lead);
+  $app.appendChild(head);
+
+  const box = el("section", "panel fb-form-panel");
+  const form = el("form", "fb-form");
+  const ta = el("textarea");
+  ta.maxLength = 4000;
+  ta.placeholder = "网页bug，使用体验，新功能建议...什么都可以提~";
+  ta.setAttribute("aria-label", "反馈内容");
+  const counter = el("p", "fb-count", "0 / 4000");
+  counter.setAttribute("aria-live", "polite");
+  ta.addEventListener("input", () => { counter.textContent = `${ta.value.length} / 4000`; });
+  const actions = el("div", "submit-actions");
+  const ok = el("button", "btn", "提交反馈");
+  ok.type = "submit";
+  actions.appendChild(ok);
+  form.append(ta, counter, actions);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const text = ta.value.trim();
+    if (text.length < 10) { toast("至少写 10 个字，说清哪里不对"); ta.focus(); return; }
+    ok.disabled = true; ok.textContent = "提交中…";
+    try {
+      await api("POST", "/api/feedback", { uid: S.uid, text });
+      toast("您的反馈已提交，非常感谢您对“启研”项目的支持！");
+      setView("feedback");
+    } catch (err) {
+      toast(err.message);
+      ok.disabled = false; ok.textContent = "提交反馈";
+    }
+  };
+  box.appendChild(form);
+  $app.appendChild(box);
+}
+
 async function renderMe() {
   const seq = S.renderSeq;
   const [mem, mine, portraits] = await Promise.all([
     api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ layers: [], projects: [] })),
     api("GET", `/api/me/facts?uid=${S.uid}`).catch(() => ({ facts: [] })),
-    portraitBar().catch(() => null),
+    portraitSection(),
   ]);
   if (stale(seq)) return;
   const live = new Set(["draft", "confirmed", "active"]);
@@ -5577,10 +5905,10 @@ async function renderMe() {
     backRow.appendChild(back);
     $app.appendChild(backRow);
   }
-  $app.appendChild(workspaceHead("我的", "账号、核对和它记下的，都在这一页。"));
+  $app.appendChild(workspaceHead("我的", "账号、画像和它记下的，都在这一页。"));
   $app.appendChild(accountPanel());
-  $app.appendChild(myDirectionsPanel());
-  if (portraits) $app.appendChild(portraits);
+  // 画像与方向：画像条在方向卡上方（不重叠），方向收在所选画像名下
+  $app.appendChild(portraits);
   $app.appendChild(confirmDrafts(facts));
   $app.appendChild(coverageBoard());
   const board = el("section", "panel");
@@ -6261,76 +6589,50 @@ document.querySelectorAll(".nav-btn").forEach((b) => {
   });
 });
 document.getElementById("brandHome").addEventListener("click", () => setView("home"));
+document.getElementById("feedbackBtn").addEventListener("click", () => {
+  if (!S.uid) return;
+  setView("feedback");
+});
 function closeDirMenu() {
   document.getElementById("dirMenu")?.remove();
 }
 
+/* 右上角「画像/方向」下拉：方向是多选。添加过的方向都列在这里，
+   勾上的进推荐，取消勾选就退出去（选项保留，随时勾回来）。
+   按钮上显示的是画像名，具体勾了哪些在这里看 ✓。 */
 function openDirMenu() {
   const chip = document.getElementById("dirChip");
   if (!chip || !S.uid) return;
   if (document.getElementById("dirMenu")) { closeDirMenu(); return; }
-  const dirs = S.myDirs || [];
+  const t = trail();
+  // 老数据只有方向没有 dirs：把它当作选项池
+  const dirs = t.dirs.length ? t.dirs : (t.dir && (!window.RG_DIR || RG_DIR.byId[t.dir]) ? [t.dir] : []);
   if (!dirs.length) { setView("cards"); return; }
   const menu = el("div", "dir-menu");
   menu.id = "dirMenu";
-  const cur = trail().dir;
+  menu.appendChild(el("p", "dir-menu-head", "我的方向 · 可多选，推荐按勾选的组合来"));
+  const sel = new Set(selectedDirs(t));
   dirs.forEach((id) => {
-    const b = el("button", "dir-menu-item" + (id === cur ? " on" : ""),
-      `${id === cur ? "✓ " : ""}${esc(dirTitle(id) || id)}`);
+    const on = sel.has(id);
+    const b = el("button", "dir-menu-item" + (on ? " on" : ""),
+      `${on ? "✓ " : ""}${esc(dirTitle(id) || id)}`);
     b.type = "button";
+    b.setAttribute("aria-pressed", on ? "true" : "false");
     b.onclick = async () => {
       closeDirMenu();
-      if (id !== cur) await chooseDirection(id);
+      await toggleDirSel(id);
+      setTimeout(() => { if (document.getElementById("dirChip")) openDirMenu(); }, 0);
     };
     menu.appendChild(b);
   });
   const tree = el("button", "dir-menu-item", "查看方向树");
   tree.type = "button";
   tree.onclick = () => { closeDirMenu(); S.entered ? setView("cards") : enterApp("cards"); };
-  const mine = el("button", "dir-menu-item", "管理我的方向");
+  const mine = el("button", "dir-menu-item", "管理画像与方向");
   mine.type = "button";
   mine.onclick = () => { closeDirMenu(); setView("me"); };
   menu.append(tree, mine);
   chip.parentNode.appendChild(menu);
-}
-
-function myDirectionsPanel() {
-  const box = el("section", "panel my-dirs");
-  box.appendChild(el("h3", "section-label", "我的方向"));
-  const dirs = S.myDirs || [];
-  const cur = trail().dir;
-  if (!dirs.length) {
-    const empty = el("p", "panel-sub", "还没有收藏的方向。");
-    const go = el("button", "btn small", "去方向树添加");
-    go.type = "button";
-    go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
-    box.append(empty, go);
-    return box;
-  }
-  const list = el("div", "my-dir-list");
-  dirs.forEach((id) => {
-    const row = el("div", "my-dir-row");
-    row.appendChild(el("span", "", `${id === cur ? "当前 · " : ""}${esc(dirTitle(id) || id)}`));
-    if (id !== cur) {
-      const set = el("button", "btn small", "设为当前");
-      set.type = "button";
-      set.onclick = async () => { await chooseDirection(id); setView("me"); };
-      row.appendChild(set);
-    }
-    const drop = el("button", "btn small ghost", "移出");
-    drop.type = "button";
-    drop.onclick = async () => {
-      await putPrefs({ directions: dirs.filter((x) => x !== id) });
-      setView("me");
-    };
-    row.appendChild(drop);
-    list.appendChild(row);
-  });
-  const go = el("button", "linkish", "去方向树添加");
-  go.type = "button";
-  go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
-  box.append(list, go);
-  return box;
 }
 
 document.getElementById("dirChip").addEventListener("click", (e) => {

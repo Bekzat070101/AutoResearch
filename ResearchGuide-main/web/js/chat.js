@@ -555,9 +555,13 @@ const ChatView = (() => {
         const drafts = (mine.facts || []).filter((f) => f.status === "draft");
         sideList.innerHTML = "";
         items.slice(0, 5).forEach((it) => {
-          const row = el("div", "rank-row" + (it.current ? " current" : ""));
+          const row = el("div", "rank-row");
           const name = (window.RG_DIR && RG_DIR.displayName(it.node)) || it.node;
-          row.appendChild(el("p", "rank-name", `${esc(name)}${it.current ? " · 当前" : ""}`));
+          // 和方向树说明浮层同一套状态：加过就带 ✓，按钮变成取消添加
+          const added = trail().dirs.includes(it.node);
+          const nameP = el("p", "rank-name", esc(name));
+          if (added) nameP.appendChild(el("span", "added-tag", "✓ 已添加"));
+          row.appendChild(nameP);
           (it.why || []).slice(0, 2).forEach((w) => row.appendChild(el("p", "rank-why", esc(w))));
           const acts = el("div", "rank-acts");
           const pick = el("button", "btn small", "选这个方向");
@@ -566,9 +570,13 @@ const ChatView = (() => {
             await chooseDirection(it.node);
             refreshFacts();
           };
-          const add = el("button", "btn small secondary", "添加到我的方向");
+          const add = el("button", "btn small secondary", added ? "取消添加" : "添加到我的方向");
           add.type = "button";
-          add.onclick = () => addMyDirection(it.node);
+          add.onclick = async () => {
+            if (added) await removeMyDirection(it.node);
+            else await addMyDirection(it.node);
+            refreshFacts();
+          };
           acts.append(pick, add);
           row.appendChild(acts);
           sideList.appendChild(row);

@@ -6,7 +6,7 @@
   <title>启研 · 本科生进科研</title>
   <meta name="description" content="给北大本科一、二年级。先聊你现在卡在哪，再给一件能做完的事。" />
   <meta name="theme-color" content="#f5f2ea" />
-  <link rel="stylesheet" href="static/css/styles.css?v=w83" />
+  <link rel="stylesheet" href="static/css/styles.css?v=w97" />
   <!-- 标题衬线字体走国内可达的镜像，且不阻塞首屏；加载失败时回退系统宋体 -->
   <link rel="preconnect" href="https://fonts.googleapis.cn" />
   <link rel="stylesheet" media="print" onload="this.media='all'"
@@ -32,6 +32,10 @@
       </nav>
       <div class="side-foot">
         <button class="llm-pill" id="llmPill" type="button">我的 DeepSeek</button>
+        <button class="side-feedback" id="feedbackBtn" type="button">
+          <span class="sf-main">意见反馈</span>
+          <span class="sf-sub">项目仍处于开发阶段，我们期待您的宝贵意见</span>
+        </button>
       </div>
     </aside>
 
@@ -39,7 +43,9 @@
       <header class="app-top" id="headerRight" hidden>
         <button class="nav-expand" id="navExpand" type="button" hidden aria-label="展开侧栏">»</button>
         <div class="app-top-right">
-          <button class="dir-chip empty" id="dirChip" type="button">还没有方向</button>
+          <div class="dir-menu-wrap">
+            <button class="dir-chip empty" id="dirChip" type="button">还没有方向</button>
+          </div>
           <div class="user-menu-wrap">
             <button class="user-menu-btn" id="userMenuBtn" type="button" aria-haspopup="true" aria-expanded="false">
               <span class="dot"></span>
@@ -57,7 +63,7 @@
              每次改前端都要把这个号 +1，并同步下面三个 ?v=。
              **三个都必须一样** —— 上次 CSS 停在 w27 而 JS 到了 w28，
              用户就拿到了「新 JS + 旧 CSS」，样式全不对。有测试钉着这件事。 -->
-        <p class="build-stamp">界面版本 <b>w83</b> · 「我的」页能导出。硬刷新用 Ctrl+Shift+R。</p>
+        <p class="build-stamp">界面版本 <b>w97</b> · 「我的」页能导出。硬刷新用 Ctrl+Shift+R。</p>
       </footer>
     </div>
   </div>
@@ -66,8 +72,8 @@
   window.apiUrl = function (path) {
     return String(window.QIYAN_API || "").replace(/\/$/, "") + path;
   };</script>
-  <script src="static/js/directions.js?v=w83"></script>
-  <script src="static/js/chat.js?v=w83"></script>
-  <script src="static/js/app.js?v=w83"></script>
+  <script src="static/js/directions.js?v=w97"></script>
+  <script src="static/js/chat.js?v=w97"></script>
+  <script src="static/js/app.js?v=w97"></script>
 </body>
 </html>
