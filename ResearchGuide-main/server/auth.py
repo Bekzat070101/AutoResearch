@@ -371,10 +371,10 @@ def register(req: RegisterReq, request: Request):
 @router.post("/api/auth/signin")
 def signin(req: SigninReq, request: Request):
     username = store.normalize_username(req.username)
-    if not _ip_allows(request, "signin"):
-        raise HTTPException(429, "试得太频繁了，过一会儿再试")
     if not store.valid_username(username):  # 形状不对的用户名直接 401，不给它建桶（R05：桶总数有上限，别让垃圾名占位）
         raise HTTPException(401, "用户名或密码不对")
+    if not _ip_allows(request, "signin"):
+        raise HTTPException(429, "试得太频繁了，过一会儿再试")
     if username and not _allow(f"signin-user:{username}", SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
     user = store.user_by_username(username)

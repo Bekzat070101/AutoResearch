@@ -162,3 +162,37 @@ def test_signin_bucket_cardinality_is_bounded(client, monkeypatch):
     ok = client.post("/api/auth/signin", json={"username": "real_user", "password": "secret-ok"})
     assert ok.status_code == 200, ok.text
     assert len(auth._HITS) < 10000
+
+
+@pytest.mark.parametrize("bad", ["x", "a" * 25, "全角名字"])
+def test_invalid_signin_public_ip_does_not_create_bucket(client, monkeypatch, bad):
+    """R4-08：公网来源发形状不对的用户名，401 且不建任何桶、不查用户表。"""
+    clock = [10000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    monkeypatch.setenv("TRUST_PROXY", "1")
+    looked = []
+    monkeypatch.setattr(store, "user_by_username", lambda *a, **k: looked.append(a) or None)
+    before = {k: list(v) for k, v in auth._HITS.items()}
+    r = client.post("/api/auth/signin", json={"username": bad, "password": "bad"},
+                    headers={"X-Forwarded-For": "8.8.8.8"})
+    assert r.status_code == 401
+    assert r.json() == {"detail": "用户名或密码不对"}
+    assert looked == []
+    assert auth._HITS == before
+
+
+def test_invalid_signin_full_capacity_still_401(client, monkeypatch):
+    """R4-08：桶已满 10000 个未过期时，非法用户名仍是 401，不是 429。"""
+    clock = [10000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    monkeypatch.setenv("TRUST_PROXY", "1")
+    for i in range(auth._HITS_CAP):
+        auth._HITS[f"fill:{i}"] = [clock[0]]
+    looked = []
+    monkeypatch.setattr(store, "user_by_username", lambda *a, **k: looked.append(a) or None)
+    r = client.post("/api/auth/signin", json={"username": "x", "password": "bad"},
+                    headers={"X-Forwarded-For": "8.8.8.8"})
+    assert r.status_code == 401, r.text
+    assert r.json() == {"detail": "用户名或密码不对"}
+    assert looked == []
+    assert len(auth._HITS) == auth._HITS_CAP
