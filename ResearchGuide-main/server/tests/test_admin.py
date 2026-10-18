@@ -198,3 +198,93 @@ def test_health_gains_checks_and_keeps_ok(client):
     assert "model_pool" in h
     assert "threads_max" in h["model_pool"]
     assert h["version"] == "0.2.0"
+
+
+def test_concurrent_restore_partial_write_keeps_validated_database(client, tmp_path, monkeypatch):
+    """20-R01：A 校验后暂停、B 写坏自己的 stage，A 继续换入的仍是完整库。"""
+    import sqlite3
+    import threading
+    uid = store.create_user("并发恢复")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    validated, b_done = threading.Event(), threading.Event()
+    real_write, real_check = admin._write_restore_bytes, admin._check_integrity_and_close
+    calls = {"write": 0, "check": 0}
+
+    def write(path, data):
+        calls["write"] += 1
+        if calls["write"] == 2:
+            path.write_bytes(data[:128])
+            raise OSError(28, "No space left on device")
+        real_write(path, data)
+
+    def check(path):
+        calls["check"] += 1
+        real_check(path)
+        if calls["check"] == 1:
+            validated.set()
+            assert b_done.wait(10)
+
+    monkeypatch.setattr(admin, "_write_restore_bytes", write)
+    monkeypatch.setattr(admin, "_check_integrity_and_close", check)
+    res = {}
+
+    def run_a():
+        res["a"] = client.post("/api/admin/restore", json={"object": out["object"]},
+                               headers={"X-Admin-Token": TOKEN})
+
+    t = threading.Thread(target=run_a)
+    t.start()
+    assert validated.wait(10)
+    rb = client.post("/api/admin/restore", json={"object": out["object"]},
+                     headers={"X-Admin-Token": TOKEN})
+    b_done.set()
+    t.join(15)
+    assert rb.status_code == 500
+    assert res["a"].status_code == 200, res["a"].text
+    with sqlite3.connect(str(store.DB_PATH)) as c:
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert store.get_user(uid)["nickname"] == "并发恢复"
+    assert not list(Path(store.DB_PATH).parent.glob("*.incoming*"))
+
+
+def test_restore_cleanup_error_reports_applied(client, tmp_path, monkeypatch):
+    """20-R01：换入成功后 sidecar 清理失败报 200 + cleanup_pending。"""
+    uid = store.create_user("已换入")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    store.create_user("恢复后应消失")
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if str(self).endswith("-wal"):
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    r = client.post("/api/admin/restore", json={"object": out["object"]},
+                    headers={"X-Admin-Token": TOKEN})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["object"] == out["object"]
+    assert body["cleanup_pending"] == ["-wal"]
+    assert body["warning"] == "恢复已换入；WAL/SHM 清理待重试"
+    assert store.get_user(uid)["nickname"] == "已换入"
+
+
+def test_restore_waits_for_open_connections(client, tmp_path):
+    """20-R01：有连接没排空时 5 秒内 503，旧库不变。"""
+    import time as _time
+    uid = store.create_user("旧库")["uid"]
+    out = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN}).json()
+    store.create_user("恢复不应执行")
+    orig = Path(store.DB_PATH).read_bytes()
+    with store._conn() as c:
+        c.execute("SELECT COUNT(*) FROM users").fetchone()
+        t0 = _time.monotonic()
+        r = client.post("/api/admin/restore", json={"object": out["object"]},
+                        headers={"X-Admin-Token": TOKEN})
+        elapsed = _time.monotonic() - t0
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"] == "数据库仍在使用，请稍后重试恢复"
+    assert elapsed < 6.5
+    assert Path(store.DB_PATH).read_bytes() == orig
+    assert store.get_user(uid)["nickname"] == "旧库"
