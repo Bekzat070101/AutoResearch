@@ -466,18 +466,66 @@ _AFTER_MIGRATIONS = [
 ]
 
 
+_GATE = threading.Condition()
+_GATE_STATE: dict[str, Any] = {"open": 0, "owner": None}
+
+
+class RestoreBusy(Exception):
+    """恢复闸没在时限内排空连接。"""
+
+
+@contextmanager
+def restore_gate(timeout: float = 5):
+    """恢复换库：阻止新连接，最多等 timeout 秒排空已开的 _conn；排不空 → RestoreBusy。"""
+    me = threading.get_ident()
+    deadline = time.monotonic() + timeout
+    with _GATE:
+        while _GATE_STATE["owner"] is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise RestoreBusy()
+            _GATE.wait(left)
+        _GATE_STATE["owner"] = me
+        try:
+            while _GATE_STATE["open"] > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise RestoreBusy()
+                _GATE.wait(left)
+        except BaseException:
+            _GATE_STATE["owner"] = None
+            _GATE.notify_all()
+            raise
+    try:
+        yield
+    finally:
+        with _GATE:
+            _GATE_STATE["owner"] = None
+            _GATE.notify_all()
+
+
 @contextmanager
 def _conn():
     """一次调用一个连接：成功提交、异常回滚，最后一定关闭（原来只提交不关闭，连接会一直泄漏）。"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA secure_delete=ON")
+    me = threading.get_ident()
+    with _GATE:
+        while _GATE_STATE["owner"] not in (None, me):
+            _GATE.wait()
+        _GATE_STATE["open"] += 1
     try:
-        with conn:
-            yield conn
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA secure_delete=ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        with _GATE:
+            _GATE_STATE["open"] -= 1
+            _GATE.notify_all()
 
 
 def init_db() -> None:
