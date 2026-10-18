@@ -90,13 +90,19 @@ def nas_mount_dirs(cfg) -> list[str]:
     return out
 
 
-def assert_db_under_nas(db_path: str, mounts: list[str]) -> None:
+def assert_db_under_nas(db_path: str, mounts: list[str]) -> str:
     import posixpath
-    db = posixpath.normpath((db_path or "").replace("\\", "/"))
+    raw = db_path or ""
+    if "\\" in raw or not raw.startswith("/"):
+        raise SystemExit("拒绝发布生产：QIYAN_DB 不在已配置 NAS 挂载目录")
+    db = posixpath.normpath(raw)
     for m in mounts or []:
-        root = posixpath.normpath(str(m).replace("\\", "/"))
+        root = str(m)
+        if "\\" in root or not root.startswith("/"):
+            continue
+        root = posixpath.normpath(root)
         if root != "/" and db.startswith(root.rstrip("/") + "/"):
-            return
+            return db
     raise SystemExit("拒绝发布生产：QIYAN_DB 不在已配置 NAS 挂载目录")
 
 
@@ -104,7 +110,7 @@ def production_release_checks(env_vars: dict[str, str], name: str, allow_ephemer
                               *, deploy, check_health, record):
     """发布门顺序：生产先核函数 NAS 挂载，再 refuse_unsafe，发完必须有 URL 且 health 持久可写才 record。"""
     if name == DEFAULT_NAME:
-        assert_db_under_nas(env_vars.get("QIYAN_DB") or "", nas_mount_dirs(cfg))
+        env_vars["QIYAN_DB"] = assert_db_under_nas(env_vars.get("QIYAN_DB") or "", nas_mount_dirs(cfg))
     refuse_unsafe(env_vars, name, allow_ephemeral)
     url = deploy()
     if name != DEFAULT_NAME:

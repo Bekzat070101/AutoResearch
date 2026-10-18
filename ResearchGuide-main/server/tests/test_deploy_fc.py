@@ -148,3 +148,49 @@ def test_llm_settings_selects_one_complete_source():
     assert ns["llm_settings"]() is None
     assert ns["llm_key"]() == ""
     assert not [k for k in ns["_local_defaults"]("qiyan") if k.startswith("LLM_") or k == "DEEPSEEK_API_KEY"]
+
+
+@pytest.mark.parametrize("db", ["\\mnt\\nas\\qiyan.db", "/mnt/nas\\qiyan.db", "mnt/nas/qiyan.db", "C:\\mnt\\nas\\qiyan.db"])
+def test_production_rejects_non_posix_db_before_sdk_update(db):
+    calls = {"create": 0, "update": 0, "record": 0}
+
+    def deploy():
+        calls["create"] += 1
+        calls["update"] += 1
+        return "https://x"
+
+    with pytest.raises(SystemExit, match="QIYAN_DB 不在已配置 NAS 挂载目录"):
+        fc_safety.production_release_checks(
+            {**GOOD_ENV, "QIYAN_DB": db}, "qiyan", False, _cfg("/mnt/nas"),
+            deploy=deploy, check_health=lambda u: GOOD_HEALTH,
+            record=lambda u: calls.__setitem__("record", calls["record"] + 1))
+    assert calls == {"create": 0, "update": 0, "record": 0}
+
+
+@pytest.mark.parametrize("db,ok", [
+    ("/mnt/nas/qiyan.db/", True),
+    ("/mnt/nas/missing/../qiyan.db", True),
+    ("/mnt/nas/../nas2/qiyan.db", False),
+])
+def test_deploy_uses_checked_canonical_db_path(db, ok):
+    events = []
+    env_vars = {**GOOD_ENV, "QIYAN_DB": db}
+
+    def deploy():
+        events.append(("sdk", env_vars["QIYAN_DB"]))
+        return "https://x"
+
+    def check_health(u):
+        events.append(("health", u))
+        return GOOD_HEALTH
+
+    run = lambda: fc_safety.production_release_checks(  # noqa: E731
+        env_vars, "qiyan", False, _cfg("/mnt/nas"),
+        deploy=deploy, check_health=check_health, record=lambda u: events.append(("record", u)))
+    if ok:
+        run()
+        assert events == [("sdk", "/mnt/nas/qiyan.db"), ("health", "https://x"), ("record", "https://x")]
+    else:
+        with pytest.raises(SystemExit):
+            run()
+        assert events == []
