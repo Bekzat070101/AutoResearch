@@ -9,6 +9,7 @@
 "use strict";
 
 const ChatView = (() => {
+  const entryInvitations = new Set();
   let busy = false;      // 正在生成，阻止重复发送
   let abort = null;      // AbortController
   let seq = 0;           // 渲染序号，切走视图后不再写 DOM
@@ -117,15 +118,17 @@ const ChatView = (() => {
      标题和标签同行，画像管理退到右侧。 */
   function dialogueHead() {
     const head = el("header", "ws-head");
-    head.appendChild(el("h2", "", "对话"));
-    head.appendChild(el("p", "", "有什么想搞清楚的，直接说。年级、专业、卡在哪，都行。"));
+    head.appendChild(el("h2", "", S.entered ? "对话" : "先认识一下"));
+    head.appendChild(el("p", "", S.entered
+      ? "继续聊你的问题和阅读近况。"
+      : "先聊院系、专业、年级和课程，再顺着你的想法慢慢了解。随时可以先进入使用。"));
     if (!S.entered) {
       const bar = el("div", "enter-bar");
       const go = el("button", "btn", "进入启研");
       go.type = "button";
       go.onclick = () => enterApp();
       bar.appendChild(go);
-      bar.appendChild(el("span", "form-note", "随时可以先做事，不必聊完。"));
+      bar.appendChild(el("span", "form-note", "不必聊完才能使用；信息较少时会先提醒你。"));
       head.appendChild(bar);
     }
     return head;
@@ -139,12 +142,7 @@ const ChatView = (() => {
     $app.innerHTML = "";
     $app.appendChild(dialogueHead());
 
-    /* 对话页分成**三个有名字的区**，顺序固定，各自管一件事：
-         .chat-scroll  对话流     —— 只有气泡，它自己滚
-         .chat-next    下一步     —— 行动卡 / 回执 / 可选说法，给最大高度，自己滚
-         .chat-input   输入        —— 状态行 + 输入框，永远在最下面
-       以前这三样都塞在一个 .chat-foot 里：行动卡和输入框抢同一块地方，
-       行动卡一高就把输入框顶出屏幕，而输入框本来该是位置最稳定的那个。 */
+    // 只有对话流和输入区两块。回执/进入邀请跟随本轮回复，不再挤进中间的独立滚动带。
     const wrap = el("div", "two-col two-col-chat");
     const chat = el("div", "panel chat-panel chat-wide");
     const scroll = el("div", "chat-scroll");
@@ -152,13 +150,14 @@ const ChatView = (() => {
 
     // 行动区本身就是「下一步」这个区。.action-slot:empty 已经会隐藏它，
     // 所以没有卡片时不会留一条空带。
-    const actions = el("div", "action-slot chat-next");
+    const actions = el("div", "chat-followup");
     const inputZone = el("div", "chat-input");
+    const suggestions = el("div", "chat-suggestions");
     const stageLine = el("p", "stage-line");
     const inputRow = el("div", "chat-input-row");
     const input = el("textarea");
     input.rows = 1;
-    input.placeholder = "说说你现在的情况，或者你想弄清楚的问题…（Shift + 回车换行）";
+    input.placeholder = S.entered ? "想聊什么，直接说…" : "说说你的想法，也可以粘贴成绩单…";
     input.setAttribute("aria-label", "对话输入");
     const sendBtn = el("button", "btn small", "发送");
     sendBtn.type = "button";
@@ -168,18 +167,20 @@ const ChatView = (() => {
     inputRow.append(input, sendBtn, stopBtn);
     // 状态行（正在观察 / 正在查资料）说的是「输入之后会发生什么」，
     // 所以它归输入区，不归行动区——否则它会跟着行动卡一起滚走。
-    inputZone.append(stageLine, inputRow);
-    chat.append(scroll, actions, inputZone);
+    inputZone.append(suggestions, stageLine, inputRow);
+    inputZone.appendChild(el("p", "composer-hint", "Enter 发送 · Shift+Enter 换行"));
+    chat.append(scroll, inputZone);
 
     const side = el("div", "panel side-panel mem-sum");
     const sideHead = el("div", "rank-head");
-    sideHead.appendChild(el("p", "side-title", "按你说过的，可能适合的方向"));
+    sideHead.appendChild(el("p", "side-title", S.entered ? "按你说过的，可能适合的方向" : "目前对你的了解"));
     const treeBtn = el("button", "linkish", "查看方向树");
     treeBtn.type = "button";
+    treeBtn.hidden = !S.entered;
     treeBtn.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
     sideHead.appendChild(treeBtn);
     side.appendChild(sideHead);
-    side.appendChild(el("p", "side-sub rank-badge", "规则推测"));
+    side.appendChild(el("p", "side-sub rank-badge", S.entered ? "规则推测" : "从学习背景聊起，其他信息慢慢补充。"));
     const sideList = el("div", "rank-list");
     const sideEmpty = el("p", "side-empty", "再聊几句兴趣或目标，这里会按你说过的排方向。");
     const sideFoot = el("p", "rank-foot", "");
@@ -188,7 +189,7 @@ const ChatView = (() => {
     $app.appendChild(wrap);
 
     autoGrow();
-    input.focus();
+    input.focus({ preventScroll: true });
     try {
       const draft = sessionStorage.getItem("rg_chat_draft_" + S.uid);
       if (draft) { input.value = draft; autoGrow(); }
@@ -211,23 +212,12 @@ const ChatView = (() => {
     } catch (e) { toast(e.message); }
     if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     history.messages.forEach((m) => addBubble(m.role, m.text));
-    if (history.pending_action) {
-      renderAction(history.pending_action);
-    } else if (history.just_finished) {
-      // 刚在任务区把任务交掉了。这时候 pending_action 已经是空的（那一步终结了），
-      // 如果什么都不画，用户回到对话就看不到自己刚做完的事——那张卡会凭空消失。
-      // 但**只画一张**：再叠一张「这一步已完成」的卡就是在说同一件事，
-      // 看起来像有两个任务。just_finished 里已经有标题、字数、得分，信息是全的。
-      finishedNote(history.just_finished);
-    } else if (history.last_action && history.last_action.status === "completed") {
-      // 不是刚交的（比如隔了很久再打开），就只显示那张已完成状态的卡
-      renderAction(history.last_action);
-    }
     await refreshFacts();
     if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
-    if (history.onboard_done && !S.entered) enterCard();
+    if (history.guide && !S.entered) renderGuide(history.guide);
+    if (history.onboard_done && !S.entered) enterCard(history.guide);
     if (!history.messages.length) {
-      addBubble("assistant", "你好。你不用说得很完整——先告诉我你现在最想弄清楚的一件事，或者你手上的情况。");
+      addBubble("assistant", history.welcome_message || "你好，我是启研。你可以直接问问题，不用先把背景填齐。也可以在树洞成绩单页全选、复制，再粘贴到这里，帮助我了解你的学习基础；这完全可选，粘贴后会保存到当前画像。");
     }
 
     /* --- 发送 --- */
@@ -243,6 +233,8 @@ const ChatView = (() => {
       input.value = ""; autoGrow();
       input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
       actions.innerHTML = "";
+      actions.remove();
+      suggestions.innerHTML = "";
       addBubble("user", msg);
 
       const bubble = addBubble("assistant", "");
@@ -288,7 +280,7 @@ const ChatView = (() => {
         if (mySeq === seq) {
           input.disabled = false; sendBtn.disabled = false; stopBtn.hidden = true;
           setStage("");
-          input.focus();
+          input.focus({ preventScroll: true });
         }
       }
     }
@@ -302,11 +294,10 @@ const ChatView = (() => {
        现在的规矩很简单，也是这个页面该有的框架：
          · 对话流里**只有对话**（用户和助手说的话）
          · 系统这一轮的副作用全部进这个块，按固定顺序分组
-         · 行动卡永远在最上面——它才是用户要动手的东西
+         · 记忆回执与可选说法帮助用户核对信息
     */
     function afterTurn(result) {
-      // pending_action 是当前还开着的行动（界面状态）；next_action 只是这一轮决定给的那个
-      renderAction(result.pending_action || null);
+      scroll.appendChild(actions);
       renderOffers(result.offered_actions);
       if (result.transcript_import) {
         renderTranscriptReceipt(result.transcript_import);
@@ -322,24 +313,32 @@ const ChatView = (() => {
         d.appendChild(link);
         actions.appendChild(d);
       }
-      if (result.onboard_done && !S.entered) enterCard();
+      if (result.guide && !S.entered) renderGuide(result.guide);
+      if (result.onboard_done && !S.entered) enterCard(result.guide);
       scroll.scrollTop = scroll.scrollHeight;
     }
 
-    function enterCard() {
-      if (actions.querySelector(".enter-card")) return;
+    function enterCard(profile) {
+      const key = "rg_entry_invited_v2_" + S.uid + "_" + (S.portraitId || "default");
+      if (S.entered || entryInvitations.has(key) || actions.querySelector(".enter-card")) return;
+      try { if (localStorage.getItem(key)) return; } catch (_) { /* 仅使用本次会话状态 */ }
+      entryInvitations.add(key);
+      try { localStorage.setItem(key, "1"); } catch (_) { /* 仅使用本次会话状态 */ }
       const card = el("div", "enter-card");
       card.appendChild(el("p", "enter-card-title", "可以进入启研了"));
+      card.appendChild(el("p", "form-note", "已了解你关注的主题和几方面阅读背景。其他信息可以以后再补；也可以继续聊。"));
       const row = el("div", "submit-actions");
       const go = el("button", "btn", "进入启研");
       go.type = "button";
       go.onclick = () => enterApp();
       const more = el("button", "btn ghost", "再聊聊");
       more.type = "button";
-      more.onclick = () => { card.remove(); input.focus(); };
+      more.onclick = () => { card.remove(); input.focus({ preventScroll: true }); };
       row.append(go, more);
       card.appendChild(row);
-      actions.appendChild(card);
+      // 邀请放在回执前面，不能被长记忆清单挤到结果区滚动条下面。
+      actions.insertBefore(card, actions.firstChild);
+      if (!actions.parentNode) scroll.appendChild(actions);
     }
 
     /* 系统这一轮的副作用，收成一个块。没有可说的就不渲染。 */
@@ -370,8 +369,8 @@ const ChatView = (() => {
       }
       if (!groups.length) return null;
 
-      const box = el("div", "receipt");
-      box.appendChild(el("p", "rc-head", "这一轮发生了什么"));
+      const box = el("details", "receipt");
+      box.appendChild(el("summary", "rc-head", "本轮记录 · 展开核对"));
       groups.forEach((g) => {
         const row = el("div", "rc-group");
         const head = el("p", "rc-label", esc(g.label));
@@ -388,8 +387,9 @@ const ChatView = (() => {
     /* 成绩单导入的回执。它不是「聊了一句」，是一次数据录入，
        所以要说清：读进去几门、绩点怎么算的、哪些没算进去、推出什么结论。 */
     function renderTranscriptReceipt(imp) {
-      const box = el("div", "receipt receipt-import");
-      box.appendChild(el("p", "rc-head", "成绩单已导入"));
+      const box = el("details", "receipt receipt-import");
+      const preview = imp.mode === "preview";
+      box.appendChild(el("summary", "rc-head", (preview ? "预览结果（未保存）" : (imp.written ? "课程记录已更新" : "课程记录未新增")) + ` · ${(imp.summary || {}).total || 0} 门 · 展开详情`));
       const s = imp.summary || {};
       const facts = el("div", "ri-facts");
       const cell = (k, v) => {
@@ -398,9 +398,9 @@ const ChatView = (() => {
         c.appendChild(el("span", "ri-v", esc(v)));
         facts.appendChild(c);
       };
-      cell("课程", `${imp.written} 门`);
+      cell(preview ? "识别课程" : "写入课程", `${preview ? (s.total || 0) : imp.written} 门`);
       cell("通过学分", String(s.passed_credits != null ? s.passed_credits : "—"));
-      cell("绩点", s.gpa != null ? s.gpa.toFixed(4) : "—");
+      cell("参考 GPA", s.gpa != null ? s.gpa.toFixed(4) : "—");
       if (s.gpa_credits != null) cell("计入绩点的学分", String(s.gpa_credits));
       box.appendChild(facts);
 
@@ -419,7 +419,7 @@ const ChatView = (() => {
       if (d.length) {
         const ul = el("ul", "rc-list");
         d.forEach((f) => ul.appendChild(el("li", "", esc(f.value))));
-        box.appendChild(el("p", "rc-label", "推出的能力结论"));
+        box.appendChild(el("p", "rc-label", "从课程记录了解的背景（不代表熟练掌握）"));
         box.appendChild(ul);
       }
       const w = imp.warnings || [];
@@ -442,109 +442,26 @@ const ChatView = (() => {
         b.onclick = () => send(a.label);
         row.appendChild(b);
       });
-      actions.appendChild(row);
+      suggestions.appendChild(row);
     }
 
-    /* 刚在任务区交完任务、回到对话时的一句话。
-       它是「任务区做完 → 回到对话」这条闭环的可见落点。 */
-    function finishedNote(jf) {
-      if (!jf) return;
-      const p = (jf.payload || {});
-      const box = el("div", "finished-note");
-      box.appendChild(el("p", "fn-title", `你刚交了「${esc(jf.title || "")}」`));
-      const bits = [];
-      if (p.chars) bits.push(`写了 ${p.chars} 字`);
-      if (typeof p.score === "number") bits.push(`按标准 ${p.score} 分`);
-      if (bits.length) box.appendChild(el("p", "fn-sub", bits.join(" · ")));
-      box.appendChild(el("p", "fn-sub", "它已经写进你的「经验积累」了。接着说下一步就行。"));
-      addBubble("assistant", `看到了，你把「${jf.title || "那一步"}」交了。我按结果想想下一步。`);
-      actions.parentNode.insertBefore(box, actions);
-    }
-
-    /* 行动卡。结构固定成四段，位置不随内容变：
-         ① 状态（这一步是什么状态）
-         ② 标题（要做什么）
-         ③ 依据（为什么是给你的）—— 每条一行，不再挤成一句话
-         ④ 动作（唯一该做的那件事）
-       任务必须说得出依据，所以③不是装饰；没有依据就整段不出现，
-       而不是留一个空标题。 */
-    function renderAction(a) {
-      actions.innerHTML = "";
-      if (!a) return;
-      const card = el("div", "action-card");
-      card.appendChild(el("p", "action-kicker", a.status === "completed" ? "这一步已完成" : "下一步"));
-      card.appendChild(el("p", "action-title", esc(a.title)));
-
-      const why = (a.based_on || []).filter((x) => x && x.value);
-      if (why.length) {
-        const box = el("div", "action-why");
-        box.appendChild(el("p", "aw-label", "为什么是给你的"));
-        const ul = el("ul", "aw-list");
-        why.forEach((x) => ul.appendChild(el("li", "", esc(x.value))));
-        box.appendChild(ul);
-        card.appendChild(box);
-      }
-
-      const row = el("div", "action-btns");
-
-      // 「就做这个」→ 真的建一个任务（服务端 accept 时建），然后去任务区做。
-      // 以前这里是「标记完成」，点一下就把这一步算走完了——没有交付物、
-      // 没有反馈、也不写回记忆。用户问过「我在对话里出现的任务是要我怎么完成」，
-      // 根因就是那个按钮什么都没要求。
-      if (a.status === "offered" && a.action === "explore_direction") {
-        const go = el("button", "btn small", "看方向排序");
-        go.type = "button";
-        go.onclick = () => refreshFacts();
-        const tree = el("button", "btn small secondary", "去方向树");
-        tree.type = "button";
-        tree.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
-        row.append(go, tree);
-      } else if (a.status === "offered" && a.action === "micro_task") {
-        /* 老卡只给「先不做」 */
-      } else if (a.status === "offered") {
-        const go = el("button", "btn small", "就做这个");
-        go.type = "button";
-        go.onclick = async () => {
-          go.disabled = true;
-          try {
-            const r = await api("POST", "/api/dialogue/action", {
-              uid: S.uid, action_id: a.action_id, event: "accept",
-            });
-            renderAction(r.action);
-            actions.appendChild(el("p", "action-hint",
-              "这一步已建好：说清「做什么 / 交什么 / 怎样算做到」。点下面的按钮就能去做，做完回来接着聊。"));
-            addBubble("assistant", "好。点下面的按钮就能去做，做完回来接着聊。");
-            await refreshFacts();
-          } catch (e) { toast(e.message); go.disabled = false; }
-        };
-        row.appendChild(go);
-      } else if (a.status === "accepted" || a.status === "in_progress") {
-        // 已接：不再提供「标记完成」，只提供「去做」。完成只能通过提交交付物。
-        const go = el("button", "btn small", "去做这一步");
-        go.type = "button";
-        go.onclick = () => {
-          S.openTaskId = a.task_id || "";
-          setView("workbench");
-        };
-        row.appendChild(go);
-      }
-
-      if (a.status !== "completed" && a.status !== "accepted" && a.status !== "in_progress") {
-        const no = el("button", "btn ghost small", "先不做");
-        no.type = "button";
-        no.onclick = async () => {
-          no.disabled = true;
-          try {
-            const r = await api("POST", "/api/dialogue/action",
-              { uid: S.uid, action_id: a.action_id, event: "decline" });
-            renderAction(r.action);
-          } catch (e) { toast(e.message); }
-        };
-        row.appendChild(no);
-      }
-      if (a.status === "completed") card.classList.add("done");
-      card.appendChild(row);
-      actions.appendChild(card);
+    function renderGuide(profile) {
+      sideList.innerHTML = "";
+      sideEmpty.style.display = "none";
+      (profile.areas || []).forEach((area) => {
+        const row = el("div", "guide-area" + (area.known ? " is-known" : ""));
+        const label = el("p", "guide-area-label", esc(area.label));
+        label.appendChild(el("span", "guide-area-state", area.known ? "已了解" : "可以聊聊"));
+        row.append(label, el("p", "guide-area-note", esc(area.summary || area.hint)));
+        sideList.appendChild(row);
+      });
+      sideFoot.innerHTML = "";
+      sideFoot.appendChild(el("p", "guide-note", profile.ready
+        ? "已有适合开始的初步了解，剩下的可以在使用中慢慢补充。"
+        : "聊到足够了解你的主题和阅读需要时，我会回顾一下，再邀请你开始。也可以随时提前进入。"));
+      const go = el("button", "linkish", "查看或修改已记录的信息");
+      go.onclick = () => setView("me");
+      sideFoot.appendChild(go);
     }
 
     /* 按层分列展示记忆。每层的顺序就是提问顺序（身份→当前实践→能力→经历→倾向→约束），
@@ -556,6 +473,11 @@ const ChatView = (() => {
        「识别为大项目的可以创建为大文件夹存储相关记忆」。 */
     async function refreshFacts() {
       try {
+        if (!S.entered) {
+          const profile = await api("GET", `/api/onboard/readiness?uid=${encodeURIComponent(S.uid)}`);
+          if (mySeq === seq) renderGuide(profile);
+          return;
+        }
         const [rank, mem, mine] = await Promise.all([
           api("GET", `/api/directions/ranking?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ items: [] })),
           api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ layers: [] })),
@@ -615,7 +537,16 @@ const ChatView = (() => {
     function addBubble(role, text) {
       const kind = role === "user" ? "user" : "ai";
       const b = el("div", `bubble ${kind}${kind === "ai" ? " md" : ""}`);
-      if (kind === "ai") b.innerHTML = mdLite(text); else b.textContent = text;
+      if (kind === "ai") b.innerHTML = mdLite(text);
+      else if (text.length > 400 && /\d{2}-\d{2}学年度/.test(text) && text.includes("学分")) {
+        b.classList.add("bubble-transcript");
+        const fold = el("details", "pasted-transcript");
+        fold.appendChild(el("summary", "", "已粘贴成绩单 · 展开原文"));
+        const raw = el("div", "pasted-text");
+        raw.textContent = text;
+        fold.appendChild(raw);
+        b.appendChild(fold);
+      } else b.textContent = text;
       scroll.appendChild(b);
       scroll.scrollTop = scroll.scrollHeight;
       return b;
@@ -623,7 +554,9 @@ const ChatView = (() => {
 
     function autoGrow() {
       input.style.height = "auto";
-      input.style.height = Math.min(input.scrollHeight, 160) + "px";
+      const height = input.scrollHeight + 2;
+      input.style.height = Math.max(48, Math.min(height, 160)) + "px";
+      input.style.overflowY = height > 160 ? "auto" : "hidden";
     }
 
     input.addEventListener("input", autoGrow);

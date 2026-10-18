@@ -1,4 +1,4 @@
-# DIALOGUE_CONTRACT · 对话内核契约 v1
+# DIALOGUE_CONTRACT · 对话内核契约 v2（2026-10-18 本地修改）
 
 > 本文冻结「环境观察 → 决策 → 工具调用」闭环的接口与语义。实现见 `server/dialogue.py`、`server/tools.py`、`server/memory.py`。
 > 与本文冲突时以本文为准；改动须同步 [CHANGELOG](CHANGELOG.md) 与 [ARCHITECTURE](ARCHITECTURE.md) §5。
@@ -7,7 +7,42 @@
 
 ---
 
+## 本轮职责与首次使用规则
+
+对话只获取和维护用户背景、回答疑问；具体论文带读、出题和判答由 `server/tutor.py` 的独立 Agent 负责。
+对话不作为软件主入口，不布置任务，不增加当前论文读取工具；原固定信息栏保留。首次推荐进入条件已按用户新要求更新为下述 w100 规则。
+首次开场介绍可选的树洞成绩单全选、复制、粘贴方法，明确不提供也能继续；已介绍或用户拒绝后不反复索要。
+`guidance` 带上跨近期窗口的介绍状态、全部有效交流偏好和既有进入判定。用户直接提问先答，按上下文最多补问一项，允许不追问。
+前端满足现有条件后给一次进入邀请（同浏览器、同用户、同画像），置于回执前；「再聊聊」关闭后不重复提示，页头跳过按钮保留。
+第二次生成看到实际 `memory_write`，不能把被拒的写入说成已保存。成绩单支持明确「只预览」不落课程与能力记录，以及「追加」保留原有课程。
+
+### w99：成绩单导入后继续同一轮对话
+
+确定性解析负责课程写入、统计和准确回执；成功导入不再提前结束本轮。解析结果以 `transcript_import` 注入环境，随后继续正常模型决策和回复，并与短回执合为同一条助手消息。SSE 的 delta 拼接须与最终 reply 相同；模型不可用时也保留已完成的导入，并给出简短接话。
+
+模型只补充 1–3 句：纯粘贴且未拒绝交流时，依据已知信息提出一个轻问题；资料已有则不重复盘问；用户只想预览或直接提问时尊重其意图。导入原文在模型近期上下文中替换为处理摘要，保留学期标题前的用户说明。课程仅说明接触过的内容，不证明熟练掌握。
+
+预览仅指不写课程和派生能力，原始对话仍按正常聊天保存，禁止承诺“不留痕”。前端将课程/GPA/依据放在默认折叠的回执与“我的”课程区，主回复先让用户看到接话。“我的”保留原固定字段和进入规则，背景字段与账号/画像设置默认折叠，不显示填表缺项压力。
+
+### w100：首次约五分钟引导与可跳过的推荐进入
+
+用户本轮已明确更新此前 D5 的首次引导判定，其他模块职责不变。首次使用 `guide.assess` 的五方面：学习背景、关注主题/阅读目的、课程/实践基础、论文阅读经历/困难、希望怎样获得帮助。只按有效且有依据的自述或实际课程底稿判断覆盖，不按事实总条数、GPA、字数、轮数或经过五分钟判断。明确主题/目的且至少覆盖四方面时 `ready=true`。专业、成绩单均非必需，拒绝/未知不虚构为已了解，也不推断能力弱。
+
+`onboard_done` 兼容字段现在表示推荐开始，等于 `guide.ready`。仅有身份+兴趣、旧 phase=done、单独选择方向都不再触发推荐。`GET /api/onboard/readiness` 返回可解释的各方面摘要，history 与 turn 同时带 `guide`。新账号仅显式进入后标记 entered，发送消息或刷新仍留在首次引导；既有日期之前的老账号兼容保留。
+
+首次开场说明预计约五分钟、Agent 会引导、用户可主动补充重要信息、可跳过。一次补一个未了解且未拒绝的方面，具体提问先回答；只拒绝某方面不等于拒绝全部引导。达到推荐条件且本轮无明确问题时，由已提交事实生成一次完成回顾，不继续采集；同轮有问题则先答，由页面给推荐邀请。回顾不验证或声称掌握能力。常规后续对话不重做首次访谈。
+
+信息不足时点击任意进入入口，前端获取最新覆盖度并显示可访问确认弹窗：再聊一聊 / 直接进入。取消不改变 entered 或当前输入，确认后才提交进入；条件满足则直接进入。`/api/onboard/enter` 不设硬门槛，始终允许提前进入，不挂对话串行锁。五方面不是强制表格。长聊环境保留准确回执的预览/导入历史摘要，预览原文仍为正常聊天记录，不新增课程。
+
+界面仅“对话流 + 输入区”两块：回执与进入邀请随本轮回复滚动，建议按钮归输入区，无中间独立滚动带；长成绩单原文默认折叠。首次侧栏展示五方面的已知摘要，普通对话保留原方向侧栏。
+
 ## 0. 一句话架构
+
+### w101：按现有流程，先邀请提供基本背景
+
+用户本轮决定保留现有交流与进入流程，只调整首次认识的起点：先邀请院系、专业、年级及可选成绩单，再可选补充本学期在修课程。未分专业不要求定专业；成绩单可在树洞全选复制粘贴，不提供也可继续。开场不再问研究主题或阅读目标。仅贴成绩单时先问尚未知的院系/年级/专业，身份已知则不重复，可轻问一次未提过的在修课程。
+
+之后回应用户当前的话，顺着自然出现的线索继续交流，不按五方面逐项采访，也不为了覆盖字段执着追问抽象目标、阅读经历或实践。专业知识库用于标准名称与背景理解，没问培养方案时不主动列分流和学分。在修自述用 current:* 保存，不擅自修改或声称修改成绩单。现有推荐覆盖规则、低信息确认、可直接进入和一次邀请保留；用户亲自修改的信息仍计为已知。原有历史开场不回写，新开场用于首次新会话。
 
 **模型决定做什么，代码决定能不能做。**
 
@@ -61,7 +96,7 @@
   ],
   "tool_intent": null,
   "dialogue": {
-    "move": "answer|clarify|propose_action|execute_action|correct|acknowledge_stop",
+    "move": "answer|clarify|correct|acknowledge_stop",
     "reason": "为什么选这个动作（写进 decision log，不给用户看）",
     "reply": "给用户的回复正文；tool_intent != null 时必须为 null",
     "offered_actions": [ { "id": "a1", "label": "用户可点的下一步" } ]
@@ -73,8 +108,7 @@
 约束：
 
 - `tool_intent != null` ⟹ `dialogue.reply` 必须为 `null`，且 `next_action` 必须为 `null`（两者都由调用②给出）。
-- `tool_intent == null` ⟹ `dialogue.reply` 必须有内容，`next_action` 可以在调用①里给。
-  理由：不调工具时不会再有第二批信息进来，本轮就可以收口到具体行动。
+- `tool_intent == null` ⟹ `dialogue.reply` 必须有内容，`next_action` 仍必须为 `null`，不产生行动。
 - `memory_ops` 可以为空数组。**允许零条**——寒暄、假设情境、引用他人不写入长期记忆。
 
 ## 2. TurnReply（调用②的输出契约）
@@ -88,37 +122,8 @@
 }
 ```
 
-`next_action` 形状：
-
-```json
-{ "action": "explore_direction",
-  "title": "给用户看的一句话",
-  "direction": "ai",
-  "node_id": null,
-  "payload": {},
-  "based_on": ["f_ab12cd34"] }
-```
-
-本轮 `next_action` 只许 `explore_direction`（去看方向排序或方向树），不派微任务。
-老的 `micro_task` 卡 `accept` 仍建任务。
-
-代码在写库前会校验：
-
-1. `direction` 必须属于当前画像的生效方向（§4），否则拉回到生效方向。
-2. **个性化闸门**：`based_on` 里至少要有 1 个本画像**生效事实**的 id。
-   一个都引不到 ⟹ 整个 `next_action` 丢掉，本轮不给落点。
-
-第 2 条是产品原则「个性化必须有依据」的代码化，也是实测逼出来的：
-早期模型在只知道「信管大二、想走大数据」时就派「关掉讲义重写一段代码」——
-这句话对任何一个信管大二学生都成立，等于没了解这个人。用户明确反馈过这一点。
-
-**为什么放在代码里而不是只写在 prompt**：prompt 只能降低概率，而这个失败模式直接伤信任
-（用户照做了才发现这事跟谁都能说）。放进代码后，模型必须**说出依据**才拿得到落点，
-`based_on` 同时会带给前端显示成「依据你说的：…」——也就是把「凭什么给我这个」摊开给用户看。
-
-**已知取舍**：闸门只能保证「有依据」，不能保证「依据够强」。模型仍可能引一条弱事实
-（例如用 `grade` 去支撑一个其实是关于 Python 的任务）。这属于回答质量问题，
-由 `eval/` 的 `task_carries_its_basis` 用例盯着，不靠代码硬判。
+`next_action` 始终为 `null`。旧模型返回行动也会被代码丢弃，不写 actions、不建 tasks。
+`offered_actions` 只作可选回复短句，不承载任务。工具回复继续使用 JSON 以保留接口兼容。
 
 ## 3. Memory Key Registry（写入白名单）
 
@@ -127,7 +132,7 @@
 ### 3.1 按「时间跨度」分层
 
 画像要回答的不只是「他是谁」，还有「这条多久会变、什么时候该重新问」。
-所以每个 key 都归属一层。层同时管三件事：**提问顺序、注入预算、什么时候重新问**。
+所以每个 key 都归属一层。层用于组织记忆和分配注入预算，不要求逐层采集。
 
 | 层 | 中文 | 变化速度 | 里的 key | 注入预算 |
 | --- | --- | --- | --- | --- |
@@ -138,9 +143,8 @@
 | `interest` | 倾向 | 慢，但会变 | `goal:*` `interest:*` `direction:*` `style:*` | 4 |
 | `constraint` | 临时约束 | **到点即失效** | `constraint:<slug>` | 4 |
 
-层是**有序**的，顺序就是提问阶梯：身份 → 当前实践 → 能力起点 → 经历积累 → 倾向 → 临时约束。
-设计取向：**当前实践排在很前面**——它最便宜（一句话能答）、最可靠（是行为不是自述），
-而且任务必须挂在「他手头已经在做的事」上。抽象偏好最难问也最不可靠，所以放后面，能推就推。
+记忆层展示顺序与提问顺序分开。现有 `LADDER_ORDER` 是身份 → 倾向 → 能力起点 → 当前实践，
+仅作已知信息参考；问不问由用户当前问题决定，不主动派任务，也不要求填满当前实践。
 
 `practice:*` 不填 `valid_until` 时自动补 `default_ttl_days=90`：半年前的项目不该被当成「他正在做的事」。
 
@@ -151,7 +155,7 @@
 
 **这里是刻意的分工，不是没做完**：代码给真相（哪层空着是确定性的），模型定措辞
 （问题是一句自由文本，靠关键词判它「在问哪一层」很脆），评测管结果
-（`ladder_asks_earliest_gap` / `ladder_no_skipping_to_capability`）。
+（首次对话及长聊回归用例）。
 本轮只有两次模型调用，没有余量再加一次「问题分类」。
 
 阶梯只管「你想了解他时问什么」，**不是每轮都必须问**。上下文在别处就顺着走，
@@ -181,6 +185,9 @@
 | `base:code` | capability | capability | 单值 | declared | 编程基础 |
 | `base:math_code` | capability | capability | 单值 | declared | 两者都有 |
 | `base:none` | capability | capability | 单值 | declared | 都还浅 |
+| `reading_experience` | practice | background | 单值 | declared | 用户自述读过/未读过论文，不是行为提交事件 |
+| `reading_barrier` | interest | preference | 单值 | declared | 阅读时的具体困难 |
+| `reading_support` | interest | preference | 单值 | declared | 希望怎样解释或帮助 |
 | `capability:<slug>` | capability | capability | 多值 | declared | 具体已学 |
 | `goal:<slug>` | interest | interest | 多值 | declared | 明确目标 |
 | `interest:<slug>` | interest | interest | 多值 | declared/inferred | 兴趣主题 |
@@ -271,8 +278,13 @@
   "active_plan": {
     "direction": "ai",
     "direction_source": "direction:ai",
-    "node_id": null,
-    "pending_action": { "action_id": "act_x", "title": "...", "status": "offered" }
+    "trail_dir": "ai"
+  },
+  "guidance": {
+    "entry_ready": true,
+    "transcript_available": false,
+    "transcript_introduced": true,
+    "preferences": [{"key": "style:transcript", "value": "不想分享成绩单"}]
   },
   "recalled_memory": [
     { "id": "f_x", "key": "interest:attention", "value": "...", "source": "declared",
@@ -295,7 +307,7 @@
 
 1. 当前消息（完整）
 2. 近期对话（本 conversation 最近 N 轮，按 token 预算截取，**保留最新纠正**）
-3. 当前行动状态（`active_plan`）
+3. 方向背景（`active_plan`）、引导状态和交流偏好（`guidance`）；不注入待办任务
 4. 按本轮主题召回的持续记忆。**不是平表取 top-8，是按层给预算**（`LAYER_BUDGET`，见 §3.1）：
    每层先取够自己的名额，层内再按相关度排序，新近度只在平局时起作用。
 
@@ -330,13 +342,11 @@
 
 ## 5. 工具 registry
 
-**所有工具只读。** 任何状态变更走 `memory_ops`（记忆）或 `next_action`（行动），由代码执行。
+**所有工具只读。** 记忆变更走 `memory_ops` 并由代码校验；成绩单由独立的确定性解析入口更新。没有对话行动写入。
 
 | 工具 | 参数 | 返回 | 失败语义 |
 | --- | --- | --- | --- |
 | `course.search` | `{query, limit?}` | `{ok, items[], term, retrieved_at}` | 返回 `{ok: false, error}`，如实展示，**绝不编造课程** |
-| `project.search` | `{direction, stage, keywords?}` | `{ok, items[], sources, empty_reason}` | 查不到就空着，写 `empty_reason` |
-| `project.review` | `{project_id}` | `{ok, review}` | 非本画像的 project_id ⟹ `ok: false` |
 | `transcript.summary` | `{keyword?, limit?}` | 无 keyword 只回 `{summary, by_term}`；带 keyword 另回 `{matched[], matched_count}` | 没录成绩单 ⟹ `has_transcript: false`，如实说没有 |
 | `major_lookup` | `{query, minor?, limit?}` | `{ok, kind, 命中[], 院系?, 近名[], 说明?}` | 未命中 ⟹ `命中: []` + 近名 + 覆盖说明，**绝不编专业名** |
 | `major_detail` | `{name}` | `{ok, 卡片, 学分结构, 必修课[], 兄弟专业[]}` | 没查到 ⟹ `ok: false` + 覆盖说明 |
@@ -464,23 +474,13 @@ W                      ← 成绩
 **成绩单明细本身仍是 P3**（不进上下文，走 `transcript.summary` 工具查）。
 进上下文的只有这几条推导出来的结论。
 
-## 6. 对话与行动生命周期
+## 6. 会话与历史行动兼容
 
-```text
-conversation: open ──────────────► closed
-                 （同一画像同一时刻只有一个 open）
-
-action: offered ─► accepted ─► in_progress ─► completed
-           │            │              │
-           └────────────┴──────────────┴──► abandoned（用户换话题/明确不做）
-           └──────────────────────────────► expired（7 天未动，不再追问）
-```
-
-- `conversation_id` 缺省时，取本画像 `status=open` 的会话；没有就新建。
-- 上一轮的 `next_action` 写入 `actions` 表，状态 `offered`。
-- 下一轮：用户接受/开始做 ⟹ `accepted`；用户明确拒绝或换方向 ⟹ `abandoned`；两者都由模型在 `understanding.signals` 里表达，**代码落状态**。
-- `active_plan.pending_action` 只填**非终态**的 action。终态的不进环境包，避免反复追问。
-- 同一画像同时最多一个非终态 action；新的 `next_action` 生成时，旧的 `offered` 置 `abandoned`。
+`conversation_id` 缺省时沿用本画像的 open 会话，没有则新建。长聊的偏好和成绩单介绍状态不依赖最近 12 条消息。
+对话不再创建行动、不注入项目实践阶段或待办任务，不展示任务卡及完成通知。
+`next_action`、`pending_action` 始终为 null，history 的 `last_action`、`just_finished` 也为 null；保留字段以兼容旧客户端。
+历史 actions/tasks 不删除，任务模块仍可读取已有任务。`/api/dialogue/action` 只允许 decline 关闭历史卡片；
+对已有卡片 accept/complete 返回 400，跨画像或不存在返回 404，不再生成任务或伪造提交事件。
 
 ## 7. 确定性校验（代码侧，逐条）
 
@@ -552,10 +552,7 @@ POST /api/dialogue/turn
       rejected_ops[], tool_results[], next_action, pending_action, offered_actions[],
       degraded, fabrication_risk, trace }
 
-  next_action      = 这一轮决定给的落点；模型没给就是 null。
-                     不要用「当前还挂着的行动」回填这个字段，否则「这轮该不该派任务」从响应里看不出来。
-  pending_action   = 这一轮结束后仍开着的行动（界面状态）。同一画像最多一个。
-                     用户说停（move=acknowledge_stop）时，开着的行动会被置 abandoned。
+  next_action / pending_action = 始终 null；不再产生对话行动。
   fabrication_risk = true 表示：检索失败、正文点名了具体名称，且定向重写也没修掉。
                      不该出现在正常流程里；出现即为产品原则被违反，需人工看这条对话（§9.1）。
 
@@ -567,7 +564,7 @@ POST /api/dialogue/stream              # 同一份内核，SSE
     event: error   {"error": "..."}     # 流已开始后只能这样报错
 
 POST /api/dialogue/action
-  { uid, action_id, event: accept|decline|complete }
+  { uid, action_id, event: decline }  # accept/complete 对已有行动返回 400
   → { action }
 
 GET  /api/dialogue/history?uid&conversation_id?
@@ -579,7 +576,7 @@ POST /api/onboard/enter
 
 **流式的边界，别误解**：调用① 必须拿到完整 JSON 才能做校验，所以它不能流式。
 能真正逐字产出的是**回复正文**——只在「本轮不需要调工具」时，由调用②（`llm.chat_stream`）
-按 token 推送。需要调工具的那一轮，调用② 同时要产出 `next_action`，因此仍走 JSON，
+按 token 推送。需要调工具的那一轮，调用② 保留结构化回复协议，因此仍走 JSON（next_action 固定 null），
 `delta` 事件不会出现，前端只显示阶段行。裸 SSE 的 `stage` 事件在所有情况下都是真实阶段，
 不是假进度条。
 
@@ -596,10 +593,11 @@ POST /api/onboard/enter
 5. 同一提交重试、模型超时、检索失败 ⟹ 不产生重复经验、不虚假达标、不跨画像混入。
 6. 每轮 `trace` 可回答：召回了哪些 fact_id、过滤了哪些过期项、基于哪个 memory_version。
 
-## 12. 明确不做（v1 范围外）
+## 12. 明确不做（v2 范围外）
 
 - 向量检索 / embedding（先用 SQL + 关键词，见下）
 - 原生 function-calling（走 §1 的 `tool_intent` 字段；接口按可替换设计）
 - 多工具并行调用
-- 自由闲聊本身（每次交互都要落到一件具体的事，这是产品铁律）
+- 对话派任务、作业催交或接管研读流程
+- 将完整固定字段、成绩单或定方向作为进入软件的前置条件
 - 自动替用户决定终身方向

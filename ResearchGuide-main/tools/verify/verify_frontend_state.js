@@ -557,7 +557,7 @@ function r4Dom() {
   const mk = (tag) => {
     const n = {
       tag, className: "", innerHTML: "", children: [], hidden: false, onclick: null, onsubmit: null,
-      attrs: {}, value: "", type: "",
+      attrs: {}, value: "", type: "", dataset: {},
       appendChild(c) { n.children.push(c); return c; },
       append(...cs) { cs.forEach((c) => n.children.push(c)); },
       setAttribute(k, v) { n.attrs[k] = v; },

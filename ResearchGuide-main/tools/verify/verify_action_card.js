@@ -73,118 +73,47 @@ const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const document = { createTextNode: (t) => { const e = mkEl("#text"); e._text = String(t); return e; } };
 
-/* ---- 可变桩 ---- */
-const CFG = { created: null, views: [], bubbles: [], factsRefreshed: 0 };
-const S = { uid: "u1", openTaskId: "" };
-const api = async (m, url, body) => {
-  if (url === "/api/dialogue/action") {
-    CFG.created = body;
-    // 服务端 accept 之后返回的卡（带 task_id）——这正是「去任务区完成」要用的
-    return { action: Object.assign({}, CARD, { status: "accepted", task_id: "t-9" }) };
-  }
-  return {};
-};
-const addBubble = (role, text) => { CFG.bubbles.push({ role, text }); };
-const toast = () => {};
-const refreshFacts = async () => { CFG.factsRefreshed++; };
-const setView = (v) => { CFG.views.push(v); };
-const enterApp = (v) => { CFG.views.push(v || "today"); };
-
-let actions, slotParent;
-const make = () => {
+/* 对话退出派任务后，验证一次邀请和继续聊天的真实点击行为。 */
+const S = { uid: "u1", portraitId: "p1", entered: false };
+const saved = new Map();
+const localStorage = { getItem: (k) => saved.get(k), setItem: (k, v) => saved.set(k, v) };
+const entryInvitations = new Set();
+let entries = 0, focuses = 0;
+const enterApp = () => { entries++; };
+const input = { focus: () => { focuses++; } };
+let actions;
+function make() {
   actions = el("div", "action-slot");
-  // finishedNote 会往 actions 前面插东西，所以它必须有父节点
-  slotParent = el("div", "chat-foot");
-  slotParent.appendChild(actions);
-  return new Function(
-    "el", "esc", "api", "S", "document", "addBubble", "toast", "refreshFacts", "setView", "enterApp", "actions",
-    extract("renderAction") + "\n" + extract("finishedNote")
-      + "\nreturn { renderAction, finishedNote };")(
-    el, esc, api, S, document, addBubble, toast, refreshFacts, setView, enterApp, actions);
-};
-
-const CARD = {
-  action_id: "a-1", action: "micro_task", title: "给 KotobaAI 加一个最小的数据记录",
-  direction: "", status: "offered", task_id: "",
-  based_on: [{ id: "f1", value: "KotobaAI，全平台累计下载 400+" }],
-};
-const btns = () => walk(actions).filter((c) => c.tagName === "BUTTON");
-const labels = () => btns().map((b) => b._text);
-const txt = () => actions.textContent;
-
-(async () => {
-  console.log("=== ① offered 老微任务：只给「先不做」 ===");
-  let m = make();
-  let render = m.renderAction;
-  render(Object.assign({}, CARD, { status: "offered" }));
-  console.log("        按钮：" + labels().join(" / "));
-  check(labels().includes("先不做"), "老微任务卡只给「先不做」");
-  check(!labels().includes("就做这个"), "不再接新的微任务");
-  check(!labels().includes("标记完成"), "没有「标记完成」");
-  check(txt().includes("KotobaAI"), "显示了依据（为什么是给你的）");
-
-  console.log("\n=== ② accepted 老卡：仍能去做这一步 ===");
-  render(Object.assign({}, CARD, { status: "accepted", task_id: "t-9" }));
-  console.log("        按钮：" + labels().join(" / "));
-
-  console.log("\n=== ② accepted：唯一动作是「去任务区完成」 ===");
-  check(labels().includes("去做这一步"), "有「去做这一步」");
-  check(!labels().includes("就做这个"), "不再显示「就做这个」（已经接过了）");
-  check(!labels().includes("标记完成"), "没有「标记完成」");
-  check(!labels().includes("先不做"), "已接的任务不再给「先不做」（要放弃得另有出口）");
-
-  console.log("\n=== 点「去任务区完成」→ 跳到任务区并带上 task_id ===");
-  CFG.views.length = 0;
-  S.openTaskId = "";
-  btns().find((b) => b._text === "去做这一步").click();
-  check(CFG.views.includes("workbench"), "切到了任务区（workbench）",
-    JSON.stringify(CFG.views));
-  check(S.openTaskId === "t-9", "带上了 task_id，任务区会直接打开那一条",
-    JSON.stringify(S.openTaskId));
-
-  console.log("\n=== ③ completed：说清已完成，不再给动作 ===");
-  m = make();
-  render = m.renderAction;
-  render(Object.assign({}, CARD, { status: "completed", task_id: "t-9" }));
-  console.log("        按钮：" + (labels().join(" / ") || "（没有按钮）"));
-  check(txt().includes("已完成"), "明确写了「这一步已完成」");
-  check(!labels().includes("标记完成"), "没有「标记完成」");
-  check(!labels().includes("就做这个"), "没有「就做这个」");
-  check(actions.children.some((c) => (c.className || "").includes("done")),
-    "卡片带上了 done 样式");
-
-  console.log("\n=== ④ 刚交完任务：一张说明，不再叠一张「已完成」的卡 ===");
-  m = make();
-  CFG.bubbles.length = 0;
-  m.finishedNote({
-    action_id: "a-1", title: "给 KotobaAI 加一个最小的数据记录",
-    payload: { title: "给 KotobaAI 加一个最小的数据记录", chars: 87, score: 4 },
-  });
-  const note = byClass(slotParent, "finished-note")[0];
-  check(!!note, "画出了「你刚交了 X」");
-  const nt = note ? note.textContent : "";
-  check(nt.includes("给 KotobaAI"), "带了任务标题", nt.slice(0, 40));
-  check(nt.includes("87 字"), "带了写了多少字");
-  check(nt.includes("4 分"), "带了得分");
-  check(nt.includes("经验积累"), "说清写进哪一层记忆了");
-  // 这一条是重点：just_finished 那条分支**只调 finishedNote**，
-  // 如果再叠一张 renderAction(last_action) 就是两张卡说同一件事。
-  check(byClass(slotParent, "action-card").length === 0,
-    "finishedNote 自己没有画行动卡（配对的事由调用方保证）");
-  check(CFG.bubbles.some((b) => b.role === "assistant" && b.text.includes("你把")),
-    "助手也说了一句", JSON.stringify(CFG.bubbles));
-  check(slotParent.children[0] === note, "插在行动区之前，不挤进卡片位置");
-
-  console.log("\n=== ⑤ 结构上不可能再发 complete 事件 ===");
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  check(!/"complete"/.test(code), "chat.js 里没有裸的 complete 事件");
-  check(!/标记完成/.test(code), "chat.js 里没有「标记完成」按钮");
-  // just_finished 分支必须**单独**收口，不能再跟一张 renderAction
-  const justBlock = code.slice(code.indexOf("history.just_finished"));
-  const branch = justBlock.slice(0, justBlock.indexOf("} else if"));
-  check(!/renderAction/.test(branch),
-    "刚交完那条分支里没有 renderAction（否则会画两张）", branch.trim().slice(0, 60));
-
-  console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
-  process.exit(fails ? 1 : 0);
-})();
+  return new Function("el", "S", "localStorage", "entryInvitations", "actions", "input", "enterApp", "scroll",
+    extract("enterCard") + "\nreturn enterCard;")(el, S, localStorage, entryInvitations, actions, input, enterApp, el("div", "chat-scroll"));
+}
+let invite = make();
+invite();
+check(actions.children.length === 1, "首次满足条件有一次邀请");
+check(actions.textContent.includes("其他信息可以以后再补"), "明确告知无需补齐字段");
+let buttons = walk(actions).filter((n) => n.tagName === "BUTTON");
+buttons.find((b) => b.textContent === "再聊聊").click();
+check(actions.children.length === 0 && focuses === 1, "再聊聊关闭卡片并回到输入框");
+invite();
+check(actions.children.length === 0, "下一轮不重复催进入");
+entryInvitations.clear();
+invite = make(); invite();
+check(actions.children.length === 0, "刷新后也不重复弹出");
+S.portraitId = "p2";
+invite = make(); invite();
+check(actions.children.length === 1, "新画像有独立的一次邀请");
+buttons = walk(actions).filter((n) => n.tagName === "BUTTON");
+buttons.find((b) => b.textContent === "进入启研").click();
+check(entries === 1, "进入按钮仍能调用现有进入流程");
+S.entered = true; S.portraitId = "p3";
+invite = make(); invite();
+check(actions.children.length === 0, "已进入的用户没有开场邀请");
+S.entered = false; S.portraitId = "p4";
+invite = make();
+actions.appendChild(el("div", "receipt", "一份很长的记忆回执"));
+invite();
+check(actions.children[0].className === "enter-card", "进入邀请在长回执之前，不被挤到滚动条下面");
+check(!src.includes("function renderAction") && !src.includes("function finishedNote"), "对话不再渲染任务卡或完成通知");
+check(!src.includes('"/api/dialogue/action"'), "对话不再提交派任务事件");
+console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
+process.exit(fails ? 1 : 0);

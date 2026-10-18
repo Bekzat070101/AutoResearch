@@ -241,7 +241,7 @@ def _china_day(raw: str) -> str:
 
 
 def user_entered(uid: str, u: dict[str, Any] | None = None) -> bool:
-    """进入按人记，不按画像。prefs.entered_at、上线日前的老号、或已有用户消息。"""
+    """进入按人记；新号必须显式进入，发消息或刷新不会提前结束首次引导。"""
     u = u if u is not None else (store.get_user(uid) or {})
     prefs = store.get_prefs(uid)
     if prefs.get("entered_at"):
@@ -249,9 +249,6 @@ def user_entered(uid: str, u: dict[str, Any] | None = None) -> bool:
     created = str(u.get("created_at") or "")
     if created and _china_day(created) < ENTER_GATE_SINCE:
         return True
-    for m in store.list_messages(uid):
-        if m.get("role") == "user":
-            return True
     return False
 
 

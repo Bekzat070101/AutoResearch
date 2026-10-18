@@ -142,6 +142,8 @@ const make = () => {
   });
   const t = allText(actions);
   check(byClass(actions, "receipt-import").length === 1, "是导入回执样式");
+  check(byClass(actions, "receipt-import")[0].tagName === "DETAILS", "长导入回执默认折叠，给接话留出空间");
+  check(!byClass(actions, "receipt-import")[0].open, "不会默认展开整份统计");
   check(byClass(actions, "ri-cell").length === 4, "四个数字格", String(byClass(actions, "ri-cell").length));
   // 数字来自合成课表（4 门百分制，8 学分），不是任何人的真实成绩单
   check(t.includes("3.8020"), "绩点按四位小数显示", "(避免 3.80 那种看起来像整数的写法)");

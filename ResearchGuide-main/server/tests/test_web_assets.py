@@ -156,7 +156,8 @@ def test_the_mark_done_button_is_gone():
     js = _strip_js_comments((WEB / "js" / "chat.js").read_text(encoding="utf-8"))
     assert "标记完成" not in js, "「标记完成」按钮又回来了"
     assert '"complete"' not in js, "前端又在直接发 complete 事件（应该走任务提交）"
-    assert "去做这一步" in js, "少了「去做这一步」这个入口"
+    assert "去做这一步" not in js, "对话不再承接任务跳转"
+    assert "renderAction" not in js and "finishedNote" not in js
 
 
 def test_memory_panel_renders_project_folders():
@@ -166,12 +167,12 @@ def test_memory_panel_renders_project_folders():
     assert "r.projects" in js or "mem.projects" in js, "没有把 /api/memory 的 projects 用起来"
 
 
-def test_returning_to_the_chat_shows_what_was_finished():
-    """任务一交，pending_action 就空了，卡会凭空消失——必须有落点。"""
+def test_chat_does_not_resume_old_task_workflows():
+    """退出派任务后，回到对话也不能重新带回旧任务卡和完成通知。"""
     js = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
-    assert "function finishedNote" in js, "回对话时没有「你刚交了 X」的落点"
-    assert "just_finished" in js, "没有用上 just_finished"
-    assert "history.last_action" in js, "没有用上 last_action"
+    assert "function finishedNote" not in js
+    assert "history.just_finished" not in js
+    assert "history.last_action" not in js
 
 
 # ---------- CSS 的机械检查 ----------
@@ -258,22 +259,16 @@ def test_completed_task_does_not_render_two_headers():
         "taskPanel 里应该还有一个无条件追加的表头"
 
 
-def test_chat_page_has_three_named_zones_in_order():
-    """对话页是三个区，顺序固定：对话流 → 下一步 → 输入。
-
-    以前三样都塞在一个 .chat-foot 里，行动卡一高就把输入框顶出屏幕——
-    而输入框该是位置最稳的那个。区域顺序就是这条契约本身，
-    重做视觉的人可以随便改样子，但不能把输入框挪到行动卡上面去。
-    """
+def test_chat_page_has_conversation_and_composer_without_middle_scroll_strip():
+    """回执跟随回复，建议归输入区，不再形成第三个小滚动窗口。"""
     js = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
     m = re.search(r"chat\.append\(([^)]*)\)", js)
     assert m, "找不到把三个区装进对话面板的那一行"
     zones = [z.strip() for z in m.group(1).split(",")]
-    assert zones == ["scroll", "actions", "inputZone"], (
-        f"对话页三个区的顺序变了：{zones}；"
-        "约定是 对话流 → 下一步 → 输入，输入永远在最下面"
-    )
-    for name, cls in (("scroll", "chat-scroll"), ("actions", "chat-next"),
+    assert zones == ["scroll", "inputZone"]
+    assert 'scroll.appendChild(actions)' in js
+    assert 'suggestions.appendChild(row)' in js
+    for name, cls in (("scroll", "chat-scroll"),
                       ("inputZone", "chat-input")):
         # 只查名字在不在：actions 的类名是双类 "action-slot chat-next"，
         # 用精确引号匹配会误报。
@@ -411,7 +406,7 @@ def test_request_1016_frontend_copy():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     chat = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
     css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
-    assert "回到对话" in js
+    assert "继续对话" in js
     assert "先核对" in chat
     assert "留下／跳过的理由（4–80 字）" in js
     assert "kit-paper::before" not in css

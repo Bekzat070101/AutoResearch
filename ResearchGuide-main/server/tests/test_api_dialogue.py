@@ -98,15 +98,11 @@ def test_dialogue_action_flow(client):
 
     old = store.save_action(uid, conversation_id="c1", action="micro_task",
                             title="老微任务", direction="ai")
-    acc = dialogue.action_event(uid, old["id"], "accept")
-    assert acc["status"] == "accepted"
-    assert acc.get("task_id")
-
-    explore = store.save_action(uid, conversation_id="c1", action="explore_direction",
-                                title="去看方向")
-    ev = dialogue.action_event(uid, explore["id"], "accept")
-    assert ev["status"] == "accepted"
-    assert not ev.get("task_id")
+    r = client.post("/api/dialogue/action", json={"uid": uid, "action_id": old["id"], "event": "accept"})
+    assert r.status_code == 400
+    assert store.list_tasks(uid) == []
+    r = client.post("/api/dialogue/action", json={"uid": uid, "action_id": old["id"], "event": "decline"})
+    assert r.status_code == 200 and r.json()["action"]["status"] == "abandoned"
 
 
 def test_dialogue_action_rejects_bad_input(client):

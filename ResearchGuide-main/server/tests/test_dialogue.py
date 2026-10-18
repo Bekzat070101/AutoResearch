@@ -178,197 +178,105 @@ def test_tool_failure_is_reported_honestly(monkeypatch):
     assert r["tool_results"][0]["ok"] is False
 
 
-# ---------- §2 方向门禁 ----------
+# ---------- 对话不再派任务 ----------
 
-
-def test_micro_task_from_model_is_dropped(monkeypatch):
-    uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="先做这个。", next_action={
-        "action": "micro_task", "title": "写一个 CNN", "direction": "ai", "based_on": [fid]})])
-    r = dialogue.turn(uid, "我想做点东西")
-    assert r["next_action"] is None
-
-
-def test_task_direction_must_be_an_active_direction(monkeypatch):
-    uid = make_user()
-    fake_llm(monkeypatch, [proposal(reply="先定方向。", ops=[
-        {"op": "add", "key": "direction:math", "value": "数学", "evidence_quote": "想学数学"}])])
-    did = dialogue.turn(uid, "我大二，想学数学")["facts_added"][0]["id"]
-
-    fake_llm(monkeypatch, [proposal(reply="看方向。", next_action={
-        "action": "explore_direction", "title": "去看方向排序", "direction": "ai", "based_on": [did]})])
-    r = dialogue.turn(uid, "然后呢")
-    assert r["next_action"]["direction"] == "math"
-    assert r["next_action"]["action"] == "explore_direction"
-
-
-# ---------- §2 个性化闸门（任务必须有依据）----------
-
-
-def test_task_without_basis_is_dropped(monkeypatch):
-    """换个用户也照样成立的任务，一律不给 —— 这是「个性化必须有依据」的代码化。
-
-    对应真实反馈：只说了「信管大二想走大数据」，就派「关掉讲义重写一段代码」。
-    这句对谁都能说，等于没有了解他。
-    """
-    uid = make_user()
-    fake_llm(monkeypatch, [proposal(reply="这周先做这个。", next_action={
-        "action": "explore_direction", "title": "关掉讲义，重写一段你抄过的代码", "direction": ""})])
-    r = dialogue.turn(uid, "我是信管大二，想走大数据")
-
-    assert r["next_action"] is None
-    assert r["pending_action"] is None
-    assert store.list_actions(uid) == []          # 连落库都没有
-    assert r["reply"]                              # 但这一轮仍然要说话
-
-
-def test_task_citing_a_nonexistent_fact_is_dropped(monkeypatch):
-    """based_on 里编一个不存在的 fact id，不算依据。"""
-    uid = make_user()
-    fake_llm(monkeypatch, [proposal(reply="做这个。", next_action={
-        "action": "explore_direction", "title": "写点什么", "direction": "",
-        "based_on": ["f_不存在的id"]})])
-    assert dialogue.turn(uid, "你好")["next_action"] is None
-
-
-def test_task_with_basis_is_kept_and_exposes_why(monkeypatch):
-    """有依据就保留，并且把依据原文带出来给用户看。"""
+@pytest.mark.parametrize("action", ["micro_task", "explore_direction", "course_action", "review_progress"])
+def test_model_actions_are_dropped_even_with_valid_basis(monkeypatch, action):
     uid = make_user()
     fid = seed_fact(uid, "base:code", "Python 只会照着教程抄")
-    fake_llm(monkeypatch, [proposal(reply="你之前说只会照着教程抄，那就……", next_action={
-        "action": "explore_direction", "title": "把最短的那段代码关掉教程重写一遍",
-        "direction": "", "based_on": [fid]})])
-    r = dialogue.turn(uid, "我不知道该干什么")
-
-    assert r["next_action"]["title"] == "把最短的那段代码关掉教程重写一遍"
-    why = r["next_action"]["based_on"]
-    assert why and why[0]["id"] == fid
-    assert "照着教程抄" in why[0]["value"]        # 把依据原文给出来
+    fake_llm(monkeypatch, [proposal(reply="这个问题可以先这样理解。", next_action={
+        "action": action, "title": "重写一段代码", "direction": "ai", "based_on": [fid]})])
+    r = dialogue.turn(uid, "先解释一下")
+    assert r["next_action"] is None and r["pending_action"] is None
+    assert store.list_actions(uid) == [] and store.list_tasks(uid) == []
 
 
-def test_basis_survives_reload(monkeypatch):
-    """刷新后（history）依据也要在，前端才画得出「为什么是给你的」。"""
+def test_tool_reply_cannot_create_action(monkeypatch):
     uid = make_user()
-    fid = seed_fact(uid, "base:code", "Python 只会照着教程抄")
-    fake_llm(monkeypatch, [proposal(reply="那就……", next_action={
-        "action": "explore_direction", "title": "重写一段", "direction": "", "based_on": [fid]})])
-    dialogue.turn(uid, "我不知道该干什么")
-
-    pa = dialogue.history(uid)["pending_action"]
-    assert pa["action_id"]                                  # 刷新后按钮仍然点得动
-    assert pa["based_on"][0]["value"] == "Python 只会照着教程抄"
-
-
-# ---------- §6 行动生命周期 ----------
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    p = proposal(tool={"tool": "course.search", "args": {"query": "统计"}})
+    monkeypatch.setattr(llm, "chat_json", lambda *a, **k: (
+        {"reply": "这是查询结果。", "next_action": {"action": "micro_task", "title": "做练习"}}
+        if k.get("tag") == "dialogue.reply" else p))
+    monkeypatch.setattr(dialogue.tools, "run", lambda *a, **k: {"tool": "course.search", "ok": True, "items": []})
+    r = dialogue.turn(uid, "查一下统计课")
+    assert r["next_action"] is None and store.list_tasks(uid) == []
 
 
-def test_only_one_open_action_at_a_time(monkeypatch):
+def test_long_conversation_keeps_intro_and_explicit_refusal(monkeypatch):
     uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    for title in ("第一件事", "第二件事"):
-        fake_llm(monkeypatch, [proposal(reply="好。", next_action={
-            "action": "explore_direction", "title": title, "direction": "",
-            "based_on": [fid]})])
-        dialogue.turn(uid, title)
-
-    open_actions = store.list_actions(uid, statuses=["offered", "accepted", "in_progress"])
-    assert len(open_actions) == 1
-    assert open_actions[0]["title"] == "第二件事"
-    assert store.list_actions(uid, statuses=["abandoned"])[0]["title"] == "第一件事"
-
-
-def test_action_events_are_recorded(monkeypatch):
-    uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="好。", next_action={
-        "action": "explore_direction", "title": "看方向", "direction": "",
-        "based_on": [fid]})])
-    aid = dialogue.turn(uid, "开始")["next_action"]["action_id"]
-
-    assert dialogue.action_event(uid, aid, "accept")["status"] == "accepted"
-    assert dialogue.action_event(uid, aid, "complete")["status"] == "completed"
-    kinds = [e["kind"] for e in store.list_events(uid)]
-    assert "action_accepted" in kinds and "task_submitted" in kinds
-
-
-def test_action_event_returns_the_same_shape_as_the_turn(monkeypatch):
-    """三个出口（turn / history / action_event）形状必须一致。
-
-    曾经 action_event 和 history 直接返回数据库原始行（id），turn 返回规整形状
-    （action_id），前端刷新或点第二次时拿不到 action_id 就 422。
-    """
-    uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="好。", next_action={
-        "action": "explore_direction", "title": "看方向", "direction": "",
-        "based_on": [fid]})])
-    r = dialogue.turn(uid, "开始")
-
-    from_turn = set(r["next_action"])
-    from_history = set(dialogue.history(uid)["pending_action"])
-    from_event = set(dialogue.action_event(uid, r["next_action"]["action_id"], "accept"))
-    assert from_turn == from_history == from_event
-    assert "action_id" in from_event and "based_on" in from_event
-
-
-def test_action_event_rejects_unknown_event():
-    uid = make_user()
-    with pytest.raises(ValueError):
-        dialogue.action_event(uid, "whatever", "explode")
-
-
-def test_cross_profile_action_is_invisible(monkeypatch):
-    uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="好。", next_action={
-        "action": "explore_direction", "title": "看方向", "direction": "",
-        "based_on": [fid]})])
-    aid = dialogue.turn(uid, "开始")["next_action"]["action_id"]
-
+    onboarding = __import__("onboarding")
+    onboarding.start(uid)
+    fake_llm(monkeypatch, [proposal(reply="可以，按你愿意分享的内容聊。", ops=[{
+        "op": "add", "key": "style:transcript_sharing", "value": "不想分享成绩单",
+        "evidence_quote": "不想分享成绩单", "affects": "question_next"}])])
+    r = dialogue.turn(uid, "不想分享成绩单")
+    cid = r["conversation_id"]
+    assert not r["rejected_ops"]
+    for i in range(16):
+        fake_llm(monkeypatch, [proposal(reply="我们就讨论这个概念。")])
+        dialogue.turn(uid, f"继续解释第 {i} 个概念", cid)
+    env = dialogue.build_env(uid, cid, "接着聊")
+    assert len(env["recent_context"]) == dialogue.RECENT_TURNS
+    assert env["guidance"]["transcript_introduced"] is True
+    assert {"key": "style:transcript-sharing", "value": "不想分享成绩单"} in env["guidance"]["preferences"]
+    assert store.list_tasks(uid) == []
+    # 另开会话仍知道已经介绍过；新画像不能继承别人的介绍/偏好。
+    assert dialogue.build_env(uid, "another", "你好")["guidance"]["transcript_introduced"]
     store.open_new_portrait(uid)
-    assert store.get_action(uid, aid) is None
-    assert dialogue.action_event(uid, aid, "accept") is None
+    fresh = dialogue.build_env(uid, "new", "你好")["guidance"]
+    assert fresh["preferences"] == []
 
 
-def test_stop_signal_clears_pending_action(monkeypatch):
-    """用户说停：不再派任务，并且把还挂着的行动收掉。
-
-    这条守住一个曾经混在一起的语义：next_action（本轮决定）不能拿 pending_action（还开着的）回填，
-    否则「这轮不该派任务」这个判断从响应里就看不出来了。
-    """
+def test_guidance_requires_four_reading_areas_not_all_fixed_fields():
     uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="先做这个。", next_action={
-        "action": "explore_direction", "title": "看方向", "direction": "",
-        "based_on": [fid]})])
-    first = dialogue.turn(uid, "开始")
-    assert first["next_action"]["title"] == "看方向"
-    assert first["pending_action"]["title"] == "看方向"
-
-    fake_llm(monkeypatch, [proposal(reply="行，那就先看到这。", move="acknowledge_stop")])
-    second = dialogue.turn(uid, "先别推进了，我只是随便看看")
-
-    assert second["next_action"] is None      # 本轮没派任务
-    assert second["pending_action"] is None   # 旧的也收掉了
-    assert store.pending_action(uid) is None
-    assert store.list_actions(uid, statuses=["abandoned"])[0]["title"] == "看方向"
+    assert not dialogue.build_env(uid, "c", "你好")["guidance"]["entry_ready"]
+    seed_fact(uid, "grade", "大二")
+    seed_fact(uid, "interest:eval", "大模型评测")
+    assert not dialogue.build_env(uid, "c", "你好")["guidance"]["entry_ready"]
+    seed_fact(uid, "reading_experience", "没读过论文")
+    seed_fact(uid, "reading_support", "先解释术语")
+    env = dialogue.build_env(uid, "c", "你好")
+    assert env["guidance"]["entry_ready"] is True
+    assert env["guidance"]["transcript_available"] is False
+    assert not any(f.key.startswith("capability:") for f in memory.active_facts(uid))
 
 
-def test_plain_reply_does_not_inherit_old_next_action(monkeypatch):
-    """纯解释的一轮：next_action 为 null，但已开着的行动仍然可见（pending_action）。"""
+def test_stream_composer_sees_actual_memory_write_and_updated_readiness(monkeypatch):
     uid = make_user()
-    fid = seed_fact(uid, "grade", "大二")
-    fake_llm(monkeypatch, [proposal(reply="先做这个。", next_action={
-        "action": "explore_direction", "title": "看方向", "direction": "",
-        "based_on": [fid]})])
-    dialogue.turn(uid, "开始")
+    seed_fact(uid, "grade", "大二")
+    seed_fact(uid, "base:code", "接触过 Python")
+    seed_fact(uid, "reading_experience", "没有读过论文")
+    fake_llm(monkeypatch, [proposal(reply="先看这个问题。", ops=[{
+        "op": "add", "key": "interest:eval", "value": "大模型评测", "evidence_quote": "大模型评测"}, {
+        "op": "add", "key": "made_up", "value": "捏造", "evidence_quote": "大模型评测"}])])
+    captured = {}
+    def stream(system, user, **kw):
+        captured["prompt"] = user
+        yield "这条兴趣已保存，另有一项写入没有成功。"
+    monkeypatch.setattr(llm, "chat_stream", stream)
+    events = list(dialogue.turn_steps(uid, "我想读大模型评测，大模型评测是什么？", stream_reply=True))
+    result = events[-1][1]
+    assert result["onboard_done"]
+    assert result["facts_added"] and result["rejected_ops"]
+    assert '"entry_ready": true' in captured["prompt"]
+    assert '"added"' in captured["prompt"] and '"rejected"' in captured["prompt"]
 
-    fake_llm(monkeypatch, [proposal(reply="这个概念是这样……")])
-    r = dialogue.turn(uid, "为什么？")
 
-    assert r["next_action"] is None
-    assert r["pending_action"]["title"] == "看方向"
+def test_first_readiness_transition_closes_interview_from_committed_facts(monkeypatch):
+    uid = make_user()
+    for key, value in [("grade", "大一"), ("interest:eval", "大模型评测"), ("base:code", "写过 Python")]:
+        seed_fact(uid, key, value)
+    fake_llm(monkeypatch, [proposal(reply="你还希望怎样获得帮助？", ops=[{
+        "op": "add", "key": "reading_experience", "value": "没读过论文", "evidence_quote": "没读过论文"}])])
+    monkeypatch.setattr(dialogue, "_stream_reply", lambda *a: pytest.fail("完成引导不再让模型继续追问"))
+    events = list(dialogue.turn_steps(uid, "我没读过论文", stream_reply=True))
+    result = events[-1][1]
+    assert result["guide_completed"] and result["guide"]["ready"]
+    assert "大模型评测" in result["reply"] and "没读过论文" in result["reply"]
+    assert "可以进入研读模块" in result["reply"] and "？" not in result["reply"]
+    assert result["offered_actions"] == []
+    assert ''.join(p['text'] for k,p in events if k == 'delta') == result['reply']
 
 
 # ---------- 不编造事实的兜底 ----------

@@ -79,86 +79,23 @@ function layoutBlock() {
   return src.slice(start, end + endMark.length);
 }
 
-/* ---- ① 页头：一块；核对已去「我的」，未进入时有进入启研 ---- */
-console.log("=== ① 页头是一块，核对不在对话页 ===");
-const mkHead = new Function("el", "S",
-  extract("dialogueHead") + "\nreturn dialogueHead;")(el, { entered: true });
-const head = mkHead();
-
-const $app = el("main", "page");
-$app.appendChild(head);
-check(byClass($app, "ws-head").length === 1, "只有一块页头",
-  `实际 ${byClass($app, "ws-head").length} 块`);
-check(byClass($app, "ws-tabs").length === 0, "对话页不再放对话|核对标签");
-check(byClass($app, "portrait-bar").length === 0, "画像管理不在对话页头");
-check(byClass($app, "enter-bar").length === 0, "已进入的人不显示进入条");
-const mkOpen = new Function("el", "S",
-  extract("dialogueHead") + "\nreturn dialogueHead;")(el, { entered: false });
-check(byClass(mkOpen(), "enter-bar").length === 1, "未进入时页头有「进入启研」");
-
-/* ---- ② 三个区，顺序固定 ---- */
-console.log("\n=== ② 对话面板是三个有名字的区，顺序固定 ===");
-const block = layoutBlock();
-const built = new Function("el", "portraitTabs", "portraitBar", "$app",
-  block + "\nreturn { wrap, chat, scroll, actions, inputZone, inputRow, input, stageLine, side };")(
-  el, () => el("nav", "ws-tabs"), () => el("div", "portrait-bar"), el("main", "page"));
-
-const chat = built.chat;
-const zoneNames = chat.children.map((c) => c.className);
-console.log("        chat 的直接孩子：" + JSON.stringify(zoneNames));
-check(chat.children.length === 3, "对话面板正好三个区", `实际 ${chat.children.length}`);
-check(chat.children[0] === built.scroll, "第 1 个区是对话流（chat-scroll）");
-check(chat.children[1] === built.actions, "第 2 个区是下一步（chat-next）");
-check(chat.children[2] === built.inputZone, "第 3 个区是输入（chat-input）");
-check(byClass(built.actions, "chat-next").length === 1, "行动区自己就是 .chat-next");
-check(built.actions.className.includes("action-slot"), "行动区仍带 .action-slot（空则隐藏）");
-
-/* ---- ③ 输入永远在最下面 ---- */
-console.log("\n=== ③ 输入框永远在最下面，不会被行动卡顶走 ===");
-check(chat.children[chat.children.length - 1] === built.inputZone,
-  "最后一个区是输入区");
-check(walk(built.inputZone).includes(built.input), "输入框在输入区里");
-check(walk(built.inputZone).includes(built.inputRow), "输入行在输入区里");
-check(!walk(built.scroll).includes(built.input), "输入框不在对话流里");
-check(walk(built.inputZone).includes(built.stageLine),
-  "状态行归输入区（说的是「输入之后会发生什么」）");
-check(!walk(built.actions).includes(built.stageLine), "状态行不在行动区里");
-
-/* ---- ④ 行动卡落进下一步区，输入位置不变 ---- */
-console.log("\n=== ④ 来了行动卡之后，输入仍在最下面 ===");
-const card = el("div", "action-card");
-built.actions.appendChild(card);          // 等价于 renderAction 往 actions 里塞卡片
-check(walk(built.actions).includes(card), "卡片在 .chat-next 里");
-check(chat.children[chat.children.length - 1] === built.inputZone,
-  "卡片进来后输入区仍是最下面那个");
-
-// 一大堆内容（长回执 + 卡片）也不该改变结构
-for (let i = 0; i < 40; i++) built.actions.appendChild(el("p", "receipt"));
-check(chat.children[chat.children.length - 1] === built.inputZone,
-  "行动区塞满 40 个块之后，输入区还在最下面");
-check(built.actions.children.length === 41, "行动区自己滚（结构上就是它的孩子）");
-
-/* ---- ⑤ 刚交完任务的落点 ---- */
-console.log("\n=== ⑤ 刚交完任务：finished-note 插在行动区前面 ===");
-const note = el("div", "finished-note");
-built.actions.parentNode.insertBefore(note, built.actions);   // finishedNote 的做法
-check(chat.children.indexOf(note) < chat.children.indexOf(built.actions),
-  "落点排在行动区前面");
-check(chat.children[chat.children.length - 1] === built.inputZone,
-  "落点插进来之后，输入区还是在最下面");
-const css = fs.readFileSync(
-  path.join(path.resolve(__dirname, "..", ".."), "web", "css", "styles.css"),
-  "utf8");
-check(/\.chat-panel > \.finished-note\s*\{/.test(css),
-  "落点的父节点是 .chat-panel，所以必须有对应规则给它对齐边距");
-
-/* ---- ⑥ 三列/两列对齐 ---- */
-console.log("\n=== ⑥ 主区两列 ===");
-check(built.wrap.className.includes("two-col"), "主区是 two-col");
-check(chat.className.includes("chat-wide"), "对话列带 chat-wide");
-check(built.side.className.includes("side-panel"), "另一列是记忆侧栏");
-check(/\.two-col-chat > \.side-panel\s*\{/.test(css),
-  "侧栏有自己的高度上限（两列底边才对得上）");
-
+// Execute the real layout builder: receipts belong to the conversation,
+// suggestions belong to the composer. There is no third scroll strip.
+const mkHead = (entered) => new Function("el", "S", extract("dialogueHead") + "\nreturn dialogueHead();")(el, {entered});
+check(byClass(mkHead(false), "enter-bar").length === 1, "首次引导有提前进入入口");
+check(mkHead(false).textContent.includes("院系、专业、年级和课程"), "首次引导先邀请提供明确的学习背景");
+check(byClass(mkHead(true), "enter-bar").length === 0, "普通对话不重做引导");
+const built = new Function("el", "$app", "S", layoutBlock() +
+  "\nreturn {wrap,chat,scroll,actions,inputZone,inputRow,input,stageLine,side,suggestions};")(
+    el, el("main"), {entered:false});
+check(built.chat.children.length === 2, "对话流和输入区两块，不存在中间滚动带");
+check(built.chat.children[0] === built.scroll, "对话流在上方");
+check(built.chat.children[1] === built.inputZone, "输入区固定在下方");
+check(walk(built.inputZone).includes(built.suggestions), "可选回答归输入区");
+check(walk(built.inputZone).includes(built.stageLine), "实际生成状态归输入区");
+check(!built.chat.children.includes(built.actions), "回执不再作为中间独立面板");
+check(!src.includes('"action-slot chat-next"'), "移除旧滚动带");
+check(src.includes('scroll.appendChild(actions)'), "本轮记录与邀请随对话滚动");
+check(src.includes('bubble-transcript'), "长成绩单原文可折叠");
 console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
 process.exit(fails ? 1 : 0);

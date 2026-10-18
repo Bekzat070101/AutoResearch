@@ -38,6 +38,9 @@ def canon_key(key: str) -> str:
     同义不同词那部分交给 single 基数的 supersede 和幂等 add 去兜。
     """
     k = (key or "").strip().lower()
+    # 精确 registry key 的下划线是协议的一部分（如 base:math_code），不能改成连字符后拒掉。
+    if k in _EXACT:
+        return k
     if ":" not in k:
         return k
     ns, slug = k.split(":", 1)
@@ -115,6 +118,10 @@ _EXACT: dict[str, KeySpec] = {
     "base:code": KeySpec("capability", "single", ("declared",), layer="capability"),
     "base:math_code": KeySpec("capability", "single", ("declared",), layer="capability"),
     "base:none": KeySpec("capability", "single", ("declared",), layer="capability"),
+    # 文献伴读首次交流：自述阅读经验不冒充提交验证过的 experience 事件。
+    "reading_experience": KeySpec("background", "single", ("declared",), layer="practice"),
+    "reading_barrier": KeySpec("preference", "single", ("declared",), layer="interest"),
+    "reading_support": KeySpec("preference", "single", ("declared",), layer="interest"),
 }
 
 # 命名空间 key：<namespace>:<slug>

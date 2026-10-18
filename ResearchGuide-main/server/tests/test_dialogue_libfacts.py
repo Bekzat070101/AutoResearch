@@ -97,8 +97,8 @@ def test_facts_are_in_the_prompt_that_both_calls_see():
 
 def test_prompt_forbids_asking_which_school():
     p = dialogue._proposal_system()
-    assert "默认他就是北大学生，不要问「你是哪个学校」" in p
-    assert "这个产品只服务北大" in dialogue._SYSTEM_BASE
+    assert "默认用户是北大学生，不问学校" in p
+    assert "培养方案知识库只覆盖北大" in dialogue._SYSTEM_BASE
 
 
 def test_prompt_tells_it_to_look_the_name_up_first():

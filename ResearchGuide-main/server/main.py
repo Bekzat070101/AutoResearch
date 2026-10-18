@@ -509,6 +509,13 @@ def onboard_enter(req: NBAReq):
     return auth.account(req.uid)
 
 
+@app.get("/api/onboard/readiness")
+def onboard_readiness(uid: str):
+    """首次引导覆盖度只用于提醒，进入接口始终允许跳过。"""
+    _user_or_404(uid)
+    return dialogue.guide.assess(uid)
+
+
 # ---------- 对话内核（任务2：环境观察 → 决策 → 工具 → 记忆）----------
 
 @app.post("/api/dialogue/turn", dependencies=SERIAL)

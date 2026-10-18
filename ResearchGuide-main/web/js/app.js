@@ -259,10 +259,52 @@ function firstView() {
   return S.entered ? "today" : "dialogue";
 }
 
-function enterApp(next) {
-  S.entered = true;
-  if (S.uid) api("POST", "/api/onboard/enter", { uid: S.uid }).catch(() => {});
-  setView(next || "today");
+let enteringApp = false;
+function confirmEarlyEntry(profile) {
+  return new Promise((resolve) => {
+    const dialog = el("dialog", "entry-confirm");
+    dialog.setAttribute("aria-labelledby", "entryConfirmTitle");
+    const title = el("h2", "", "现在就进入启研吗？");
+    title.id = "entryConfirmTitle";
+    dialog.appendChild(title);
+    dialog.appendChild(el("p", "", profile
+      ? "我们对你的了解还不多。再聊一聊，系统会更懂你的学习基础和阅读需求；你也可以直接进入，之后慢慢补充。"
+      : "暂时无法确认已了解的信息。你仍可以直接进入，或留在这里继续聊。"));
+    if (profile) {
+      const missing = (profile.areas || []).filter((a) => !a.known).map((a) => a.label);
+      if (missing.length) dialog.appendChild(el("p", "form-note", "还可以聊聊：" + esc(missing.join("、")) + "。这些都不是必填项。"));
+    }
+    const row = el("div", "submit-actions");
+    const more = el("button", "btn", "再聊一聊");
+    const go = el("button", "btn secondary", "直接进入");
+    more.type = go.type = "button";
+    const finish = (yes) => { dialog.close(); dialog.remove(); resolve(yes); };
+    more.onclick = () => finish(false);
+    go.onclick = () => finish(true);
+    dialog.addEventListener("cancel", (e) => { e.preventDefault(); finish(false); });
+    row.append(more, go);
+    dialog.appendChild(row);
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    more.focus();
+  });
+}
+
+async function enterApp(next) {
+  if (S.entered) { setView(next || "today"); return true; }
+  if (enteringApp || !S.uid) return false;
+  enteringApp = true;
+  const uid = S.uid;
+  try {
+    const profile = await api("GET", `/api/onboard/readiness?uid=${encodeURIComponent(uid)}`).catch(() => null);
+    if ((!profile || !profile.ready) && !await confirmEarlyEntry(profile)) return false;
+    if (S.uid !== uid) return false;
+    await api("POST", "/api/onboard/enter", { uid });
+    S.entered = true;
+    setView(next || "today");
+    return true;
+  } catch (e) { toast(e.message); return false; }
+  finally { enteringApp = false; }
 }
 
 function setView(name) {
@@ -272,7 +314,7 @@ function setView(name) {
   }
   const stay = name === "dialogue" || name === "me" || name === "login" || name === "home";
   if (S.uid && !stay && !S.entered) {
-    enterApp();
+    enterApp(name);
     return;
   }
   S.view = name;
@@ -2300,6 +2342,7 @@ async function portraitSection() {
     return box;
   }
   const active = portraits.find((p) => p.active) || portraits[0];
+  box.dataset.activeLabel = active.label;
   const previewId = S.mePortrait && portraits.some((p) => p.id === S.mePortrait) ? S.mePortrait : "";
   const shown = previewId ? portraits.find((p) => p.id === previewId) : active;
   const isActive = shown.id === active.id;
@@ -2527,9 +2570,7 @@ function confirmDrafts(facts) {
    所以每个空格都带一句 why（来自后端 memory.COVERAGE_GROUPS）。 */
 function coverageBoard() {
   const box = el("div", "coverage");
-  box.appendChild(el("p", "section-label", "多记一条，方向就能对得更准"));
-  const hintRow = el("p", "coverage-hint", "下面每一格都可以点。空着的也可以先在「对话」里随口说一句。");
-  box.appendChild(hintRow);
+  box.appendChild(el("p", "coverage-hint", "以下信息都可按需补充，不需要填满才能开始阅读。"));
   const grid = el("div", "cov-grid");
   box.appendChild(grid);
 
@@ -2548,24 +2589,21 @@ function coverageBoard() {
       grid.appendChild(el("div", "cov-col cov-col-transcript")).appendChild(err);
       return;
     }
-    const head = el("p", "cov-total",
-      `已填 ${cov.filled} / ${cov.total} 项` + (cov.missing ? `，还差 ${cov.missing} 项` : "，都齐了"));
-    box.insertBefore(head, grid);
-
     (cov.groups || []).forEach((G) => {
       const col = el("div", `cov-col cov-col-${G.group}`);
       const h = el("p", "cov-head");
       h.appendChild(el("span", "cov-title", esc(G.label)));
-      h.appendChild(el("span", "cov-count", `${G.filled}/${G.total}`));
+      h.appendChild(el("span", "cov-count", G.filled ? "有记录" : "选填"));
       col.appendChild(h);
-      if (G.why) col.appendChild(el("p", "cov-why", esc(G.why)));
+
 
       (G.slots || []).forEach((s) => {
-        const row = el("div", "cov-slot" + (s.filled ? " on" : ""));
+        const row = el("button", "cov-slot" + (s.filled ? " on" : ""));
+        row.type = "button";
         row.appendChild(el("span", "cov-mark", s.filled ? "✓" : "○"));
         const body = el("div", "cov-body");
         const line = el("p", "cov-label");
-        line.appendChild(el("span", "", esc(s.label)));
+        line.appendChild(el("span", "", esc(s.key === "capability:" ? "能力相关描述" : s.label)));
         if (s.filled && s.value) {
           line.appendChild(el("span", "cov-value", esc(String(s.value))));
           // 默认前提（学校=北京大学）：显示出来，但标清它是默认值、不是他说的
@@ -2573,7 +2611,7 @@ function coverageBoard() {
         }
         body.appendChild(line);
         // 已填的不再重复「填了有什么用」，省得整页都是废话
-        if (!s.filled && s.why) body.appendChild(el("p", "cov-tip", esc(s.why)));
+        if (!s.filled) line.appendChild(el("span", "cov-value cov-empty", "未提供"));
         row.appendChild(body);
         // 点空格 → 去对话里补。不在核对页做输入框：
         // 这些字段大多需要上下文（成绩单要粘贴、方向要聊），
@@ -2581,7 +2619,7 @@ function coverageBoard() {
         row.onclick = () => {
           if (s.presumed) { toast(`「${s.label}」是默认前提（${s.value}），不用填。`); return; }
           toast(s.filled ? `「${s.label}」已经记下了，想改就在下面的记忆里改。`
-            : `去对话里说一句就行——${s.why}`);
+            : `可以在对话中提到「${s.label}」，也可以暂时留空。`);
           if (!s.filled) setView("dialogue");
         };
         col.appendChild(row);
@@ -2589,81 +2627,7 @@ function coverageBoard() {
       grid.appendChild(col);
     });
 
-    // 成绩单单独给一个粘贴入口：它是一条记录变多条，聊天里说不清楚
-    const tcol = el("div", "cov-col cov-col-transcript");
-    tcol.appendChild(el("p", "cov-head", "粘贴成绩单"));
-    tcol.appendChild(el("p", "cov-why", "一次贴上，我就知道你修过哪些课、绩点多少，后面难度判断都靠它。"));
-    const ta = el("textarea", "cov-paste");
-    ta.rows = 4;
-    ta.placeholder = "从树洞或教务复制成绩单，整段粘进来即可。\n形如：\n25-26学年度1学期\n3\n学分\n线性代数 (B)\n专业必修\n88";
-    const act = el("div", "cov-actions");
-    const btn = el("button", "btn small", "识别");
-    btn.type = "button";
-    const report = el("div", "cov-report");
-    // 「就用这份」只留绑定当前预览的那一个：原来每识别一次追加一个，点到旧的会把旧文本的成绩写回去（Codex 复现：90 被盖成 60）
-    let confirmBtn = null;
-    const dropConfirm = () => { if (confirmBtn) { confirmBtn.remove(); confirmBtn = null; } };
-    ta.addEventListener("input", dropConfirm);  // 识别之后又改了文字，原来的预览就不作数了
-    btn.onclick = async () => {
-      const text = ta.value.trim();
-      if (!text) { toast("先把成绩单粘进来"); return; }
-      dropConfirm();
-      btn.disabled = true;
-      try {
-        const r = await api("POST", "/api/me/transcript/parse", { uid: S.uid, text });
-        report.innerHTML = "";
-        if (!r.courses || !r.courses.length) {
-          report.appendChild(el("p", "cov-bad",
-            "没识别到课程。" + ((r.warnings || [])[0] || "请检查格式。")));
-          btn.disabled = false;
-          return;
-        }
-        const s = r.summary || {};
-        report.appendChild(el("p", "cov-ok",
-          `识别到 ${r.courses.length} 门课，涉及 ${(r.terms || []).length} 个学期` +
-          (s.gpa != null ? `；总绩点 ${s.gpa.toFixed(3)}，均分 ${s.avg_score.toFixed(1)}` : "") +
-          `；通过学分 ${s.passed_credits}，其中计 GPA ${s.gpa_credits}。`));
-        // 少算了什么必须自己说出来。字母等级不进 GPA 是我们的选择，
-        // 用户看到的总绩点是少算过的——不说就成了一个「看起来完整其实是错的数」。
-        if ((s.ungraded || []).length) {
-          report.appendChild(el("p", "cov-warn",
-            `有 ${s.ungraded.length} 门是字母等级/五级制（`
-            + s.ungraded.map((u) => `${esc(u.course)} ${esc(u.grade)}`).join("、")
-            + `，共 ${s.ungraded_credits} 学分），学分已计入，但**没有算进绩点**——`
-            + "教务的换算口径我不敢替你定，你确认后我再加上。"));
-        }
-        if ((s.in_progress || []).length) {
-          report.appendChild(el("p", "cov-warn",
-            `有 ${s.in_progress.length} 门成绩还没出（`
-            + s.in_progress.map((u) => esc(u.course)).join("、")
-            + `），我按「在修」记下来了，不计入已修学分。`));
-        }
-        // 把「我从成绩单读出了什么」先给用户看。落库前就能判断我们有没有读错。
-        (r.preview || []).forEach((d) => {
-          report.appendChild(el("p", "cov-derived", `会记下：${esc(d.value)}`));
-        });
-        (r.warnings || []).forEach((w) => report.appendChild(el("p", "cov-warn", esc(w))));
-        const ok = el("button", "btn small", "就用这份");
-        ok.type = "button";
-        confirmBtn = ok;
-        ok.onclick = async () => {
-          ok.disabled = true;
-          try {
-            const w = await api("POST", "/api/me/transcript",
-              { uid: S.uid, text, mode: "replace" });
-            toast(`已记下 ${w.written} 门课`);
-            setView("confirm");
-          } catch (e) { toast(e.message); ok.disabled = false; }
-        };
-        act.appendChild(ok);
-        btn.disabled = false;
-      } catch (e) { toast(e.message); btn.disabled = false; }
-    };
-    act.appendChild(btn);
-    tcol.appendChild(ta);
-    tcol.appendChild(act);
-    tcol.appendChild(report);
-    grid.appendChild(tcol);
+
   })();
 
   return box;
@@ -6367,10 +6331,9 @@ function projectFolders(projects) {
 }
 
 function layerBlock(L) {
-  const box = el("div", `mem-layer mem-layer-${L.layer}`);
-  box.appendChild(el("p", "mem-layer-head",
-    `${esc(L.label)}<span class="mem-layer-n">${L.facts.length}</span>`));
-  if (L.layer_hint) box.appendChild(el("p", "mem-layer-hint", esc(L.layer_hint)));
+  const box = el("section", `mem-layer mem-layer-${L.layer}`);
+  const labels = {identity:"身份与专业", interest:"兴趣与交流偏好", capability:"你描述的学习基础", practice:"近期学习与经历", experience:"实际经历", other:"其他背景"};
+  box.appendChild(el("h4", "mem-layer-head", `${esc(labels[L.layer] || L.label)}<span class="mem-layer-n">${L.facts.length}</span>`));
   const list = el("div", "mem-layer-list");
   L.facts.forEach((f) => list.appendChild(memoryCard(f)));
   box.appendChild(list);
@@ -6380,34 +6343,33 @@ function layerBlock(L) {
 function memoryCard(f) {
   const derived = f.source === "derived";
   const card = el("div", `mem-card${derived ? " mem-derived" : ""}`);
-  const value = el("div", "mem-value", esc(f.value));
+  const match = derived && String(f.value).match(/^修过\s*(\d+)\s*门(.+?)类课程/);
+  const value = el("div", "mem-value", esc(match ? `修过 ${match[1]} 门${match[2]}相关课程` : f.value));
   const meta = el("div", "mem-meta");
-  const srcCn = {
-    declared: "你说的", inferred: "我推断的", behavior: "做过的",
-    derived: "成绩单推的", user_edit: "你改的",
-  };
+  const srcCn = {declared:"你的自述", inferred:"待确认的理解", behavior:"实际记录", derived:"来自课程记录", user_edit:"你的修改"};
   meta.appendChild(el("span", `badge src-${f.source}`, srcCn[f.source] || esc(f.source)));
-  if (f.affects_label) meta.appendChild(el("span", "badge plain", `影响${f.affects_label}`));
-  if (f.valid_until) meta.appendChild(el("span", "badge plain", `到 ${esc(String(f.valid_until).slice(0, 10))} 失效`));
+  if (f.valid_until) meta.appendChild(el("span", "badge plain", `有效至 ${esc(String(f.valid_until).slice(0, 10))}`));
   card.append(value, meta);
   const quotes = (f.evidence || []).map((e) => e.quote).filter(Boolean);
-  if (quotes.length) card.appendChild(el("p", "mem-basis", "依据：" + quotes.map((q) => `「${q}」`).join("")));
-  else if (derived) {
-    const ev = (f.evidence || []).filter((e) => e.type === "transcript");
-    if (ev.length) {
-      card.appendChild(el("p", "mem-basis",
-        "依据：" + ev.map((e) => `${esc(e.course)} ${esc(String(e.grade))}`).join("、")));
-    }
+  const ev = derived ? (f.evidence || []).filter((e) => e.type === "transcript") : [];
+  if (quotes.length || ev.length || derived) {
+    const details = el("details", "mem-evidence");
+    details.appendChild(el("summary", "", derived ? "课程依据与统计" : "查看来源"));
+    if (derived) details.appendChild(el("p", "mem-basis", esc(f.value)));
+    const basis = quotes.length ? quotes.map((q) => `「${q}」`).join("；") : ev.map((e) => `${e.course} ${e.grade}`).join("、");
+    if (basis) details.appendChild(el("p", "mem-basis", esc(basis)));
+    card.appendChild(details);
   }
   const acts = el("div", "mem-acts");
   if (!derived) {
-    const edit = el("button", "linkish", "改");
+    const edit = el("button", "linkish", "修改");
     edit.type = "button";
     edit.onclick = () => {
       if (value.querySelector("input")) return;
       const input = el("input");
       input.type = "text";
       input.value = f.value;
+      input.setAttribute("aria-label", "修改这条记忆");
       value.innerHTML = "";
       value.appendChild(input);
       input.focus();
@@ -6432,14 +6394,15 @@ function memoryCard(f) {
     };
     acts.appendChild(edit);
   }
-  const del = el("button", "linkish danger", derived ? "不算" : "删");
+  const del = el("button", "linkish danger", derived ? "暂不采用" : "删除");
   del.type = "button";
   del.onclick = async () => {
     del.disabled = true;
     try {
       await api("DELETE", `/api/me/facts/${f.id}?uid=${encodeURIComponent(S.uid)}`);
       card.classList.add("is-dismissed");
-      toast(derived ? "好，这条不再拿来说事。" : "已删掉。");
+      del.textContent = "已移除";
+      toast(derived ? "已移除这条理解，原始课程记录保留。" : "已移除这条记录。");
     } catch (e) { toast(e.message); del.disabled = false; }
   };
   acts.appendChild(del);
@@ -6495,52 +6458,108 @@ async function renderFeedback() {
   $app.appendChild(box);
 }
 
+function meFold(title, content, description = "") {
+  const fold = el("details", "panel me-settings-fold");
+  fold.appendChild(el("summary", "", title));
+  if (description) fold.appendChild(el("p", "form-note", description));
+  fold.appendChild(content);
+  return fold;
+}
+
+function transcriptPanel(data, derived) {
+  const panel = el("section", "panel me-transcript-panel");
+  const courses = data.courses || [];
+  panel.appendChild(el("h3", "me-section-title", "课程与学习基础"));
+  if (data.error) panel.appendChild(el("p", "cov-bad", "课程记录暂时未能加载，请稍后刷新。"));
+  else if (!courses.length) panel.appendChild(el("p", "panel-sub", "还没有课程记录。不导入成绩单也能开始阅读，想补充时再来。"));
+  else {
+    const summary = data.summary || {};
+    const stats = el("div", "me-course-stats");
+    [["课程记录", `${courses.length} 门`], ["通过学分", String(summary.passed_credits ?? "—")], ["在修课程", `${(summary.in_progress || []).length} 门`]].forEach(([label, val]) => {
+      const cell = el("div", "me-course-stat");
+      cell.append(el("span", "", label), el("strong", "", val));
+      stats.appendChild(cell);
+    });
+    panel.appendChild(stats);
+    panel.appendChild(el("p", "me-basis-note", "这些记录说明你接触过哪些课程，不等同于熟练掌握；回答问题时也会参考你的自述。"));
+    if (derived.length) {
+      const list = el("div", "me-derived-list");
+      derived.forEach((f) => list.appendChild(memoryCard(f)));
+      panel.appendChild(list);
+    }
+    const details = el("details", "me-course-details");
+    details.appendChild(el("summary", "", `查看 ${courses.length} 门课程与成绩`));
+    if (summary.gpa != null) details.appendChild(el("p", "form-note", `百分制课程参考 GPA ${summary.gpa.toFixed(4)}（计入 ${summary.gpa_credits} 学分）。字母等级未转换计入。`));
+    const scroll = el("div", "me-table-scroll");
+    const table = el("table", "me-course-table");
+    const thead = el("thead"); const head = el("tr");
+    ["课程", "成绩", "学分", "学期"].forEach((text) => { const th = el("th", "", text); th.scope = "col"; head.appendChild(th); });
+    thead.appendChild(head); table.appendChild(thead);
+    const body = el("tbody");
+    courses.forEach((c) => {
+      const row = el("tr");
+      [c.course, c.grade || "未出成绩", String(c.credits ?? "—"), c.term || "—"].forEach((text) => row.appendChild(el("td", "", esc(text))));
+      body.appendChild(row);
+    });
+    table.appendChild(body); scroll.appendChild(table); details.appendChild(scroll); panel.appendChild(details);
+  }
+  panel.appendChild(transcriptImportPanel());
+  return panel;
+}
+
 async function renderMe() {
   const seq = S.renderSeq;
-  const [mem, mine, portraits] = await Promise.all([
-    api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({ layers: [], projects: [] })),
-    api("GET", `/api/me/facts?uid=${S.uid}`).catch(() => ({ facts: [] })),
+  const [mem, mine, portraits, transcript] = await Promise.all([
+    api("GET", `/api/memory?uid=${encodeURIComponent(S.uid)}`).catch(() => ({layers:[], projects:[], error:true})),
+    api("GET", `/api/me/facts?uid=${encodeURIComponent(S.uid)}`).catch(() => ({facts:[], error:true})),
     portraitSection(),
+    api("GET", `/api/me/transcript?uid=${encodeURIComponent(S.uid)}`).catch(() => ({courses:[], error:true})),
   ]);
   if (stale(seq)) return;
-  const live = new Set(["draft", "confirmed", "active"]);
-  const facts = (mine.facts || []).filter((f) => live.has(f.status));
-  const now = Date.now();
-  const expired = facts.filter((f) => f.valid_until && new Date(f.valid_until).getTime() < now);
-  $app.innerHTML = "";
-  if (!S.entered) {
-    const backRow = el("p", "panel-sub");
-    const back = el("button", "btn", "回到对话");
-    back.type = "button";
-    back.onclick = () => setView("dialogue");
-    backRow.appendChild(back);
-    $app.appendChild(backRow);
-  }
-  $app.appendChild(workspaceHead("我的", "账号、画像和它记下的，都在这一页。"));
-  $app.appendChild(accountPanel());
-  // 画像与方向：画像条在方向卡上方（不重叠），方向收在所选画像名下
-  $app.appendChild(portraits);
-  $app.appendChild(confirmDrafts(facts));
-  $app.appendChild(coverageBoard());
-  const board = el("section", "panel");
-  board.appendChild(el("h3", "section-label", "它记下的"));
+  const facts = (mine.facts || []).filter((f) => ["draft","confirmed","active"].includes(f.status));
+  const expired = facts.filter((f) => f.valid_until && new Date(f.valid_until).getTime() < Date.now());
   const layers = (mem.layers || []).filter((L) => (L.facts || []).length);
-  const projects = mem.projects || [];
-  if (projects.length) board.appendChild(projectFolders(projects));
-  layers.forEach((L) => board.appendChild(layerBlock(L)));
-  if (!layers.length && !projects.length) {
-    board.appendChild(el("p", "panel-sub", "还没有已生效的记忆。先去对话里聊几句，再回这里核对。"));
-  }
-  $app.appendChild(board);
+  const derived = layers.flatMap((L) => L.facts).filter((f) => f.source === "derived" && String(f.key).startsWith("transcript:"));
+  $app.innerHTML = "";
+  const page = el("div", "me-page");
+  const head = workspaceHead("我的", "看看启研对你的了解。信息可以慢慢补充，不必一次填完整。");
+  const back = el("button", "btn small secondary", "继续对话"); back.type = "button";
+  back.onclick = () => setView("dialogue"); head.appendChild(back); page.appendChild(head);
+  const overview = el("section", "me-overview");
+  const intro = el("div");
+  intro.append(el("p", "me-kicker", "当前学习画像"), el("h3", "", esc(portraits.dataset.activeLabel || S.portraitName || "当前画像")));
+  const identity = ["grade","department","major"].map((key) => facts.find((f) => f.key === key)?.value).filter(Boolean);
+  intro.appendChild(el("p", "panel-sub", esc(identity.join(" · ") || "可以在对话中认识彼此，也可以直接问问题。")));
+  const read = el("button", "btn small", "去研读"); read.type = "button";
+  read.onclick = () => S.entered ? setView("read") : enterApp("read");
+  overview.append(intro, read); page.appendChild(overview);
+  const layout = el("div", "me-layout");
+  const main = el("div", "me-main"); const aside = el("aside", "me-aside");
+  main.appendChild(transcriptPanel(transcript, derived));
+  const board = el("section", "panel me-memory-panel");
+  board.appendChild(el("h3", "me-section-title", "对你的了解"));
+  board.appendChild(el("p", "panel-sub", "来源可以展开查看，说得不准确的地方随时修改。"));
+  if (mem.error || mine.error) board.appendChild(el("p", "cov-bad", "部分记忆未能加载，请稍后刷新；原有记录没有删除。"));
+  let visible = 0;
+  layers.forEach((L) => {
+    const items = L.facts.filter((f) => !derived.some((d) => d.id === f.id));
+    if (items.length) { board.appendChild(layerBlock({...L, facts:items})); visible += items.length; }
+  });
+  if ((mem.projects || []).length) board.appendChild(projectFolders(mem.projects));
+  if (!visible && !(mem.projects || []).length && !mem.error) board.appendChild(el("p", "me-empty", "暂时没有其他背景记录。你可以继续聊，也可以直接开始阅读。"));
+  main.appendChild(board);
+  if (facts.some((f) => f.status === "draft")) main.appendChild(confirmDrafts(facts));
+  main.appendChild(meFold("更多背景（选填）", coverageBoard(), "保留原有信息类型，按需要补充即可。"));
   if (expired.length) {
-    const fold = el("details", "inventory");
-    fold.appendChild(el("summary", "", `已过期 ${expired.length} 条`));
-    expired.forEach((f) => fold.appendChild(el("p", "form-note", `${esc(f.value)} · 到 ${esc(String(f.valid_until).slice(0, 10))}`)));
-    $app.appendChild(fold);
+    const content = el("div"); expired.forEach((f) => content.appendChild(el("p", "form-note", esc(f.value))));
+    main.appendChild(meFold(`已过期的记录 · ${expired.length} 条`, content));
   }
+  aside.appendChild(meFold("画像与方向设置", portraits, "切换画像、新建画像或管理已选方向。"));
+  aside.appendChild(meFold("账号与数据", accountPanel(), "模型配置、数据导出和账号管理。"));
+  layout.append(main, aside); page.appendChild(layout); $app.appendChild(page);
   if (S.scrollToConfirm) {
     S.scrollToConfirm = false;
-    document.getElementById("me-confirm")?.scrollIntoView({ block: "start" });
+    (document.getElementById("me-confirm") || board).scrollIntoView({block:"start"});
   }
 }
 
@@ -7351,3 +7370,77 @@ document.addEventListener("keydown", (e) => {
     setTimeout(() => splash.remove(), 600);
   }, Math.max(0, 700 - (performance.now() - t0)));
 })();
+
+function transcriptImportPanel() {
+    // 成绩单单独给一个粘贴入口：它是一条记录变多条，聊天里说不清楚
+    const tcol = el("details", "me-import-fold");
+    tcol.appendChild(el("summary", "", "导入或更新成绩单（选填）"));
+    tcol.appendChild(el("p", "cov-why", "从树洞成绩单页全选、复制、粘贴。课程只作为学习背景；确认保存后会替换当前画像的课程记录。"));
+    const ta = el("textarea", "cov-paste");
+    ta.rows = 5;
+    ta.setAttribute("aria-label", "粘贴成绩单");
+    ta.placeholder = "粘贴整份成绩单，保留学期标题和换行。先预览，确认后再保存。";
+    const act = el("div", "cov-actions");
+    const btn = el("button", "btn small", "预览识别结果");
+    btn.type = "button";
+    const report = el("div", "cov-report");
+    btn.onclick = async () => {
+      const text = ta.value.trim();
+      if (!text) { toast("先把成绩单粘进来"); return; }
+      act.innerHTML = ""; act.appendChild(btn);
+      btn.disabled = true;
+      try {
+        const r = await api("POST", "/api/me/transcript/parse", { uid: S.uid, text });
+        report.innerHTML = "";
+        if (!r.courses || !r.courses.length) {
+          report.appendChild(el("p", "cov-bad",
+            "没识别到课程。" + ((r.warnings || [])[0] || "请检查格式。")));
+          btn.disabled = false;
+          return;
+        }
+        const s = r.summary || {};
+        report.appendChild(el("p", "cov-ok",
+          `识别到 ${r.courses.length} 门课，涉及 ${(r.terms || []).length} 个学期` +
+          (s.gpa != null ? `；参考 GPA ${s.gpa.toFixed(3)}，均分 ${s.avg_score.toFixed(1)}` : "") +
+          `；通过学分 ${s.passed_credits}，其中计 GPA ${s.gpa_credits}。`));
+        // 少算了什么必须自己说出来。字母等级不进 GPA 是我们的选择，
+        // 用户看到的总绩点是少算过的——不说就成了一个「看起来完整其实是错的数」。
+        if ((s.ungraded || []).length) {
+          report.appendChild(el("p", "cov-warn",
+            `有 ${s.ungraded.length} 门是字母等级/五级制（`
+            + s.ungraded.map((u) => `${esc(u.course)} ${esc(u.grade)}`).join("、")
+            + `，共 ${s.ungraded_credits} 学分），学分已计入，但**没有算进绩点**——`
+            + "教务的换算口径我不敢替你定，目前没有转换计入。"));
+        }
+        if ((s.in_progress || []).length) {
+          report.appendChild(el("p", "cov-warn",
+            `有 ${s.in_progress.length} 门成绩还没出（`
+            + s.in_progress.map((u) => esc(u.course)).join("、")
+            + `），我按「在修」记下来了，不计入已修学分。`));
+        }
+        // 把「我从成绩单读出了什么」先给用户看。落库前就能判断我们有没有读错。
+        (r.preview || []).forEach((d) => {
+          report.appendChild(el("p", "cov-derived", `会记下：${esc(d.value)}`));
+        });
+        (r.warnings || []).forEach((w) => report.appendChild(el("p", "cov-warn", esc(w))));
+        const ok = el("button", "btn small", "确认并更新课程");
+        ok.type = "button";
+        ok.onclick = async () => {
+          ok.disabled = true;
+          try {
+            const w = await api("POST", "/api/me/transcript",
+              { uid: S.uid, text, mode: "replace" });
+            toast(`已记下 ${w.written} 门课`);
+            setView("me");
+          } catch (e) { toast(e.message); ok.disabled = false; }
+        };
+        act.appendChild(ok);
+        btn.disabled = false;
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+    act.appendChild(btn);
+    tcol.appendChild(ta);
+    tcol.appendChild(act);
+    tcol.appendChild(report);
+    return tcol;
+}

@@ -16,6 +16,20 @@ from schemas import UserFact
 
 UNKNOWN = "不知道"
 
+# 开场固定说明产品职责与可选导入，避免模型把它改回问卷或遗漏操作方法。
+TRANSCRIPT_GUIDANCE = (
+    "如果愿意，也可以打开树洞的成绩单页，全选（Ctrl+A）并复制（Ctrl+C），"
+    "再粘贴到这里。我可以识别课程和成绩，更全面地了解你的学习基础。"
+    "这完全可选，不提供也能继续；粘贴后会保存到当前画像，请先去掉不想分享的个人信息。"
+)
+WELCOME_MESSAGE = (
+    "你好，我是启研。我们先花几分钟认识一下，方便之后为你推荐和讲解文献。"
+    "你可以先告诉我你的院系、专业和年级；如果还没分专业，说院系和年级就好。\n\n"
+    + TRANSCRIPT_GUIDANCE
+    + "\n\n如果方便，也可以说说本学期正在上的课程，成绩单里没有的课也可以补充。"
+    "先从这些背景聊起，再顺着你的想法慢慢了解；不必一下说全，也可以直接问我问题。"
+)
+
 # 每轮定义：问题、选项、抽取规则（选某项/自由文本 → FactCandidate）
 ROUNDS: list[dict[str, Any]] = [
     {
@@ -121,12 +135,7 @@ def start(uid: str) -> dict[str, Any]:
     state = {"phase": ROUNDS[0]["id"], "round_no": 1}
     store.set_onboard_state(uid, state)
     first = ROUNDS[0]
-    fallback = (
-        f"你好！我是你的科研领路人。接下来大约 5 个问题、5 分钟，"
-        f"帮我对「你是谁、你好奇什么」建立一个初始认知。"
-        f"所有判断你之后都能看到、能改、能删。{first['ask']}"
-    )
-    reply = _voice("刚进入对话", first["ask"], fallback, uid=uid) if llm.ready(uid) else fallback
+    reply = WELCOME_MESSAGE
     store.add_message(uid, "assistant", reply, first["id"])
     return _turn(reply, first, state)
 

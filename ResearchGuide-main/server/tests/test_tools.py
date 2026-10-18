@@ -39,8 +39,8 @@ def test_unknown_tool_is_rejected_not_raised():
 
 def test_bad_args_shape_does_not_crash():
     uid = make_user()
-    r = tools.run(uid, {"tool": "project.search", "args": "not a dict"})
-    assert r["ok"] is False  # 没方向 → 结构化失败
+    r = tools.run(uid, {"tool": "course.search", "args": "not a dict"})
+    assert r["ok"] is False and r["error"] == "query is required"
 
 
 def test_only_registered_tools_are_described():
@@ -102,17 +102,18 @@ def test_tool_exception_becomes_structured_failure(monkeypatch):
     assert r["ok"] is False and "RuntimeError" in r["error"]
 
 
-def test_project_review_cannot_reach_another_profile(monkeypatch):
+@pytest.mark.parametrize("name", ["project.search", "project.review"])
+def test_project_tools_are_unavailable_to_dialogue(name):
     uid = make_user()
-    store.save_project(uid, "p1", {"name": "项目"}, "reviewed")
-    assert tools.run(uid, {"tool": "project.review", "args": {"project_id": "p1"}})["ok"] is True
+    assert name not in tools.TOOL_SPECS
+    assert name not in tools.describe()
+    # 旧模型决策即使还带着这个名字，也不能绕过工具清单执行。
+    r = tools.run(uid, {"tool": name, "args": {"direction": "ai", "project_id": "p1"}})
+    assert r == {"ok": False, "tool": name, "error": "unknown tool"}
 
-    store.open_new_portrait(uid)
-    r = tools.run(uid, {"tool": "project.review", "args": {"project_id": "p1"}})
-    assert r["ok"] is False and "不属于当前画像" in r["error"]
 
-
-def test_project_search_needs_a_direction_first():
-    uid = make_user()
-    r = tools.run(uid, {"tool": "project.search", "args": {}})
-    assert r["ok"] is False and "方向" in r["error"]
+def test_dialogue_keeps_all_seven_profile_and_curriculum_tools():
+    assert set(tools.TOOL_SPECS) == {
+        "course.search", "transcript.summary", "major_lookup", "major_detail",
+        "match_transcript", "minor_programs", "course_lookup",
+    }
