@@ -23,3 +23,15 @@ def test_prefs_reload_failure_blocks_replace():
 
 def test_boot_restores_directions():
     _run("boot")
+
+
+def test_direction_writes_preserve_fresh_trail():
+    _run("r4-dirs")
+
+
+def test_boot_preserves_explicit_trail_state():
+    _run("r4-boot")
+
+
+def test_prefs_failure_has_visible_retry():
+    _run("r4-retry")

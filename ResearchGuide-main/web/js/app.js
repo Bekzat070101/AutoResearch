@@ -2164,8 +2164,18 @@ async function toggleDirSel(nodeId) {
   paintChrome();
 }
 
+async function readTrailForWrite() {
+  try {
+    const t = await api("GET", "/api/projects/" + (S.portraitId || "default") + "/trail");
+    localStorage.setItem(trailStorageKey(), JSON.stringify(t));
+    return t;
+  } catch (_) { toast("没读到已收藏的方向，这次没有改"); return null; }
+}
+
 async function addMyDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
+  const fresh = await readTrailForWrite();
+  if (!fresh) return;
   const prev = trail();
   if (prev.dirs.includes(nodeId)) { toast("已经在我的方向里"); return; }
   if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
@@ -2177,6 +2187,8 @@ async function addMyDirection(nodeId) {
 }
 
 async function removeMyDirection(nodeId) {
+  const fresh = await readTrailForWrite();
+  if (!fresh) return;
   if (!(await loadPrefs())) { toast("没读到已收藏的方向，这次没有改"); return; }
   const t = trail();
   const dirs = t.dirs.filter((x) => x !== nodeId);
@@ -2204,6 +2216,8 @@ async function removeMyDirection(nodeId) {
 
 async function chooseDirection(nodeId) {
   if (!window.RG_DIR || !RG_DIR.byId[nodeId]) { toast("没有这个方向"); return; }
+  const fresh = await readTrailForWrite();
+  if (!fresh) return;
   const backend = RG_DIR.backendCode(nodeId);
   await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
   const withDirs = portraitDirsAdd(nodeId);
@@ -2330,7 +2344,13 @@ async function portraitSection() {
     return (hit && hit.name) || dirTitle(nodeId) || nodeId;
   };
 
-  if (!localIds.length) {
+  if (S.myDirs === undefined) {
+    card.appendChild(el("p", "panel-sub", "收藏未加载，请重试"));
+    const b = el("button", "btn small", "收藏未加载，请重试");
+    b.onclick = async () => { if (await loadPrefs()) { await pullTrail(); setView("me"); } };
+    card.appendChild(b);
+  }
+  if (!localIds.length && S.myDirs !== undefined) {
     const empty = el("p", "panel-sub",
       "这份画像还没有加方向。换一份画像，或先回到当前画像去方向树添加。");
     card.appendChild(empty);
@@ -2340,7 +2360,7 @@ async function portraitSection() {
       go.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
       card.appendChild(go);
     }
-  } else {
+  } else if (localIds.length) {
     const list = el("div", "my-dir-list");
     const selSet = new Set(isActive ? selectedDirs(t) : (shown.sel || []).map((x) => x.node || x));
     localIds.forEach((nodeId) => {
@@ -2984,14 +3004,15 @@ async function ensurePortrait() {
     S.portraitName = "";
   }
   if (S.portraitId) adoptLegacyTrail(S.portraitId);
-  await pullTrail();
+  const state = await pullTrail();
   // 老数据迁移：方向原来存在全局 prefs 里，第一次进画像时收进这份画像的 trail
+  // 只有成功读到、且远端同时缺 dirs/sel 的旧 schema 才迁移；读失败是未知，空数组是明确选择
   const t = trail();
-  if (!t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
+  if (state.loaded && !state.modern && !t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
     const dirs = S.myDirs.filter((id) => !window.RG_DIR || RG_DIR.byId[id]);
     if (dirs.length) await saveTrail({ ...t, dirs, sel: dirs });
   }
-  ensureSelKey();
+  if (state.loaded) ensureSelKey();
   return S.portraitId;
 }
 
@@ -3067,18 +3088,20 @@ function saveTrail(t, force) {
 }
 
 async function pullTrail() {
-  if (!S.token) return;
+  if (!S.token) return { loaded: true, modern: false };
   const pid = S.portraitId || "default";
   try {
     const remote = await api("GET", `/api/projects/${pid}/trail`);
-    if (remote && remote.code) {
+    const modern = Array.isArray(remote?.dirs) || Array.isArray(remote?.sel);
+    if (modern || remote?.code) {
       localStorage.setItem(trailStorageKey(), JSON.stringify(remote));
     } else {
       const local = trail();
       if (local.code) await api("PUT", `/api/projects/${pid}/trail`, { data: local });
     }
-  } catch (_) { /* 先用本地 */ }
-  ensureSelKey();
+    ensureSelKey();
+    return { loaded: true, modern };
+  } catch (_) { return { loaded: false, modern: false }; /* 先用本地，不迁移、不补 sel */ }
 }
 
 function inferredDone(code, tasks) {
