@@ -3817,7 +3817,7 @@ function readDraftMeta(tid) {
     return { base_rev: m.base_rev, edit_seq: m.edit_seq, dirty: !!m.dirty, conflict: !!m.conflict };
   }
   // 升级前的本地稿没有 rev：当作未同步的冲突稿先展示，不静默上传（排序只认服务端 rev，客户端时钟不算数）
-  const legacy = !!readDraft(tid);
+  const legacy = !!readDraft(tid) || !!(m && typeof m === "object" && m.dirty);  // 旧 dirty 空稿是没同步上去的清空
   return { base_rev: 0, edit_seq: 0, dirty: legacy, conflict: legacy };
 }
 function writeDraftMeta(tid, meta) {
@@ -3849,11 +3849,12 @@ function writeDraft(tid, text) {
         if (e && e.status === 409) {
           writeDraftMeta(tid, Object.assign(readDraftMeta(tid), { conflict: true }));
           if (st.onConflict) st.onConflict();
-        }
+        } else if (typeof toast === "function") toast("草稿未同步，联网后重试");
         return;  // 断网：dirty 留着，下次输入或打开再试
       }
       const cur = readDraftMeta(tid);
       const rev = r && typeof r.rev === "number" ? r.rev : sent.base_rev + 1;
+      if (rev < cur.base_rev) continue;  // 更新的 GET 已确认过更高 rev：旧 ack 不降版本
       // 旧 ack 只推进 base_rev；这期间又改过就不清 dirty，接着发
       writeDraftMeta(tid, { base_rev: rev, edit_seq: cur.edit_seq, dirty: cur.edit_seq !== sent.edit_seq, conflict: cur.conflict });
       if (cur.edit_seq === sent.edit_seq) return;
@@ -3867,6 +3868,7 @@ async function hydrateDraft(tid, ta) {
   const sync = (S.draftSync = S.draftSync || {});
   const st = sync[tid] || (sync[tid] = { flight: null, onConflict: null });
   const url = `/api/tasks/${tid}/draft`;
+  if (st.ta !== ta) { st.btn?.remove(); st.btn = null; st.ta = ta; }  // 按钮属于当前表单
   st.onConflict = () => {
     if (!ta || st.btn || !document.createElement) return;
     const b = document.createElement("button");
@@ -3896,7 +3898,7 @@ async function hydrateDraft(tid, ta) {
   const local = readDraftMeta(tid);
   const text = (r && r.text) || "";
   const rev = r && typeof r.rev === "number" ? r.rev : 0;
-  if (local.edit_seq === seq0) {  // GET 等待期间有编辑就不碰输入框
+  if (rev >= local.base_rev && local.edit_seq === seq0) {  // 比本地旧的快照、GET 等待期间有编辑，都不碰输入框
     if (!local.dirty || readDraft(tid) === text) {
       try { localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text); } catch (_) { /* 存不了就只填进框里 */ }
       writeDraftMeta(tid, { base_rev: rev, edit_seq: local.edit_seq, dirty: false, conflict: false });
