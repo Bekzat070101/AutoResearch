@@ -22,11 +22,12 @@ import re
 from typing import Any
 
 import llm
+import guide
 import memory
+import onboarding
 import store
 import tools
 import transcript
-import workbench
 from schemas import now_iso
 
 RECENT_TURNS = 12          # 进环境包的最近消息条数
@@ -36,8 +37,37 @@ RECENT_TURNS = 12          # 进环境包的最近消息条数
 # 留一个很大的安全上限只为防止异常数据把上下文撑爆，正常路径碰不到它。
 RECALL_HARD_CAP = 40
 
-VALID_MOVES = ("answer", "clarify", "propose_action", "execute_action", "correct", "acknowledge_stop")
-VALID_NEXT_ACTIONS = ("explore_direction",)
+VALID_MOVES = ("answer", "clarify", "correct", "acknowledge_stop")
+
+
+def _transcript_history(uid: str) -> list[dict]:
+    """从已保存的准确回执提取简短历史，不新增预览课程记录或重复注入原文。"""
+    result = []
+    for m in store.list_messages(uid):
+        if m["role"] != "assistant":
+            continue
+        text = m["text"]
+        preview = re.match(r"识别出 (\d+) 门课。本次只预览，没有保存课程", text)
+        saved = re.match(r"已(?:识别并保存|保存) (\d+) 门课程记录", text)
+        if preview:
+            result.append({"mode": "preview", "count": int(preview[1]), "saved": False})
+        elif saved:
+            result.append({"mode": "append" if "原有课程保留" in text[:100] else "replace",
+                           "count": int(saved[1]), "saved": True})
+    return result[-5:]
+
+
+def _guide_closing(profile: dict) -> str:
+    areas = {a["id"]: a for a in profile["areas"]}
+    topic = areas["topic"]["summary"]
+    detail = areas["reading"]["summary"] or areas["foundation"]["summary"]
+    support = areas["support"]["summary"]
+    parts = [f"我先按这些理解你：{topic}。"]
+    if detail:
+        parts.append(f"阅读背景是：{detail}。")
+    if support:
+        parts.append(f"希望获得的帮助是：{support}。")
+    return "".join(parts) + "\n\n这些信息已适合开始，可以进入研读模块。没聊到的背景以后再补；哪里不准确，也可以直接纠正我，或留在这里继续聊。"
 
 
 # ---------- §4 环境包 ----------
@@ -52,8 +82,6 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
     recent = store.list_messages(uid, conversation_id=conversation_id, limit=RECENT_TURNS)
     facts = memory.active_facts(uid)
     direction_fact = next((f for f in facts if f.key.startswith("direction:")), None)
-    pending = store.pending_action(uid)
-    ctx = projects_context(uid)
     pid = store.active_portrait_id(uid) or "default"
     trail = store.get_trail(uid, pid) or {}
     trail_dir = str(trail.get("dir") or "")
@@ -73,11 +101,19 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
             "direction": trail_dir or (direction_fact.key.split(":", 1)[1] if direction_fact else ""),
             "trail_dir": trail_dir,
             "direction_source": (direction_fact.key if direction_fact else ""),
-            "practice_stage": ctx.get("stage"),
-            "practice_stage_label": ctx.get("stage_label"),
-            "pending_action": ({"action_id": pending["id"], "action": pending["action"],
-                                "title": pending["title"], "status": pending["status"]}
-                               if pending else None),
+        },
+        "guidance": {
+            "entry_ready": onboard_done(uid),
+            "profile": guide.assess(uid),
+            "transcript_history": _transcript_history(uid),
+            "transcript_available": bool(store.list_enrollments(uid)),
+            # 不依赖最近 12 条消息，长聊或另开会话也不会忘记已经介绍过。
+            "transcript_introduced": any(
+                m["role"] == "assistant" and "树洞" in m["text"] and "成绩单" in m["text"]
+                for m in store.list_messages(uid)
+            ),
+            "preferences": [{"key": f.key, "value": f.value} for f in facts
+                            if f.key.startswith("style:") or f.key == "pace"],
         },
         "recalled_memory": [
             {"id": f.id, "key": f.key, "category": f.category, "value": f.value,
@@ -97,8 +133,7 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
         "ladder": memory.ladder_state(uid),
         "recent_events": [
             {"kind": e["kind"], "at": e["created_at"], "payload": e.get("payload")}
-            for e in store.list_events(uid, kinds=["course_done", "project_submitted",
-                                                   "task_submitted"], limit=5)
+            for e in store.list_events(uid, kinds=["transcript_imported"], limit=5)
         ],
         "world_knowledge": [],
         # 库内事实（代码查的，不是模型的印象）：这一轮说到院系/专业时非空
@@ -112,15 +147,6 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
             "lib_facts": [f["用户说到的词"] for f in lib_facts],
         },
     }
-
-
-def projects_context(uid: str) -> dict[str, Any]:
-    """延迟导入，避免 dialogue ↔ projects 的循环依赖。"""
-    import projects
-    try:
-        return projects.context(uid)
-    except Exception:
-        return {}
 
 
 # ---------- prompt ----------
@@ -160,13 +186,13 @@ def _registry_doc() -> str:
                  "写进对应的 practice / interest 层，别自己造一条经历。")
     lines.append("· transcript:<slug>：成绩单推出来的结论，由代码从底稿算出来。"
                  "它已经在「我记住的」里了（source=derived，带 derived_from），"
-                 "**直接引用，不要重写**。用户说他修过什么课，让他去「我的」页粘成绩单。")
+                 "**直接引用，不要重写**。用户可直接在本对话粘贴树洞成绩单，也可去「我的」页核对。")
     lines.append("另外要注意 capability:<slug> 是**用户自述或你推断**的能力印象"
                  "（「我会一点 Python」），和 transcript:* 的硬证据是两回事，别混着写。")
     lines.append("标了「别问」的字段（性别、年龄）：用户主动说了就存，**但不要追问**——"
                  "它们几乎不改变你的建议，追问只会让人觉得像在填表。")
-    lines.append("「当前实践」= 他此刻手头在做的事（在上的课、在做的项目、在跟的组、卡在哪），"
-                 "这是最值钱也最容易过期的一层，问到了就写，别塞进别的层。")
+    lines.append("「当前实践」= 他主动谈到的手头事情（在上的课、在做的项目、卡在哪），"
+                 "有依据就写，别塞进别的层。它不是引导必答项，不为填满画像专门追问。")
     lines.append("")
     lines.append("【项目要写成一个文件夹，不要拆散】")
     lines.append("用户提到他在做的一个具体项目（比如自己的 App、网站、课题、比赛作品）时，"
@@ -185,43 +211,99 @@ def _registry_doc() -> str:
     return "\n".join(lines)
 
 
-_SYSTEM_BASE = """你是「启研」，面向北大本科一二年级学生的科研导师。
+_SYSTEM_BASE = """你是「启研」的信息了解与答疑助手，产品定位是科研文献伴读。
+你的职责是理解用户背景、维护有依据的画像、回答疑问。具体论文带读、出题和判答由研读模块的独立 Agent 负责。
+对话不是软件主要入口；不要接管阅读流程，不布置任务、作业、练习或打卡，不要求交付物或承诺检查成果。
+用户主动要学习方法时可以解释、给建议，但不要把建议变成待完成的任务。
 
-你像一个熟悉又克制的学长：陈述事实、给出理由，不煽情、不卖课、不堆感叹号。
-你面前的学生不知道自己适不适合科研、该研究什么、从哪开始。你的价值不是给一堆介绍，
-而是让他**真的做出一个行动**，并且让下一步有依据。
+像一个认真听人说话的同学：先回应眼前这句话，再决定有没有必要补问。
+不要每轮复述画像、评价用户或总结成清单；简单回应可以只有一两句，解释复杂概念再展开。
+默认用户是北大学生，不问学校。用户说明其他学校时，如实解释培养方案知识库只覆盖北大。
+个人判断必须来自本轮环境中的事实；专业培养方案仅说明学习背景，不能据此认定他已经掌握其中全部课程。
+也不能凭院系和年级认定他学过某一门课。例如只说「数院大二」，不能说「你手上已有分析、代数、概率」。
+专业知识库用于认标准名称和了解课程背景；对他本人只引用自述、成绩单或真实行为证据。
+不要惯常用「这个底子够用了」「起点很顺」「正好」来评价他，更不要把「能开始阅读」说成「已具备相关能力」。
+不知道就说明不知道，工具失败就如实说明，不编课程、专业、项目或论文。
+解释概念时区分严格定义、常见用法与争议，不把相似情形一律等同，也不把经验规律说成必要条件或保证。
 
-前提：**他就是北大的学生**（这个产品只服务北大，默认如此）。不要问「你是哪个学校」——
-那是在问一件已经知道的事。他若自己说起别的学校，就如实说知识库只覆盖北大培养方案。
+【首次交流与自然提问】
+- 用户直接问问题时先回答，不以补画像为回答的前提。可以没有追问，不必每轮以问号结尾。
+- 了解背景时只补问当前话题确实需要、会影响回答的一件事，一次最多一个问题。
+  年级或专业已知就不重问；用户正在谈阅读主题，就顺着主题聊，不为了填表硬拐到课程。
+- 提问阶梯只是已知信息的参考，不是问卷顺序，不要求逐层问完。
+  禁止用「这学期印象最深/最有意思的课是什么」作为默认破冰问题。
+  用户说想看大模型评测，可以接着问「你更想先看懂评测指标，还是论文中的实验比较？」；
+  用户只是问一个概念，直接解释即可，不必套这句示例。
+- 用户说不知道、跳过、暂时不答或不分享，就接住并换策略：解释、举例或允许他先用软件。
+  不换个说法重复同一问题，不把拒绝理解成基础不足，不用任务替代追问。
+- 用户没有回答你上轮的问题、而是提供了别的信息，也算有效回应。接住新信息，不说「上一轮问的还没答」、
+  「请先回答」「你还没告诉我」这类追缴回答的话；不把你的提问变成他欠下的清单。
+- 环境里的 guidance.entry_ready 为 true 时，现有信息已足以开始使用。
+  不再为「完成引导」收集能力、课程、项目或所有固定字段。只有用户的问题需要时才补问。
+  页面会给一次「进入启研」邀请，你不必每轮重复催进入，也不要说「回答完才能进入」。
+  即使尚未达到推荐条件，用户也能用页面现有按钮跳过交流；不要声称必须交成绩单、定方向或通过测试。
 
-三条铁律：
-1. 行动大于信息。但**不要每句话都塞一个任务**——信息足够或用户想动手时才收口到具体下一步。
-2. 个性化必须有依据。你说的每句关于他的话，都要来自下面「本轮环境」里的事实。
-3. 不编造。不知道就说不知道；工具失败就如实说失败，不要编一个课程或项目顶上。
+【首次认识与后续交流】
+guidance.profile.first_visit=true 才是首次认识；false 时直接按普通对话答疑，不重做开场访谈。
+开场已经邀请用户提供院系、专业、年级、成绩单，以及可选的本学期在修课程。
+先利用这些客观背景。还没分专业时有院系、年级即可，不要求选定标准专业；院系简称用知识库对齐，不追问已知信息。
+知识库帮助你理解标准名称和学科背景；用户没问专业分流或培养方案时，不主动罗列专业、学分或培养要求。
+只有成绩单时，下一步先了解尚未知的院系、专业、年级，例如「你现在在哪个院系、几年级？如果已经分专业也可以一起说」。
+不要立刻跳到「想读哪方面论文」「研究目标是什么」「读过论文吗」；主题不明确不影响继续认识。
+基本背景缺失时一次可以合并问院系、专业、年级；已有的部分不重问，也不每轮重新列一遍开场清单。
+成绩单可选，已导入就使用现有课程；不再索要或逐门重问。不能从成绩单猜年级、院系、专业，更不能认定熟练掌握。
+本学期在修课是可选补充，用 current:course 或合适的 current:<slug> 保存自述，附原话依据。
+身份和成绩单已有、而本学期课程未提及且未拒绝时，可以轻问一次「本学期还有哪些正在上的课程，愿意的话也可以补充」。
+在修自述和成绩单分别保存；不能因为一句自述就声称已把成绩单里的成绩或课程状态修改了。
+只预览时不把课程当真实背景，不索要正式导入；拒绝分享或不清楚的内容就跳过，不能反复追问。
 
-回答长度跟着问题走：简单确认可以很短；复杂问题允许分段讲透，不要为了短而牺牲清楚。
-要解释、可以提假设、可以找反例、可以承认还不知道。不要复述已知信息来凑字数。
-不要问下面「本轮环境」里已经知道的事。一次只问一个最值得问的问题。
+背景有了以后保持对话：先回应这句话里的内容、疑问或补充，再决定是否继续问一个相关、容易回答的问题。
+用户可以主动改变话题；不要为了补齐 profile.missing 逐项采访，也不要每轮「收到」之后马上下一题。
+兴趣、目标、实践、阅读经验和困难自然出现时可以跟进；没有提到就不必挨个追问，也不默认人人有科研或项目经历。
+例如用户主动说想研究 Agent，可以问是否实际使用过这类产品、怎么用；这个例子不能用作所有用户的固定问题。
+用户不清楚主题时，可以顺着正在学的内容或刚才的补充继续聊；不要马上把「先随便看看，之后再来」作为默认出口。
+用户明确要求先结束、不再补背景或先进入时尊重他的选择；原有进入按钮和低信息确认保留，不设置额外门槛。
 
-【怎么问才算自然：按「提问阶梯」走，别跳级】
-「本轮环境」里有 `提问阶梯`，告诉你哪些已经有数、最早的空白层是哪一层。
-顺序是：身份 → 倾向 → 能力起点 → 当前实践。经历和约束不进阶梯。
+已有信息是否适合开始，继续使用 guidance.profile.ready 的现有判断，不增加新问卷、计时或固定轮数。
+它是推荐提示，不是使用权限。不能声称必须先定研究方向、提供成绩单或讲清阅读困难才能进入。
+ready=true 时回顾关键理解并允许纠正，剩余信息以后再补；不再继续采访，不反复催进入。
+reading_experience / reading_barrier / reading_support 只在用户实际提到时记录，value 用有依据的原话，
+category 分别为 background / preference / preference；不为这些字段主动编问题来凑覆盖度。
+明确兴趣也尽量保留原话，例如「对 Agent 的可靠性有点好奇」，不要改写成推断性的兴趣评价。
+具体论文带读仍在研读模块。对话不布置任务、练习或交付物，也不因用户没说某项而判断能力弱。
 
-跳级就是不自然。真实反馈：用户只说了「大二」，系统却跳过「在哪个院系」直接问「上过哪些课」——
-它还没弄清他是谁，就开始问他的能力细节了。
+【成绩单是可选信息来源】
+对话支持直接识别用户粘贴的树洞成绩单，不要说只能到「我的」里导入。
+开场已经介绍时（guidance.transcript_introduced=true），不要再次主动索要或重复操作说明。
+若还未介绍且正好需要了解学习基础，可顺带说一次：在树洞成绩单页全选（Ctrl+A）、复制（Ctrl+C），
+粘贴到这里，能帮助我更全面了解学习基础；不提供也能继续。用户主动询问时再解释操作即可。
+已导入就用现有记录；拒绝后不催问、不要求说明原因。用户说以后再说，就把选择权留给他。
 
-规则：
-- **默认他就是北大学生，不要问「你是哪个学校」**。这个产品只服务北大，培养方案知识库也只有
-  北大的；「你是哪个学校」是在问一件已经知道的事，用户只会觉得你没认真听。
-  他要是自己说「我是清华的」这类，就如实告诉他：知识库只覆盖北大培养方案，其他的只能给通用建议。
-- 要问就问**最早的空白层**。上一层的空白会改变下一层问题的问法，所以顺序不能颠倒。
-- **一次只问一个问题**，而且问具体、能一句话答的（「在上的哪门课让你觉得有意思」），
-  不要问抽象的（「你的兴趣是什么」）。
-- 如果本轮对话上下文明显在别的地方（他在追问一个概念、刚说了件急事），
-  就顺着上下文走，不必强行回到阶梯——**阶梯管的是「你想了解他时问什么」，不是每轮都必须问**。
-- 已经填过的层不要再问。他说过院系就不再问院系，哪怕那层别的东西还空着。
-- 能推出来的别问。他要是已经在做数据分析大作业，就别再问「你有没有编程基础」。"""
+【本轮刚粘贴成绩单时】
+环境里的 transcript_import 非空，说明代码已完成解析和保存/预览，系统会先显示准确的简短回执。
+你只写回执后接着说的话，通常 1–3 句话。直接回应上下文或提出一个轻问题，不再用「收到、已保存、已存进画像」二次确认。
+除非用户明确问某项统计，不重报门数、绩点、均分、学分或逐项列能力，不重复回执。
+用户问统计时用 transcript_import.summary 或查询工具的真实结果；预览的 summary 只属于本次未保存内容，不能说成已保存记录。
+先接用户粘贴前的上下文：如果他同时提问，先答；如果已说过年级、院系或兴趣，不要再采集。
+首次只有成绩单、基本身份未知，且用户没有拒绝补背景时，先问清尚缺的院系、专业、年级。
+例如「你现在在哪个院系、几年级？如果已经分专业也可以一起说。」不以研究主题或阅读目标作为导入后的默认问题。
+不能只说「之后想聊什么随时说」「有问题来问」就结束，否则仍然是导入后的断话。
+已有身份就顺着上下文继续交流；必要时可以问本学期正在上的课程（可跳过），不把未知兴趣自动转成追问研究主题。
+guidance.entry_ready=true 就不再补背景；可简短表示已经可以开始研读，或顺着尚未回答的问题继续。
+mode=preview 时不索要身份、兴趣或要求正式导入；只回应用户的问题，把是否继续留给用户。
+预览仅不保存课程和派生能力，聊天原文仍照常保留；禁止承诺「不留痕」「没有任何记录」「什么都没存」。
+guidance.transcript_history 是跨近期消息窗口的处理历史；其中 preview 表示曾经识别但没有保存，不能把“没有导入”说成“从未预览”。
+不要猜年级、院系、专业、研究方向，也不要把课程成绩说成掌握能力。只在用户自己的引导语中有明确事实时写 memory_ops。
 
+【记忆与回执】
+不把假设、他人经历、示例或你自己的评价写成用户事实。
+用户明确的交流偏好（如「不想分享成绩单」「别问课程」「先解释，不做练习」）应记住：
+用 style:<主题>，value 直接使用能独立理解的用户原话短句，affects=question_next 或 pace。
+不要往 value 里添加原因或「偏好隐私保护」等概括，以免超出引文、写入失败。
+后续更正同一偏好时 replace，别让互相矛盾的偏好并存。
+只有本轮 memory_write 显示真正写入，才可以说「已保存/已更新/已撤回」。
+写入被拒只能说这次没保存成功；source=derived 的成绩单结论不能靠 memory_ops 撤回，
+应说明要在「我的」修改或删除底稿，不能谎称已删。"""
 
 _PROPOSAL_RULES = """【本轮要你输出什么】
 一次输出（JSON），包含四件事：你观察到了什么、要不要改记忆、这一轮说什么、要不要调工具。
@@ -230,6 +312,8 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
   注意：signals 只是你的观察，**不等于要写进记忆**——写不写看下一节。
 
 【写不写进记忆：默认不写，要写就举证】
+本阶段尚未提交记忆，dialogue.reply 不要宣称「已保存/已更新/已撤回」；
+可以回应理解到的内容。真正的提交结果由系统回执或后续生成时的 memory_write 确认。
 先记住一件事——**写错的代价和漏写的代价不对称**：漏写一条，下次再问一遍就行；
 写错一条，它会**静默污染之后的每一个决策**，而且没人会发现。
 （真实事故：模型把「Vibecoding」自己解读成「依赖 AI 生成、代码不是他写的」写进了能力事实，
@@ -276,48 +360,9 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 只写**会改变以后怎么判断他**的东西。一轮里一条都不写是完全正常的。
 - tool_intent：需要看外部信息时才填。不需要就填 null。
   填了工具就必须把 dialogue.reply 留成 null——你要等工具结果回来再写回复。
-- next_action：**默认 null。本轮不派任务。** 只有在他需要去定方向时才填
-  `explore_direction`，让他看右边的方向排序或方向树，不要派微任务。
-
-  【个性化闸门 —— 填之前必须过】
-  1. 不要给 micro_task / review_progress / course_action。那些不再出。
-  2. 你必须能说出它依据了「我记住的」里的哪些事实，并把它们的 id 放进 `based_on`。
-     **填不出 based_on 就不许填 next_action**（代码会直接丢掉它）。
-  3. 用户还没被了解够的时候，正确答案就是 next_action = null，这一轮只问、只讲。
-
-  【什么时候才真的该给】
-  - 方向还没定、他需要去看排序或方向树 → explore_direction。
-  - 其它时候 next_action = null。对话不再布置微任务。
-
-  【最多问两轮】
-  同一个问题（或换个说法问同一件事）**最多连续两轮**。第三轮必须换策略：
-  要么给一个引用现有事实的任务，要么用 offered_actions 给 2–3 个可点的选项让他挑，
-  而不是继续追问。用户不回就是不想答，继续问会变成逼问。
-
-  【不给的情况】
-  - 你手上**一条关于他的事实都没有**（只知道昵称和年级）→ null，这一轮用来问对问题。
-  - 用户给了停顿信号（「先别推进」「我就随便看看」「先不用了」）→ null，
-    move 用 acknowledge_stop。这时候任何任务都是硬塞。
-  - 纯寒暄、用户在反驳你、你只是顺手确认一句 → null。
-
-  **不要每轮都提同一件事。** 上一轮已经说过的任务，除非他主动问起、或者完成了，
-  否则不要再说第二遍。他只是没做，不是没听见。反复催比不给更让人烦。
-
-  【反面教材 —— 这些都被代码拒过，别写】
-  用户只说「信管大二，想走大数据」，就回「找一段抄过的代码关掉讲义重写一遍」。
-  这句对任何一个信管大二学生都成立，等于没有了解他。这一轮该做的是问：
-  你更想往「用数据支持决策」还是「写代码做模型」那一侧走？——然后 next_action = null。
-
-  但反过来，如果他已经说过「Python 只会照着教程抄」，再问第三次「你想往哪一侧走」
-  也是错的——那条事实足够支撑一个具体任务了，就该给出来。
-
-  `offered_actions` 是给用户省力的：当他在两个选项之间犹豫、或者连续没回答你的开放问题时，
-  给 2–3 个可点的短句（每个 ≤20 字）比再问一遍有效。它和 next_action 不冲突，可以同时给。
-
-  action 取值：只许 explore_direction（去看右边的方向排序或方向树）。不派任务。
-  `based_on` 是事实 id 数组，例如 ["f_ab12","f_cd34"]，最多 3 个。
-  **move 和 next_action 是两件独立的事**：move=clarify 表示「我这轮在问一个问题」，
-  不代表「这轮必须给落点」——恰恰相反，还在问的时候通常就不该给。
+- next_action：始终为 null。对话不生成行动卡、不派任务，也不以定方向作为对话收口。
+  offered_actions 仅是可选的用户回复短句，默认空；用户确实不知如何表达时才给 2–3 个中性选项，
+  包含「先跳过」或「暂时不确定」，不要用它塞练习、催交材料或重复追问。
 
 【用户改口的时候】
 用户推翻自己之前说过的（「其实我不是…」「我刚才说错了，只是想…」「那不算了」）时，
@@ -329,15 +374,10 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
 「我记住的」为空时说明没什么可撤的，这时就不用给 retract。
 
 【追问的优先级】
-1. 用户直接要解释、且信息够用 → 先帮，不要先采集画像。
-2. 会导错动作的误解或冲突 → 就冲突问一句；用户已明确更正就直接更正，别再问「确定吗」。
-3. 缺关键先修/目标会让任务不合适 → 问最能改变选择的那一个问题，next_action 留 null。
-   宁可这一轮只问，也不要拿一个对谁都成立的通用任务来填空。
-4. 只剩非必要背景缺口 → 不要追问，但也不硬派任务；可以直接回答或给一个方向性的说法。
-5. 用户不知道/不想答 → 给例子或选项，也允许暂停。
-
-**记住产品目标是「给得对」，不是「给得多」。** 一个泛泛的任务比没有任务更伤：
-用户照做了才知道这事跟谁都能说，信任就掉了。这份系统里「什么都不派」是合法的一轮。
+1. 用户直接要解释 → 先帮；背景不足时说明回答的适用范围。
+2. 已明确更正的内容 → 直接更正；只有真正影响理解的歧义才问一句。
+3. 用户正在了解自己的阅读起点 → 只补问最能帮助当前回答的一项。
+4. 剩余非必要字段、对方不想答或已足以开始 → 停止采集，继续答疑即可。
 
 【工具的纪律】
 - 只读工具。只调一个工具，需要更多信息留到下一轮。
@@ -356,6 +396,9 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
   「帮我查一下」。环境包里的 `他这句话说到的院系/专业（已查好的培养方案原文）` 就是代码
   已经替他查好的，**直接引用**（连来源页一起），不要改写成印象里的说法；他要是接着问
   课程细节，再调 major_detail。
+  这些事实先用于规范身份名称、理解专业背景；用户只是自报专业时不必罗列培养方案、学分或必修课，
+  也不要用「你们有这些课」代替倾听他的阅读兴趣。需要讲课程时再引用相关原文和来源。
+  只报简称时通常一句「信管，也就是信息管理系」就足够；先保存标准名称并顺着话题聊，不展开分流名单。
 - **引用库内事实时只写它真的写了的东西。** 一门课只出现在某个专业的清单里，就不能说成
   「三个专业都有」；拿不准就再查一次（major_lookup / major_detail），或者明说这次没查这一项。
   实测过的错法：「这三个方向的必修都含数据库系统」——图书馆学的核心必修里没有它。
@@ -395,16 +438,14 @@ def _proposal_system() -> str:
   ],
   "tool_intent": null,
   "dialogue": {{
-    "move": "answer|clarify|propose_action|execute_action|correct|acknowledge_stop",
+    "move": "answer|clarify|correct|acknowledge_stop",
     "reason": "为什么选这个动作（不给用户看）",
     "reply": "回复正文；tool_intent 不为 null 时这里是 null",
     "offered_actions": [{{"label": "可点的下一步"}}]
   }},
   "next_action": null
 }}
-next_action 非 null 时形如：
-  {{"action": "explore_direction", "title": "给用户看的一句话", "direction": "ai",
-    "node_id": null, "payload": {{}}, "based_on": ["f_ab12cd34"]}}
+next_action 必须为 null。
 tool_intent 非 null 时形如：
   {{"tool": "major_lookup", "args": {{"query": "信管"}}}}
   字段名就叫 tool（不是 name / tool_name），参数放 args 里；工具名只能用上面列出的那些。
@@ -441,6 +482,9 @@ def _env_for_prompt(env: dict[str, Any]) -> str:
         "用户这轮说": env["current_message"],
         "最近对话": env["recent_context"],
         "当前状态": env["active_plan"],
+        "引导状态与交流偏好": env.get("guidance"),
+        "本轮实际记忆写入 memory_write": env.get("memory_write"),
+        "transcript_import（代码已完成处理，不需要模型解析）": env.get("transcript_import"),
         "我记住的（可引用其 id）": env["recalled_memory"],
         "提问阶梯（哪层有数了、下一层该问什么）": env.get("ladder"),
         "最近发生的事": env["recent_events"],
@@ -525,12 +569,8 @@ def _reply_with_tools(env: dict[str, Any], tool_results: list[dict[str, Any]],
         f"【本轮环境】\n{_env_for_prompt(env)}\n\n"
         f"【你的判断】{json.dumps(proposal.get('dialogue', {}), ensure_ascii=False)}\n\n"
         f"【工具结果】\n{json.dumps(tool_results, ensure_ascii=False, indent=2)}\n\n"
-        "只输出 JSON：{\"reply\": \"给用户的回复\", \"next_action\": null 或 "
-        "{\"action\": \"explore_direction\", "
-        "\"title\": \"给用户看的一句话\", \"direction\": \"方向代码\", \"node_id\": null, \"payload\": {}, "
-        "\"based_on\": [\"f_xxx\"]}}。"
-        "next_action 默认应该是 null：只有能说清「为什么是给他的」时才填，"
-        "并在 based_on 里给出「我记住的」里的事实 id；填不出 based_on 就不要填 next_action。"
+        '只输出 JSON：{"reply": "给用户的回复", "next_action": null}。'
+        "不要生成任务、行动卡或考核步骤；先回答用户这轮的问题。"
     )
     data = llm.chat_json(_reply_system(), user, timeout=45, tag="dialogue.reply", uid=env.get("uid"))
     if not isinstance(data, dict):
@@ -544,22 +584,9 @@ def _reply_with_tools(env: dict[str, Any], tool_results: list[dict[str, Any]],
 # ---------- 规整与校验 ----------
 
 
-def _clean_next_action(raw: Any) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-        return None
-    action = str(raw.get("action") or "").strip()
-    title = str(raw.get("title") or "").strip()
-    if action not in VALID_NEXT_ACTIONS or not title:
-        return None
-    direction = str(raw.get("direction") or "").strip()
-    payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
-    based_on = raw.get("based_on")
-    if not isinstance(based_on, list):
-        based_on = []
-    based_on = [str(x) for x in based_on if isinstance(x, (str, int))][:3]
-    return {"action": action, "title": title[:120], "direction": direction[:20],
-            "node_id": str(raw.get("node_id") or "")[:64] or None, "payload": payload,
-            "based_on": based_on}
+def _clean_next_action(raw: Any) -> None:
+    """兼容旧响应形状，但任何模型输出都不能再生成对话行动。"""
+    return None
 
 
 def _clean_proposal(data: Any) -> dict[str, Any] | None:
@@ -642,6 +669,21 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
     保底行为：把用户这条消息交给现有的 onboarding 规则抽取（选项命中 → 预设事实），
     然后按「还没方向就请他看右边排序」给出下一步。规则版不派任务。这样不配 key 也能跑通全链路。
     """
+    if env.get("transcript_import"):
+        mode = env["transcript_import"]["mode"]
+        known = {x["layer"]: x["known"] for x in env["ladder"].get("layers", [])}
+        if mode == "preview":
+            reply = "这次先保持预览。如果有想了解的地方，可以直接问我。"
+        elif env["guidance"]["entry_ready"]:
+            reply = "现有信息已经够开始使用，其他背景以后需要时再补。也可以继续在这里问问题。"
+        elif not known.get("identity"):
+            reply = "这些记录能帮我了解你接触过的课程，但不代表已经熟练掌握。你现在读什么专业？"
+        else:
+            reply = "这些课程会作为后续解释的背景。你最近想了解什么主题？暂时没想好也没关系。"
+        return {"understanding": {"gist": "处理成绩单后继续交流"}, "memory_ops": [],
+                "tool_intent": None, "dialogue": {"move": "answer", "reason": "导入后接话降级",
+                "reply": reply, "offered_actions": []}, "next_action": None}
+
     ops: list[dict[str, Any]] = []
     try:
         import onboarding
@@ -675,13 +717,13 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
                  f"\n（这一轮模型不可用，名单是本地知识库返回的原文。）")
         move, next_action = "answer", None
     elif not plan.get("direction"):
-        move, reply = "clarify", "先看看你更想往哪个方向走：把你现在最想弄清楚的一个问题说给我，我据此给几个可选方向。"
+        move, reply = "clarify", "这一轮模型暂时不可用，无法可靠理解或保存新的背景信息。你可以先进入启研使用研读模块，稍后再来聊。"
         next_action = None
     elif not plan.get("pending_action") and dir_id:
-        move, reply = "clarify", "可以看看右边按你说过的排的方向，或去今日读一篇。"
+        move, reply = "clarify", "这一轮模型暂时不可用。已有背景仍保留，你可以先使用研读模块，稍后再来问。"
         next_action = None
     else:
-        move, reply = "clarify", "接着上次那件事说：现在卡在哪一步？"
+        move, reply = "clarify", "这一轮模型暂时不可用，无法可靠回答这个问题。已有信息仍保留，可以稍后重试。"
         next_action = None
 
     return {
@@ -697,25 +739,27 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
 # ---------- 主入口 ----------
 
 
+def _transcript_context(message: str) -> str:
+    """保留粘贴前的用户原话，课程数据只用已提交的结构化结果。"""
+    lead = re.split(r"\d{2}-\d{2}学年度[123]学期", message, maxsplit=1)[0]
+    lead = re.sub(r"成绩查询|刷新|隐藏文字|显示文字", "", lead).strip()[:500]
+    return (lead + "\n" if lead else "") + "（用户粘贴了成绩单，代码处理结果见 transcript_import。）"
+
+
 def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
-    """用户把成绩单直接粘进了对话。
-
-    用户的原话：「为什么我直接在对话里输入成绩单，不能直接智能识别？
-    只能在核对页面手动输入才能识别」
-
-    **这一轮不调模型。** 理由：成绩单是固定格式的数据，解析是确定性的
-    （`transcript.parse_transcript` 有 78 条测试钉着）。让模型去"理解"一份
-    60 行的教务导出，只会更慢、更贵，而且可能把「学分 3」当闲聊。
-    解析 + 落库 + 如实回报，这才是「智能识别」该有的样子。
-
-    识别不出来时**明确说为什么**，并指向核对页——那里是手动的兜底路径。
-    """
-    parsed = transcript.parse_transcript(message)
+    """确定性解析与提交，不让模型决定课程/分数；返回回执，由 turn_steps 接回自然对话。"""
+    header = re.search(r"\d{2}-\d{2}学年度[123]学期", message)
+    # 操作说明不是成绩单的一行；不把「只检查/追加」误报成未识别的课程。
+    parsed = transcript.parse_transcript(message[header.start():] if header else message)
     courses = parsed["courses"]
     warnings = parsed["warnings"]
+    # 尊重粘贴前的明确意图：只预览不落库，补充不覆盖已有记录。
+    lead = re.split(r"\d{2}-\d{2}学年度[123]学期", message, maxsplit=1)[0]
+    preview = bool(re.search(r"不要(?:导入|保存|写入)|不(?:保存|写入)|先别(?:导入|保存|写入)|只(?:预览|检查|看看)", lead))
+    append = bool(re.search(r"追加|补充|增补|不要替换|别替换", lead))
 
     written = 0
-    if courses:
+    if courses and not preview:
         clean = []
         for it in courses:
             course = str(it.get("course") or "").strip()
@@ -734,7 +778,8 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
         if clean:
             # 成绩单是**整份替换**：他粘的是当前完整成绩单，
             # append 会让重复粘贴产生重复课程。
-            written = store.replace_enrollments(uid, clean)
+            written = (store.add_enrollments(uid, clean) if append
+                       else store.replace_enrollments(uid, clean))
             store.add_event(uid, "transcript_imported", "",
                             {"count": written, "via": "dialogue"})
 
@@ -747,47 +792,19 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
                if str(f.key).startswith("transcript:") and str(f.key) in derived_keys]
     s = transcript.summarize(courses) if courses else {}
 
-    # ---- 回复：把「我读出了什么」逐项说清，不替用户下结论 ----
-    lines: list[str] = []
-    if written:
-        lines.append(f"我认出这是成绩单，已经读进去了：**{written} 门课**，"
-                     f"共 {s.get('passed_credits', 0)} 学分通过。")
-        if s.get("gpa") is not None:
-            lines.append(f"按教务口径算，加权平均绩点是 **{s['gpa']:.4f}**"
-                         f"（只算有百分制成绩的 {s.get('gpa_credits', 0)} 学分）。")
-        # 字母等级/五级制**没有**换算成绩点，这件事必须说出来，
-        # 否则用户会以为绩点已经把所有课都算进去了。
-        ungraded = s.get("ungraded") or []
-        if ungraded:
-            names = "、".join(f"{u['course']}（{u['grade']}）" for u in ungraded[:6])
-            more = f" 等 {len(ungraded)} 门" if len(ungraded) > 6 else ""
-            lines.append(f"有 {len(ungraded)} 门是字母等级/五级制，"
-                         f"**没有算进绩点**：{names}{more}。"
-                         "教务对这类课的换算口径我不敢替你定，所以宁可不算。")
-        cur = s.get("in_progress") or []
-        if cur:
-            names = "、".join(c["course"] for c in cur[:6])
-            more = f" 等 {len(cur)} 门" if len(cur) > 6 else ""
-            lines.append(f"另外 {len(cur)} 门还在修（成绩没出）：{names}{more}。")
-        if derived:
-            lines.append("从这份底稿我推出几条结论，写进「能力」了：")
-            for d in derived[:4]:
-                lines.append(f"· {d.value}")
-        lines.append("你可以在右边的「它记住的我」里看到，也可以去「我的」页核对。")
+    # 数字回执由代码保证准确，明细交给可展开回执，不再向气泡塞整份统计。
+    if courses and preview:
+        reply = f"识别出 {len(courses)} 门课。本次只预览，没有保存课程，也没有更新能力记录。"
+    elif courses and append and not written:
+        reply = "这些课程已经在记录里，本次没有新增或替换。"
+    elif written:
+        reply = (f"已保存 {written} 门课程记录。原有课程保留。" if append
+                 else f"已识别并保存 {written} 门课程记录，替换当前画像的原有课程。")
+        reply += "课程和成绩的明细可以在下方展开查看。"
     else:
-        lines.append("这看起来像成绩单，但我一门课都没读出来。")
-        lines.append("多半是缺了学期标题行（形如「25-26学年度1学期」）——"
-                     "教务导出里每一门课都要挂在某个学期下面，没有它我不敢猜是哪门课。")
-
+        reply = "这看起来像成绩单，但没有识别到课程。可以检查学期标题是否完整，或到「我的」页核对。"
     if warnings:
-        lines.append("")
-        lines.append(f"有 {len(warnings)} 处我没看懂，先列出来，不替你补：")
-        for w in warnings[:6]:
-            lines.append(f"· {w}")
-
-    reply = "\n".join(lines)
-    store.add_message(uid, "assistant", reply, conversation_id=cid)
-    store.touch_conversation(uid, cid, topic_hint="导入成绩单")
+        reply += f"另有 {len(warnings)} 处没看懂，没有替你补写；详情也在下方。"
 
     return {
         "reply": reply,
@@ -799,13 +816,15 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
         "tool_results": [],
         # 成绩单导入**不产生行动卡**：这是一次数据录入，不是一步行动。
         "next_action": None,
-        "pending_action": _public_action(store.pending_action(uid)),
+        "pending_action": None,
         "offered_actions": [],
         "move": "answer",
+        "onboard_done": onboard_done(uid),
         "degraded": False,
         "fabrication_risk": False,
         "transcript_import": {
             "written": written,
+            "mode": "preview" if preview else ("append" if append else "replace"),
             "warnings": warnings,
             "summary": s,
             # 转成普通 dict：UserFact 不能直接进 JSON
@@ -838,15 +857,32 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
     store.add_message(uid, "user", message, conversation_id=cid)
     store.add_event(uid, "turn", source_id=cid, payload={"chars": len(message)})
 
-    # 粘进来的是成绩单 → 直接导入，不调模型。
-    # 放在最前面（早于 observe）：它不需要环境包，也不需要模型判断。
+    # 数据仍由代码解析；完成后继续走同一对话内核，避免回执之后突然断话。
+    imported = None
     if transcript.looks_like_transcript(message):
         yield ("stage", {"name": "memory"})
-        yield ("result", _transcript_turn(uid, cid, message))
-        return
+        imported = _transcript_turn(uid, cid, message)
+        if stream_reply:
+            yield ("delta", {"text": imported["reply"] + "\n\n"})
 
     yield ("stage", {"name": "observe"})
     env = build_env(uid, cid, message)
+    if imported:
+        imp = imported["transcript_import"]
+        env["transcript_import"] = {
+            "mode": imp["mode"], "written": imp["written"],
+            "parsed_courses": imp["summary"].get("total", 0),
+            "stored_courses": len(store.list_enrollments(uid)),
+            "summary": imp["summary"],
+            "warnings": imp["warnings"],
+        }
+        # 这次模型负责接话，不重读整份成绩单；明确的用户引导语仍可抽取身份/兴趣。
+        env["current_message"] = _transcript_context(message)
+        env["recent_context"] = [
+            {**m, "text": _transcript_context(m["text"])}
+            if m["role"] == "user" and transcript.looks_like_transcript(m["text"]) else m
+            for m in env["recent_context"]
+        ]
     degraded = False
 
     yield ("stage", {"name": "decide"})
@@ -869,12 +905,30 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
     if added or changed:
         store.bump_memory_version(uid)
 
+    # 第二次生成（含真实 SSE）看到实际提交结果，不能把被拒的记忆说成已保存。
+    env["memory_write"] = {"added": added, "changed": changed, "rejected": rejected}
+    previous_ready = env["guidance"]["entry_ready"]
+    env["guidance"]["profile"] = guide.assess(uid)
+    env["guidance"]["entry_ready"] = env["guidance"]["profile"]["ready"]
+    env["guidance"]["entry_became_ready"] = not previous_ready and env["guidance"]["entry_ready"]
     reply = proposal["dialogue"]["reply"]
     next_action = proposal.get("next_action")
     intent = proposal.get("tool_intent")
     fabrication_risk = False
 
-    if intent:
+    # 达到推荐条件的一次性产品回顾由已提交事实生成，防止模型继续发起背景访谈。
+    # 同轮有明确问题时仍先正常答疑，页面邀请负责提示，不覆盖用户的问题。
+    guide_closing = (env["guidance"].get("entry_became_ready")
+                     and env["guidance"]["profile"]["first_visit"]
+                     and not re.search(r"[?？]|是什么|怎么|为什么|如何|能否|是不是|有什么区别|多少", message))
+    if guide_closing:
+        tool_results = []
+        reply = _guide_closing(env["guidance"]["profile"])
+        proposal["dialogue"]["offered_actions"] = []
+        yield ("stage", {"name": "compose"})
+        if stream_reply:
+            yield ("delta", {"text": reply})
+    elif intent:
         # 有工具：调用②必须等结果，且要同时给出下一步，所以走 JSON（非流式）。
         yield ("stage", {"name": "tool", "tool": intent.get("tool")})
         result = tools.run(uid, intent, context={"query_hint": message})
@@ -908,27 +962,12 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
     if not reply:
         reply = "我在，但这一轮我没能组织好回复。你可以再说一句你想弄清楚的问题。"
         degraded = True
+    if imported:
+        reply = imported["reply"] + "\n\n" + reply
 
-    next_action = _validate_next_action(uid, next_action)
-
-    # 用户明确说停：把还开着的行动收掉，不留悬着的东西（由 move 决定，属执行不属决策）
-    if proposal["dialogue"]["move"] == "acknowledge_stop":
-        store.abandon_open_actions(uid)
-
-    # next_action 只表示「这一轮决定给的落点」，没有就是 null——
-    # 不要用「当前还挂着的行动」回填，否则「这轮不该派任务」这个判断就没法从响应里看出来。
-    if next_action:
-        store.abandon_open_actions(uid)
-        saved = store.save_action(
-            uid, conversation_id=cid, action=next_action["action"], title=next_action["title"],
-            direction=next_action["direction"], node_id=next_action.get("node_id") or "",
-            payload=next_action.get("payload") or {}, status="offered",
-            based_on=next_action.get("based_on") or [],
-        )
-        next_action = _public_action(saved)
-
-    # 当前仍开着的行动（界面状态），与上一项分开
-    pending_action = _public_action(store.pending_action(uid))
+    # 代码侧关掉派任务入口，不能仅依赖提示词或模型自觉。
+    next_action = None
+    pending_action = None
 
     store.add_message(uid, "assistant", reply, conversation_id=cid)
     store.touch_conversation(uid, cid, topic_hint=(proposal["understanding"].get("gist") or "")[:200])
@@ -950,6 +989,9 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         "fabrication_risk": fabrication_risk,
         "trace": env["trace"],
         "onboard_done": onboard_done(uid),
+        "guide": guide.assess(uid),
+        "guide_completed": bool(guide_closing),
+        **({"transcript_import": imported["transcript_import"]} if imported else {}),
     })
 
 
@@ -1000,98 +1042,33 @@ def _tool_fallback_reply(result: dict[str, Any]) -> str:
     return f"查到了（{name}），但没有合适的结果。先不硬凑，我们换个角度看看。"
 
 
-def _validate_next_action(uid: str, next_action: dict[str, Any] | None) -> dict[str, Any] | None:
-    """方向必须属于当前画像生效的方向；任务必须说得出「为什么是给他的」。
-
-    最后一条是「个性化必须有依据」的代码化：任务要引用至少一条本画像的真实事实
-    （`based_on` 里的 fact id 必须存在且生效）。引不到依据的，多半是换个用户也照样成立的
-    套话（「关掉教程重写一段代码」），一律不给——宁可这一轮只问只讲，也不要发一个
-    不痛不痒的任务。产品的失败模式不是「给得太少」，是「给得不相干」。
-    """
-    if not next_action:
-        return None
-    facts = memory.active_facts(uid)
-    facts_by_id = {f.id: f for f in facts}
-
-    # —— 个性化闸门 ——
-    valid_ids = [i for i in (next_action.get("based_on") or []) if i in facts_by_id]
-    if not valid_ids:
-        return None
-    next_action["based_on"] = valid_ids
-
-    directions = {f.key.split(":", 1)[1] for f in facts if f.key.startswith("direction:")}
-    direction = next_action.get("direction") or ""
-    if directions:
-        if direction not in directions:
-            next_action["direction"] = sorted(directions)[0]
-    return next_action
-
-
 def onboard_done(uid: str) -> bool:
-    """开场聊完：phase 到 done，或已有方向，或身份层与倾向层都有数。"""
-    state = store.get_onboard_state(uid)
-    if state.get("phase") == "done":
-        return True
-    facts = memory.active_facts(uid)
-    if any(f.key.startswith("direction:") for f in facts):
-        return True
-    ladder = memory.ladder_state(uid)
-    known = {x["layer"]: x["known"] for x in ladder.get("layers") or []}
-    return bool(known.get("identity") and known.get("interest"))
+    """推荐开始的覆盖度；兼容字段名，不是阻止进入的权限判断。"""
+    return guide.assess(uid)["ready"]
 
 
 def _sync_onboard_state(uid: str, env: dict[str, Any]) -> None:
     """让旧向导（/api/onboard/*）与新内核看到同一份进度，避免两套状态打架。"""
     state = store.get_onboard_state(uid)
-    if state.get("phase") == "done":
-        return
-    if env["active_plan"].get("direction"):
-        store.set_onboard_state(uid, {**state, "phase": "done", "round_no": 999})
+    store.set_onboard_state(uid, {**state, "phase": "done" if onboard_done(uid) else "gathering"})
 
 
 # ---------- 行动事件（契约 §6）----------
 
 
-_ACTION_EVENTS = {
-    "accept": "accepted",
-    "decline": "abandoned",
-    "complete": "completed",
-}
-
-
 def action_event(uid: str, action_id: str, event: str) -> dict[str, Any] | None:
-    """用户对某个行动表态。代码落状态，不交给模型。
-
-    **accept 必须产生一个真任务**，这是「对话出任务 → 任务区完成 → 回对话」
-    这条链路的唯一接点。原来这里只改状态 + 写事件，`tasks` 表始终是空的，
-    于是用户点进任务区什么都没看到，也没法完成——他问过两次这个问题。
-    """
-    target = _ACTION_EVENTS.get((event or "").strip())
-    if not target:
+    """旧客户端只可关闭历史卡片；不可再从对话创建或完成任务。"""
+    if event not in ("accept", "complete", "decline"):
         raise ValueError(f"unknown event: {event}")
     a = store.get_action(uid, action_id)
     if not a:
         return None
-    store.update_action(uid, action_id, target)
-    store.add_event(uid, f"action_{target}", source_id=action_id, payload={"action": a["action"]})
-
-    task = None
-    if target == "accepted" and a.get("action") != "explore_direction":
-        # 建任务本身是幂等的：同一张卡重复 accept 不会造出第二个
-        # explore_direction 只导航，不建任务；老的 micro_task 卡仍建。
-        task = workbench.task_from_action(uid, a)
-        store.add_event(uid, "task_created", source_id=action_id,
-                        payload={"task_id": task.id, "origin": task.origin})
-    elif target == "completed":
-        # 只记事件是不够的：完成这件事必须有**交付内容**。
-        # 真提交走 /api/tasks/{tid}/submit（那里会写 experience 事实 + 出反馈），
-        # 这条事件只用于兼容旧路径，界面上已经不给「标记完成」了。
-        store.add_event(uid, "task_submitted", source_id=action_id, payload={"title": a["title"]})
-
-    out = _public_action(store.get_action(uid, action_id))
-    if task is not None:
-        out["task_id"] = task.id
-    return out
+    if event != "decline":
+        raise ValueError("对话不再布置任务；历史任务请在原任务模块查看")
+    store.update_action(uid, action_id, "abandoned")
+    store.add_event(uid, "action_abandoned", source_id=action_id,
+                    payload={"action": a["action"]})
+    return _public_action(store.get_action(uid, action_id))
 
 
 def _public_action(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1142,25 +1119,15 @@ def _fact_text(fact_id: str) -> str:
 
 def history(uid: str, conversation_id: str | None = None) -> dict[str, Any]:
     msgs = store.list_messages(uid, conversation_id=conversation_id)
-    pending = store.pending_action(uid)
-    last = store.last_action(uid)
-    # just_finished：刚在任务区交掉的那一步。用户在任务区做完回到对话，
-    # 需要看到「你刚做完 X」而不是一片空白——那正是「回到对话」这一步的意义。
-    just = None
-    if last and last.get("status") == "completed" and (not pending or pending["id"] != last["id"]):
-        evs = store.list_events(uid, kinds=["task_submitted"], limit=50)
-        ev = next((e for e in reversed(evs) if e.get("source_id") == last["id"]), None)
-        just = {
-            "action_id": last["id"],
-            "title": last.get("title") or "",
-            "payload": (ev or {}).get("payload") or {},
-        }
     return {
         "messages": [{"role": m["role"], "text": m["text"], "at": m["created_at"]}
                      for m in msgs if m["role"] in ("user", "assistant")],
         "conversations": store.list_conversations(uid),
-        "pending_action": _public_action(pending),
-        "last_action": _public_action(last),
-        "just_finished": just,
+        "pending_action": None,
+        "last_action": None,
+        "just_finished": None,
+        "welcome_message": (onboarding.WELCOME_MESSAGE if guide.assess(uid)["first_visit"]
+                            else "想继续聊什么？可以直接问问题，或补充最近的阅读情况。"),
         "onboard_done": onboard_done(uid),
+        "guide": guide.assess(uid),
     }

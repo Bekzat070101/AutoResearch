@@ -112,7 +112,8 @@ def _routes() -> dict[str, set[str]]:
 def test_every_private_route_refuses_requests_without_a_session(client):
     checked = 0
     for path, methods in _routes().items():
-        if path in auth.PUBLIC:
+        # 管理接口使用独立 X-Admin-Token；其拒绝语义是 403/未配置 503，不走普通会话 401。
+        if path in auth.PUBLIC or path.startswith("/api/admin/"):
             continue
         url = path.replace("{", "").replace("}", "")  # 路径参数随便填
         for method in methods:
@@ -120,6 +121,14 @@ def test_every_private_route_refuses_requests_without_a_session(client):
             assert r.status_code == 401, f"{method} {path} 没登录也进去了：{r.status_code}"
             checked += 1
     assert checked > 50
+
+
+def test_admin_token_is_independent_from_normal_login(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "isolated-test-admin-token-000000000000")
+    uid, token = _guest(client)
+    assert client.get("/api/admin/feedback").status_code == 403
+    assert client.get("/api/admin/feedback", headers=_h(token)).status_code == 403
+
 
 
 def test_public_list_only_names_routes_that_exist():
