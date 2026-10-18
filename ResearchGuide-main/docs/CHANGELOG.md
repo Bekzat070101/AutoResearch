@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-18] [FIX] 第三轮实施令第一批：恢复/换钥/草稿/收藏/登录桶/发布门/探活
+
+- 变更内容：按 docs/tasks/20、21 的实施令，由四个 Opus 5.5 实现会话在各自分支完成后并入：20-R01 恢复用唯一 stage 文件 + 连接闸（`store.restore_gate`），写入/校验/替换失败保留原库，换入后清理失败返回 200 带 `cleanup_pending`/`warning`；20-R02 `drafts` 表加 `rev`，`PUT /api/tasks/{tid}/draft` 按 `base_rev` 做 CAS（不等 → 409「草稿已在别处更新，本地稿已保留」），前端草稿按 uid/tid 记 `edit_seq/dirty`，旧响应不再覆盖新稿，409 给「用本地稿覆盖云端」；20-R03 `loadPrefs` 失败置 `undefined`，写收藏前重新 GET，`boot()` 恢复 directions；20-R04 rewrap 按快照密文 CAS，学生并发重存 → 409 `secret_changed`；20-R05 `_HITS` 总数上限 10000、用户名桶 600 秒过期、满时拒绝新桶，形状不对的用户名直接 401 不建桶；21-D02 生产发布须 `QIYAN_DB` 落在函数已配置的 NAS 挂载目录（`fc_safety.nas_mount_dirs/assert_db_under_nas`），缺探活地址或 health 非 `ephemeral=false && writable=true` 不写成功状态，health 增加 `db.writable`；21-D11 uptime 按唯一 wN 比对 Pages 与 API，`QIYAN_REQUIRE_PERSISTENT` 时 ephemeral 必须是 JSON false；21-D13 `deploy_fc.llm_settings()` 只取第一个有密钥的源整组配置；21-D29 备份 OSS 失败 502 回包补 `ok:false`。新测试：`test_admin.py`（恢复并发/清理/连接闸、rewrap CAS、备份回包）、`test_user_store.py`（草稿 CAS）、`test_frontend_state.py` + `tools/verify/verify_frontend_state.js`（草稿同步、收藏重读、boot 恢复）、`test_auth_password.py`（桶上限）、`test_uptime_workflow.py`、`test_deploy_fc.py`（NAS 门、模型配置源）。全量 1173 passed（3.12、3.11）。Codex 第四轮复核进行中，结论回写 docs/tasks/20、21。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/admin.py、server/store.py、server/main.py、server/auth.py、web/js/app.js、tools/deploy/fc_safety.py、tools/deploy/deploy_fc.py、tools/verify/verify_frontend_state.js、.github/workflows/uptime.yml、server/tests/
+- 决策来源：陈浩文（按 20/21 实施令）
+- 登记人：陈浩文
+
 ## [2026-10-18] [FIX] 并入 main（w97：画像内多选方向、画像命名、意见反馈、研读/论文页工具栏）
 
 - 变更内容：把上游 57f4464（Yukinannie 的 w97，经 PR #18 合入 main）并进本分支。3 处冲突的对接：`POST /api/portraits/rename` 加本分支的 `dependencies=SERIAL`（按人串行），`DELETE /api/portraits/{pid}` 保留本分支的 SERIAL + `_model_work`；app.js 的页面分发仍用本分支带 try/catch 的 switch，加 `feedback` 视图；上游新的「画像与方向」面板整体采用，但切换/新建/删除三处改走本分支 `portraitOp`（服务器成功后才改前端画像、换画像时清上一份的方向/项目/定位草稿、防连点），`portraitOp` 加 `after` 钩子；`clearSession` 补清 `portraitName/mePortrait`；界面 w98（上游 w97 与本分支 w84 内容不同）。其余原样并入：`feedback` 表与 `/api/feedback`、`/api/admin/feedback*`、`portraits.name` 迁移、`interests.direction_nodes`（trail.sel 多选）、`daily_for_user` 合并多方向目录、研读 `read-toolbar`、论文页 `paper-tools` 与滚动联动、`test_feedback.py`。
