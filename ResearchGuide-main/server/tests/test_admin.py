@@ -28,6 +28,7 @@ def fresh(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKUP_KEY", "backup-key-16++++")
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "bk"))
     monkeypatch.setenv("QIYAN_SNAP", str(tmp_path / "snap.db"))
+    monkeypatch.delenv("BACKUP_OSS_BUCKET", raising=False)
     monkeypatch.setattr(llm, "enabled", lambda uid=None: False)
     admin.SNAP = tmp_path / "snap.db"
 
@@ -185,6 +186,7 @@ def test_collect_lock_blocks_second(client, monkeypatch):
     assert r.status_code == 409
     store.release_collect_lock()
     monkeypatch.setattr(paper_collect, "collect_node", lambda *a, **k: {"node": "520.20"})
+    monkeypatch.setattr(paper_collect, "_pin_kit", lambda: 0)
     r2 = client.post("/api/admin/papers/collect?node=520.20&max_seconds=240",
                      headers={"X-Admin-Token": TOKEN})
     assert r2.status_code == 200, r2.text

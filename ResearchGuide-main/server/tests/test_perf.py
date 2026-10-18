@@ -524,12 +524,21 @@ def test_slow_dns_counts_against_the_deadline(monkeypatch):
     import urllib.request
     import limits
     _dns_idle()
-    real = socket.getaddrinfo
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: time.sleep(BLOCK) or real(*a, **k))
-    t0 = time.perf_counter()
-    with pytest.raises(limits.ReadLimitError):
-        limits.fetch(urllib.request.Request("http://example.invalid/"), timeout=0.08, max_bytes=1000)
-    assert time.perf_counter() - t0 < QUICK
+    release = threading.Event()
+
+    def fake_dns(*a, **k):
+        assert release.wait(5)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_dns)
+    try:
+        t0 = time.perf_counter()
+        with pytest.raises(limits.ReadLimitError):
+            limits.fetch(urllib.request.Request("http://example.invalid/"), timeout=0.08, max_bytes=1000)
+        assert time.perf_counter() - t0 < QUICK
+    finally:
+        release.set()
+        _dns_idle()
 
 
 def test_prefixed_zip64_is_checked_before_parsing(monkeypatch):
@@ -1024,18 +1033,29 @@ def test_cached_papers_do_not_queue_behind_slow_fetches(tmp_path, monkeypatch):
     monkeypatch.setattr(arxiv, "CACHE_DIR", tmp_path)
     (tmp_path / "2310.17623.json").write_text(_json.dumps(
         {"id": "2310.17623", "title": "T", "source": "html", "text": "Abstract\\nx", "url": "u", "tables": []}), encoding="utf-8")  # 带 tables：没有的旧缓存会被重取（上游 w74）
-    gate = threading.Event()
-    monkeypatch.setattr(arxiv, "papers", lambda ids: gate.wait(10) and [])  # 没缓存的论文：卡在取元数据上
+    gate, started, mu, n = threading.Event(), threading.Event(), threading.Lock(), [0]
+
+    def html(*a, **k):  # 没缓存的论文：卡在取正文 HTML 上
+        with mu:
+            n[0] += 1
+            if n[0] >= 4:
+                started.set()
+        assert gate.wait(5)
+        return ("<html><article><p>" + "body " * 500 + "</p></article></html>").encode()
+
+    monkeypatch.setattr(arxiv, "_get", html)
 
     async def go():
         async with _asgi() as c:
             slow = [asyncio.create_task(c.get(f"/api/papers/2401.{i:05d}")) for i in range(6)]  # 占满 arXiv 线程池
-            await asyncio.sleep(0.1)
-            t0 = time.perf_counter()
-            hit = await c.get("/api/papers/2310.17623")
-            waited = time.perf_counter() - t0
-            gate.set()
-            await asyncio.gather(*slow)
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                t0 = time.perf_counter()
+                hit = await c.get("/api/papers/2310.17623")
+                waited = time.perf_counter() - t0
+            finally:
+                gate.set()
+                await asyncio.gather(*slow)
             return hit.status_code, hit.json()["title"], waited
 
     code, title, waited = asyncio.run(go())
