@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import auth
@@ -124,7 +125,12 @@ def _get_oss(name: str) -> bytes | None:
 @router.post("/api/admin/backup")
 def backup(request: Request):
     _admin(request)
-    return make_backup()
+    try:
+        return make_backup()
+    except HTTPException as exc:
+        if exc.status_code != 502:
+            raise
+        return JSONResponse(status_code=502, content={"ok": False, "detail": exc.detail})
 
 
 class RestoreReq(BaseModel):

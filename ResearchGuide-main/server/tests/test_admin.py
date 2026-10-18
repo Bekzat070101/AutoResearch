@@ -319,3 +319,31 @@ def test_rewrap_concurrent_mine_save_preserves_latest_ciphertext(client, monkeyp
     assert meta["tail"] == "9999" and meta["base_url"] == "https://new.example/v1"
     assert meta["model"] == "new-model"
     assert os.environ["QIYAN_SECRET"] == "new-wrap"
+
+
+def test_oss_failure_has_false_ok_contract(client, monkeypatch):
+    """D29：OSS 上传失败 502 回包精确为 ok:false + detail；成功仍 200/oss:ok。"""
+    monkeypatch.setenv("BACKUP_OSS_BUCKET", "qiyan-bak")
+    monkeypatch.setenv("BACKUP_OSS_ACCESS_KEY_ID", "id")
+    monkeypatch.setenv("BACKUP_OSS_ACCESS_KEY_SECRET", "secret")
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("https://oss", 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    r = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN})
+    assert r.status_code == 502
+    assert r.json() == {"ok": False, "detail": "OSS 上传失败：HTTPError"}
+
+    class Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b"ok"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Resp())
+    ok = client.post("/api/admin/backup", headers={"X-Admin-Token": TOKEN})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["oss"] == "ok"
