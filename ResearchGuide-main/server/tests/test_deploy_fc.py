@@ -50,7 +50,7 @@ def test_refuse_private_tmp_and_unmounted_data():
     with pytest.raises(SystemExit, match="临时目录"):
         fc_safety.refuse_unsafe({**creds, "QIYAN_DB": "/private/tmp/qiyan.db"}, "qiyan", False)
     with pytest.raises(SystemExit, match="挂载"):
-        fc_safety.refuse_unsafe({**creds, "QIYAN_DB": "/data/qiyan.db"}, "qiyan", False)
+        fc_safety.assert_db_under_nas("/data/qiyan.db", [])
 
 
 def test_assert_health_persistent():
@@ -83,3 +83,34 @@ def test_local_defaults_returns_three_keys(monkeypatch):
     assert got["LLM_BASE_URL"]
     assert got["LLM_MODEL"]
     assert "key" in ns["llm_settings"]() and "base_url" in ns["llm_settings"]() and "model" in ns["llm_settings"]()
+
+
+GOOD_ENV = {"QIYAN_DB": "/mnt/nas/qiyan.db", "QIYAN_SECRET": "x", "WECHAT_APP_ID": "wx"}
+GOOD_HEALTH = {"db": {"ephemeral": False, "writable": True}}
+
+
+def _cfg(*dirs):
+    return {"nas_config": {"mount_points": [{"mount_dir": d} for d in dirs]}}
+
+
+@pytest.mark.parametrize("cfg,db,url,health,ok", [
+    (_cfg(), "/mnt/nas/qiyan.db", "https://x", GOOD_HEALTH, False),
+    ({}, "/mnt/nas/qiyan.db", "https://x", GOOD_HEALTH, False),
+    (_cfg("/mnt/nas2"), "/mnt/nas/qiyan.db", "https://x", GOOD_HEALTH, False),
+    (_cfg("/mnt/nas"), "/mnt/nas/qiyan.db", "https://x", {"db": {"ephemeral": False, "writable": False}}, False),
+    (_cfg("/mnt/nas"), "/mnt/nas/qiyan.db", None, GOOD_HEALTH, False),
+    (_cfg("/mnt/nas"), "/mnt/nas/qiyan.db", "https://x", {}, False),
+    (_cfg("/mnt/nas"), "/mnt/nas/qiyan.db", "https://x", GOOD_HEALTH, True),
+])
+def test_production_requires_remote_nas_and_postcheck(cfg, db, url, health, ok):
+    written = []
+    run = lambda: fc_safety.production_release_checks(  # noqa: E731
+        {**GOOD_ENV, "QIYAN_DB": db}, "qiyan", False, cfg,
+        deploy=lambda: url, check_health=lambda u: health, record=written.append)
+    if ok:
+        assert run() == url
+        assert written == [url]
+    else:
+        with pytest.raises(SystemExit):
+            run()
+        assert written == []

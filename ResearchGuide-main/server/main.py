@@ -2091,7 +2091,7 @@ async def health():
             "base_url": cfg["base_url"] if cfg["enabled"] else "",
         },
         "auth": auth.status(),
-        "db": {"ephemeral": store.ephemeral()},  # true 就是库会随实例一起没：上线前必须是 false
+        "db": {"ephemeral": store.ephemeral(), "writable": store.db_writable()},  # true 就是库会随实例一起没：上线前必须是 false
         "threads": THREADS,
         "model_pool": _model_pool(),  # 模型池实值 + 公用线程借用 + pdf 池
         "checks": {

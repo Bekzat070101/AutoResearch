@@ -13,7 +13,7 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import DEFAULT_NAME, assert_health_persistent, is_function_missing, merge_env, refuse_unsafe
+from fc_safety import DEFAULT_NAME, assert_health_persistent, is_function_missing, merge_env, production_release_checks
 from pack_fc import OUT, main as pack
 
 REGION = "cn-hangzhou"
@@ -77,6 +77,17 @@ def existing_env(cli: Client, name: str) -> dict[str, str] | None:
     return dict(env or {})
 
 
+def existing_function(cli: Client, name: str):
+    """读函数现有配置（含 nas_config）。只有 FunctionNotFound 当「没有」。"""
+    try:
+        got = cli.get_function(name, fc.GetFunctionRequest())
+    except Exception as exc:
+        if is_function_missing(exc):
+            return None
+        raise
+    return getattr(got, "body", None)
+
+
 def _local_defaults(name: str) -> dict[str, str]:
     settings = llm_settings()
     env_vars = {
@@ -120,7 +131,20 @@ def main(argv: list[str] | None = None) -> None:
     code = fc.InputCodeLocation(zip_file=base64.b64encode(zip_bytes).decode())
     remote = existing_env(cli, name)
     env_vars = merge_env(remote, _local_defaults(name), db_flag=args.db, name=name)
-    refuse_unsafe(env_vars, name, args.allow_ephemeral)
+    cfg = existing_function(cli, name) if name == DEFAULT_NAME else None
+    url = production_release_checks(
+        env_vars, name, args.allow_ephemeral, cfg,
+        deploy=lambda: _deploy(cli, name, remote, env_vars, code),
+        check_health=check_deployed_health,
+        record=lambda u: write_state(
+            {"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": u, "ACCOUNT_TAIL": aid[-4:]}
+            if name == DEFAULT_NAME else {"FC_TEST_FUNCTION": name, "TEST_URL": u}),
+    )
+    if url:
+        warm_after_deploy(url, env_vars)
+
+
+def _deploy(cli: Client, name: str, remote, env_vars: dict[str, str], code) -> str | None:
     print("QIYAN_DB", env_vars.get("QIYAN_DB"))
     print("KEY", "set" if env_vars.get("LLM_API_KEY") else "missing")
     body = fc.CreateFunctionInput(
@@ -183,13 +207,7 @@ def main(argv: list[str] | None = None) -> None:
         print("CONCURRENCY reserved=1")
     except Exception as e:
         raise SystemExit(f"单实例设置失败，未发布完成：{type(e).__name__} {str(e)[:240]}")
-    if url:
-        if name == DEFAULT_NAME:
-            write_state({"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": url, "ACCOUNT_TAIL": aid[-4:]})
-            check_deployed_health(url)
-        else:
-            write_state({"FC_TEST_FUNCTION": name, "TEST_URL": url})
-        warm_after_deploy(url, env_vars)
+    return url
 
 
 def check_deployed_health(url: str) -> dict:
