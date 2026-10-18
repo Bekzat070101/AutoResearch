@@ -288,3 +288,34 @@ def test_restore_waits_for_open_connections(client, tmp_path):
     assert elapsed < 6.5
     assert Path(store.DB_PATH).read_bytes() == orig
     assert store.get_user(uid)["nickname"] == "旧库"
+
+
+def test_rewrap_concurrent_mine_save_preserves_latest_ciphertext(client, monkeypatch):
+    """20-R04：解封旧密文后学生重存新 key，rewrap 不得覆盖。"""
+    monkeypatch.setenv("QIYAN_SECRET", "old-wrap")
+    uid = store.create_user("并发换钥")["uid"]
+    store.save_llm_secret(uid, "sk-old-1111", "https://old.example/v1", "old-model")
+    monkeypatch.setenv("QIYAN_SECRET", "new-wrap")
+    real_unwrap = store.unwrap_secret
+    hits = {"n": 0}
+
+    def unwrap(hexed, secret=None):
+        plain = real_unwrap(hexed, secret=secret)
+        if secret == "old-wrap" and hits["n"] == 0:
+            hits["n"] += 1
+            store.save_llm_secret(uid, "sk-new-9999", "https://new.example/v1", "new-model")
+        return plain
+
+    monkeypatch.setattr(store, "unwrap_secret", unwrap)
+    r = client.post("/api/admin/rewrap", json={"old_secret": "old-wrap"},
+                    headers={"X-Admin-Token": TOKEN})
+    monkeypatch.setattr(store, "unwrap_secret", real_unwrap)
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["ok"] is False and detail["code"] == "secret_changed"
+    assert detail["changed"] == [uid] and detail["rewrapped"] == 0 and detail["failed"] == []
+    assert store.llm_secret(uid)["key"] == "sk-new-9999"
+    meta = store.llm_secret_meta(uid)
+    assert meta["tail"] == "9999" and meta["base_url"] == "https://new.example/v1"
+    assert meta["model"] == "new-model"
+    assert os.environ["QIYAN_SECRET"] == "new-wrap"
