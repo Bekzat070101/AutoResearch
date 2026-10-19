@@ -203,3 +203,31 @@ def test_operator_tokens_parse():
     assert mcp_student.operator_for("short") == ""
     assert mcp_student.token_for("team-x") == "zzzzzzzzzz"
     assert mcp_student.operator_for("") == ""
+
+
+def test_direction_choices_goal_text_and_lenient_arguments(client):
+    """三个 Haiku 学生踩到的：今日/研读没方向时要列出可选方向；goal 不能裸出一个 3；参数名写歪要认；选方向可用整段按钮文字。"""
+    t = _tools(client)
+    t.start_as_student("knows_direction", "test-model")
+    # press 的参数名写成 button / text 也认；空 label 说清楚要什么
+    out = mcp_student.call_tool(t, "press", {"button": "研读"})
+    assert out.get("isError") is not True and "【屏幕：研读】" in out["content"][0]["text"]
+    assert "press 要带 label" in mcp_student.call_tool(t, "press", {})["content"][0]["text"]
+    text = out["content"][0]["text"]
+    assert "还没有方向，先选一个" in text and "选方向：" in text, text
+    assert "\n3\n" not in text
+    # 今日：同样给出方向，且目标数字有解释
+    out = t.press("今日")
+    assert "选方向：" in out["text"] and ("今天看完" in out["text"] or "今天还没有推荐" in out["text"])
+    # 用整段按钮文字、用 direction 这个参数名都能选
+    out = mcp_student.call_tool(t, "choose_direction", {"direction": "选方向：ai"})
+    assert out.get("isError") is not True, out
+    assert t.s.direction == "ai"
+    out = t.press("研读")
+    assert out["screen"] == "read" and "还没有方向" not in out["text"]
+    # 引导没完成时，对话屏幕说清还想了解什么
+    out = t.press("对话")
+    out = t.reply("我已经决定做机器学习理论了")
+    assert "【屏幕：对话】" in out["text"]
+    if not t.s.guide.get("ready"):
+        assert "引导还想了解" in out["text"]

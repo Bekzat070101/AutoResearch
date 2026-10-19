@@ -228,6 +228,8 @@ class Tools:
         self._need_student()
         want = _norm(label)
         self._event("step", f"press@{self.s.screen}:{label[:40]}")
+        if not want:
+            return self._out("press 要带 label（按钮上的文字）。")
         for lab, fn in self.s.buttons:
             if _norm(lab) == want or (want and _norm(lab).startswith(want) and len(want) >= 2):
                 return self._guard(fn)
@@ -395,6 +397,9 @@ class Tools:
             s.onboard_done = True
         s.turns += 1
         s.screen, s.title, s.body = "dialogue", "对话", reply
+        areas = [a for a in (s.guide.get("areas") or []) if isinstance(a, dict) and not a.get("known")]
+        if areas and not s.guide.get("ready") and not s.onboard_done:
+            s.body += "\n（引导还想了解：" + "；".join(f"{a.get('label')}（{a.get('hint')}）" if a.get("hint") else str(a.get("label")) for a in areas[:4]) + "）"
         s.input_hint = "像和人聊天一样回一句话"
         self._dialogue_buttons(options)
         if (s.guide.get("ready") or s.onboard_done) and "guide" not in s.done:
@@ -419,6 +424,33 @@ class Tools:
             s.conversation_id = r["conversation_id"]
         return r
 
+    def _direction_choices(self, lines: list[str], btns: list) -> None:
+        """「还没有方向」时把能选的方向列出来：先用推荐卡（卡片里方向在 card["direction"]），没有就列全部方向。"""
+        s = self.s
+        found: list[tuple[str, str, str]] = []
+        try:
+            cards = (self.api.call("GET", f"/api/directions/recommend?uid={s.uid}", token=s.token) or {}).get("cards") or []
+        except ApiError:
+            cards = []
+        for c in cards[:6]:
+            d = c.get("direction") if isinstance(c.get("direction"), dict) else c
+            code = str(d.get("code") or d.get("id") or "")
+            if code:
+                found.append((code, str(d.get("name") or d.get("title") or code), str(c.get("why_you") or d.get("blurb") or "")[:60]))
+        if not found:
+            try:
+                import planner
+                found = [(k, v["name"], v.get("blurb", "")[:60]) for k, v in planner.DIRECTIONS.items()][:8]
+            except Exception:
+                found = []
+        if found:
+            lines.append("还没有方向，先选一个：")
+            for code, name, why in found:
+                lines.append(f"· {name}（{code}）{('：' + why) if why else ''}")
+                btns.append((f"选方向：{code}", (lambda cd=code: self._choose_direction(cd))))
+        else:
+            lines.append("还没有方向，去「对话」里说说你感兴趣什么。")
+
     def _enter(self) -> str:
         s = self.s
         self.api.call("POST", "/api/onboard/enter", {"uid": s.uid}, token=s.token)
@@ -437,26 +469,19 @@ class Tools:
         items = [i for i in (d.get("items") or []) if isinstance(i, dict)][:6]
         s.papers = items
         lines = []
-        if d.get("goal"):
-            lines.append(str(d["goal"]))
+        goal = d.get("goal")
+        if isinstance(goal, (int, float)) and goal:
+            lines.append(f"今天看完 {int(goal)} 篇就算完成（每篇说要不要留下）。")
+        elif isinstance(goal, str) and goal:
+            lines.append(goal)
         if d.get("error"):
             lines.append(f"提示：{d['error']}")
         btns: list[tuple[str, Callable[[], str]]] = []
         if not items:
-            cards = []
-            try:
-                cards = (self.api.call("GET", f"/api/directions/recommend?uid={s.uid}", token=s.token) or {}).get("cards") or []
-            except ApiError:
-                cards = []
-            if cards:
-                lines.append("还没有方向，先选一个：")
-                for c in cards[:6]:
-                    code, name = str(c.get("code") or c.get("id") or ""), str(c.get("name") or c.get("title") or "")
-                    if code:
-                        lines.append(f"· {name}（{code}）：{str(c.get('blurb') or c.get('why') or '')[:60]}")
-                        btns.append((f"选方向：{code}", (lambda cd=code: self._choose_direction(cd))))
+            if s.direction or d.get("kit"):
+                lines.append("今天还没有推荐，去「研读」看方向目录。")
             else:
-                lines.append("今天还没有推荐，去「研读」看看方向目录。")
+                self._direction_choices(lines, btns)
         for i, it in enumerate(items, 1):
             lines.append(f"{i}. {it.get('title_zh') or it.get('title') or it.get('arxiv_id')}")
             btns.append((f"打开论文 {i}", (lambda k=i: self._open_paper(k))))
@@ -478,7 +503,10 @@ class Tools:
             lines.append(f"{i}. {it.get('title_zh') or it.get('title') or it.get('id')}" + (f"（{kw}）" if kw else ""))
             btns.append((f"打开论文 {i}", (lambda k=i: self._open_paper(k))))
         if not items:
-            lines.append("这个方向还没有目录；可以回「今日」。")
+            if not (d.get("node") or s.direction):
+                self._direction_choices(lines, btns)
+            else:
+                lines.append("这个方向还没有目录；可以回「今日」。")
         s.screen, s.title, s.body, s.input_hint = "read", "研读", "\n".join(lines), ""
         s.buttons = self._nav_buttons(btns)
         return ""
@@ -580,6 +608,16 @@ class Tools:
     # 方向
     def _choose_direction(self, code: str) -> str:
         s = self.s
+        code = (code or "").strip()
+        m = re.search(r"[：:]\s*([a-z_]+)\s*$", code)  # 「选方向：ai」整段按钮文字也认
+        if m:
+            code = m.group(1)
+        try:
+            import planner
+            if code not in planner.DIRECTIONS:
+                code = next((k for k, v in planner.DIRECTIONS.items() if v["name"] == code or code in v["name"]), code)
+        except Exception:
+            pass
         self.api.call("POST", "/api/directions/choose", {"uid": s.uid, "code": code}, token=s.token)
         s.direction = code
         return self._today_screen() or f"选了方向：{code}"
@@ -663,7 +701,7 @@ class Tools:
         pid = str(s.project.get("id") or "")
         if not pid:
             return "先挑一个项目。"
-        blob = self.api.call("GET", f"/api/projects/{pid}/sample.zip", token=s.token, timeout=120)
+        blob = self.api.call("GET", f"/api/projects/{pid}/sample.zip?uid={s.uid}", token=s.token, timeout=120)
         if not isinstance(blob, (bytes, bytearray)):
             return "示例作品没取到。"
         portrait = ""
@@ -756,6 +794,14 @@ INSTRUCTIONS = ("你是一个来用「启研」的学生，不是助手。先 st
                 "press 按按钮，open_paper 打开论文。看不懂就 stuck 说明原因；目标做完或耐心用完就 end_day。不要猜接口，不要编造屏幕上没有的东西。")
 
 
+def _pick(a: dict, *keys: str, default: Any = "") -> Any:
+    """agent 常把参数名写歪（label 写成 text/button，code 写成 direction）：认下来，别把它算成产品的卡点。"""
+    for k in keys:
+        if k in a and a[k] not in (None, ""):
+            return a[k]
+    return default
+
+
 def dispatch(tools: Tools, name: str, args: dict) -> dict:
     a = args or {}
     if name == "start_as_student":
@@ -763,29 +809,29 @@ def dispatch(tools: Tools, name: str, args: dict) -> dict:
     if name == "look":
         return tools.look()
     if name == "reply":
-        return tools.reply(str(a.get("text") or ""))
+        return tools.reply(str(_pick(a, "text", "message", "msg", "content", "answer")))
     if name == "press":
-        return tools.press(str(a.get("label") or ""))
+        return tools.press(str(_pick(a, "label", "button", "text", "name")))
     if name == "open_paper":
-        return tools.open_paper(int(a.get("n") or 1))
+        return tools.open_paper(int(_pick(a, "n", "index", "number", "i", default=1)))
     if name == "start_tutor":
         return tools.start_tutor()
     if name == "answer_tutor":
-        return tools.answer_tutor(str(a.get("text") or ""), bool(a.get("skip")))
+        return tools.answer_tutor(str(_pick(a, "text", "answer", "message")), bool(a.get("skip")))
     if name == "finish_tutor":
         return tools.finish_tutor()
     if name == "choose_direction":
-        return tools.choose_direction(str(a.get("code") or ""))
+        return tools.choose_direction(str(_pick(a, "code", "direction", "id", "label", "name")))
     if name == "search_projects":
-        return tools.search_projects(str(a.get("keywords") or ""))
+        return tools.search_projects(str(_pick(a, "keywords", "query", "q", "text")))
     if name == "pick_project":
-        return tools.pick_project(int(a.get("n") or 1))
+        return tools.pick_project(int(_pick(a, "n", "index", "number", "i", default=1)))
     if name == "submit_project":
         return tools.submit_project()
     if name == "stuck":
-        return tools.stuck(str(a.get("reason") or ""))
+        return tools.stuck(str(_pick(a, "reason", "why", "text", "message")))
     if name == "end_day":
-        return tools.end_day(str(a.get("summary") or ""))
+        return tools.end_day(str(_pick(a, "summary", "text", "note")))
     raise KeyError(name)
 
 
