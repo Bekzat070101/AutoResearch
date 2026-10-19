@@ -65,3 +65,8 @@ def test_direction_save_completion_aborts_before_reading_current_prefs():
 
 def test_direction_ui_continuation_aborts_after_portrait_switch():
     _run("direction-context-ui")
+
+
+def test_login_reset_hint_and_timeout():
+    _run("login-reset-hint")
+    _run("api-timeout")

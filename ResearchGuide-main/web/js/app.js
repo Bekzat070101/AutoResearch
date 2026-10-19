@@ -190,10 +190,25 @@ async function apiFetch(path, opt = {}) {
   return res;
 }
 
-async function api(method, path, body) {
-  const opt = { method, headers: { "Content-Type": "application/json" } };
-  if (body !== undefined) opt.body = JSON.stringify(body);
-  const res = await apiFetch(path, opt);
+async function api(method, path, body, opt = {}) {
+  const req = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) req.body = JSON.stringify(body);
+  let res;
+  if (opt.timeoutMs) {
+    const slowMsg = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+    const ctrl = new AbortController();
+    req.signal = ctrl.signal;
+    let timer;
+    const slow = new Promise((_, reject) => {
+      timer = setTimeout(() => { ctrl.abort(); reject(new Error(slowMsg)); }, opt.timeoutMs);
+    });
+    try {
+      res = await Promise.race([apiFetch(path, req), slow]);
+    } catch (e) {
+      if (e && e.name === "AbortError") throw new Error(slowMsg);
+      throw e;
+    } finally { clearTimeout(timer); }
+  } else res = await apiFetch(path, req);
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
   if (!res.ok) {
@@ -1533,7 +1548,7 @@ function openPrivacy(gate) {
     ok.type = "button";
     ok.onclick = async () => {
       try {
-        await api("POST", "/api/auth/consent", { version: S.auth ? S.auth.privacy_version : "" });
+        await api("POST", "/api/auth/consent", { version: S.auth ? S.auth.privacy_version : "" }, { timeoutMs: 20000 });
         mask.remove();
       } catch (e) { toast(e.message); }
     };
@@ -1719,13 +1734,21 @@ function renderLogin() {
     sbtn.disabled = true; sbtn.textContent = "登录中…";
     stopWxPoll();  // 走密码就作废正在等的微信登录，免得它的结果回来盖掉这次会话
     try {
-      const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value });
+      const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value }, { timeoutMs: 20000 });
+      try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
       const previous = S.token;  // 访客登进自己的账号：采用新令牌之后再吊销访客的
       if (previous && previous !== r.token) revokeToken(previous);
       if (setSession(r, "today")) return;
       await afterEnter();
       if (!r.consent_ok) openPrivacy(true);
-    } catch (e) { toast(e.message); sbtn.disabled = false; sbtn.textContent = "登录"; }
+    } catch (e) {
+      toast(e.message); sbtn.disabled = false; sbtn.textContent = "登录";
+      let reset = false;
+      try { reset = e.status === 401 && localStorage.getItem("rg_reset_hint") === "1"; } catch (_) { /* 无痕模式等 */ }
+      if (reset && !signinStep.querySelector(".login-reset-hint")) {
+        signinStep.appendChild(el("p", "login-note login-reset-hint", "登录已失效且这个账号现在不存在：服务器在 2026-10-18 更换过数据库，之前的账号需要重新注册（用户名可以沿用）。如果你刚才只是密码输错，再试一次即可。"));
+      }
+    }
   };
   spass.addEventListener("keydown", onEnter(sbtn));
   signinStep.append(suser, spass, sbtn);
@@ -1748,7 +1771,8 @@ function renderLogin() {
       const r = await api("POST", "/api/auth/register", {
         username: ruser.value.trim(), password: rpass.value,
         nickname: rnick.value.trim() || ruser.value.trim(), consent: true,
-      });
+      }, { timeoutMs: 20000 });
+      try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
       if (setSession(r, "dialogue")) return;
       await afterEnter();
     } catch (e) { toast(e.message); rbtn.disabled = false; rbtn.textContent = "注册并进入"; }
@@ -7331,13 +7355,14 @@ document.addEventListener("keydown", (e) => {
   }
   if (S.token) {
     try {
-      const me = await api("GET", "/api/auth/me");
+      const me = await api("GET", "/api/auth/me", undefined, { timeoutMs: 20000 });
       setSession(me);
       needConsent = !me.consent_ok;
       await loadPrefs();  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
       await ensurePortrait();
     } catch (e) {
       if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么
+        try { localStorage.setItem("rg_last_uid", S.uid); localStorage.setItem("rg_reset_hint", "1"); } catch (_) { /* 无痕模式等 */ }
         clearSession();
         reloadInto("login", sessionGoneMsg());
         return;
