@@ -219,3 +219,50 @@ def test_health_and_metrics_expose_snapshot_state(client):
     assert "qiyan_account_snapshot_users 2" in text
     age = [ln for ln in text.splitlines() if ln.startswith("qiyan_account_snapshot_age_seconds ")][0]
     assert 0 <= float(age.split()[1]) < 60
+
+
+def test_deleted_user_is_not_revived_by_stale_snapshot(client, monkeypatch):
+    acct = _reg(client, "gone_user")
+    account_store.flush()
+    assert any(u["id"] == acct["uid"] for u in _read(_durable())["users"])
+
+    def boom():
+        raise OSError("dump failed")
+
+    with monkeypatch.context() as m:
+        m.setattr(account_store, "_dump_now", boom)
+        r = client.delete("/api/me", headers={"Authorization": f"Bearer {acct['token']}"})
+        assert r.status_code == 200, r.text
+    snapshot = _read(_durable())
+    assert any(u["id"] == acct["uid"] for u in snapshot["users"])
+
+    store.init_db()
+    r = client.post("/api/auth/signin", json={"username": "gone_user", "password": "secret-ok"})
+    assert r.status_code == 401
+    assert store.user_by_username("gone_user") is None
+    assert account_store.hydrate(snapshot)["tombstoned"] == 1
+
+
+def test_entered_at_travels_with_snapshot(client, tmp_path, monkeypatch):
+    acct = _reg(client, "entered_user")
+    r = client.post("/api/onboard/enter", json={"uid": acct["uid"]},
+                    headers={"Authorization": f"Bearer {acct['token']}"})
+    assert r.status_code == 200, r.text
+    account_store.flush()
+    snapshot = _read(_durable())
+    assert any(u["id"] == acct["uid"] and u["entered_at"] for u in snapshot["users"])
+
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "fresh" / "qiyan.db")
+    store.init_db()
+    r = client.post("/api/auth/signin", json={"username": "entered_user", "password": "secret-ok"})
+    assert r.status_code == 200, r.text
+    assert r.json()["entered"] is True
+
+    v1 = {"v": 1, "users": [{k: v for k, v in u.items() if k != "entered_at"} for u in snapshot["users"]]}
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "fresh_v1" / "qiyan.db")
+    monkeypatch.delenv("QIYAN_ACCOUNT_STORE")
+    store.init_db()
+    account_store.hydrate(v1)
+    r = client.post("/api/auth/signin", json={"username": "entered_user", "password": "secret-ok"})
+    assert r.status_code == 200, r.text
+    assert r.json()["entered"] is False
