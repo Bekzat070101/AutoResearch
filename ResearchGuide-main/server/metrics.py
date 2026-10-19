@@ -128,6 +128,12 @@ def render() -> str:
         ]
         for src, n in sorted(paper_by_src.items()):
             lines.append(_line("qiyan_paper_text_rows", n, {"source": src}, help_="按来源的正文库条数"))
+    import account_store
+    lines += [
+        _line("qiyan_account_snapshot_users", account_store.snapshot_users(), help_="最近一份账号副本里的用户数"),
+        _line("qiyan_account_snapshot_age_seconds", account_store.snapshot_age(),
+              help_="距上次写账号副本的秒数，-1=本进程还没写过"),
+    ]
     lines += [
         _line("qiyan_scrape_errors_total", _SCRAPE_ERRORS, help_="刮取失败次数", typ="counter"),
         _line("qiyan_stream_errors_total", _STREAM_ERRORS, help_="SSE 流内 error 次数", typ="counter"),

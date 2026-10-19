@@ -9,12 +9,16 @@ OSS durable/ 不要走 daily/：daily/ 有 7 天生命周期，到期会把账�
 """
 from __future__ import annotations
 
+import atexit
 import gzip
 import hmac
 import json
 import os
 import secrets
 import sqlite3
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +32,22 @@ _COLS = (
     "created_at", "claimed_at", "consent_at", "consent_version",
     "wechat_openid", "onboard_state",
 )
+_SESSION_COLS = ("token_hash", "user_id", "created_at", "expires_at", "last_seen")
+COALESCE_SECONDS = 2.0
+
+_STATE_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()
+_TIMER: threading.Timer | None = None
+_LAST_WRITE = 0.0
+_STATE: dict[str, Any] = {}
+
+
+def _fresh_state() -> dict[str, Any]:
+    return {"snapshot_users": None, "snapshot_sessions": None, "last_dump_at": None,
+            "last_hydrate_at": None, "last_error": None, "collisions": []}
+
+
+_STATE.update(_fresh_state())
 
 
 def _key() -> bytes | None:
@@ -61,7 +81,40 @@ def status() -> dict[str, Any]:
     except (sqlite3.Error, OSError):
         # 库打不开（路径只读、盘没挂上）时 health 也不能 500：探活本身就是用来发现这种事的
         registered = None
-    return {"enabled": enabled(), "via": via, "registered": registered}
+    with _STATE_LOCK:
+        st = dict(_STATE)
+    return {"enabled": enabled(), "via": via, "registered": registered,
+            "snapshot_users": st["snapshot_users"], "snapshot_sessions": st["snapshot_sessions"],
+            "last_dump_at": st["last_dump_at"], "last_hydrate_at": st["last_hydrate_at"],
+            "last_error": st["last_error"], "collisions": len(st["collisions"])}
+
+
+def snapshot_age() -> float:
+    with _STATE_LOCK:
+        at = _STATE["last_dump_at"]
+    return -1.0 if at is None else max(0.0, time.time() - at)
+
+
+def snapshot_users() -> int:
+    with _STATE_LOCK:
+        return int(_STATE["snapshot_users"] or 0)
+
+
+def note_error(kind: str) -> None:
+    with _STATE_LOCK:
+        _STATE["last_error"] = kind
+
+
+def reset() -> None:
+    """丢掉还没写的合并 dump、清空计时与可观测状态（换库 / 启动时用）。"""
+    global _TIMER, _LAST_WRITE
+    with _STATE_LOCK:
+        if _TIMER is not None:
+            _TIMER.cancel()
+        _TIMER = None
+        _LAST_WRITE = 0.0
+        _STATE.clear()
+        _STATE.update(_fresh_state())
 
 
 def _aes(data: bytes, key: bytes, encrypt: bool) -> bytes:
@@ -87,7 +140,9 @@ def _decrypt(blob: bytes) -> dict[str, Any]:
     if not key:
         raise RuntimeError("account_store_no_key")
     data = json.loads(gzip.decompress(_aes(blob, key, False)))
-    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("users"), list):
+    if not isinstance(data, dict) or data.get("v") not in (1, 2) or not isinstance(data.get("users"), list):
+        raise ValueError("account_store_shape")
+    if data.get("v") == 2 and not isinstance(data.get("sessions", []), list):
         raise ValueError("account_store_shape")
     return data
 
@@ -99,100 +154,210 @@ def _registered_count() -> int:
         ).fetchone()[0])
 
 
-def export_registered() -> list[dict[str, Any]]:
-    cols = ", ".join(_COLS)
+def export_snapshot() -> dict[str, Any]:
+    """users 表全部行 + 未过期会话（只有令牌哈希）。不含 user_secrets、消息等。"""
     with store._conn() as c:
-        rows = c.execute(
-            f"SELECT {cols} FROM users WHERE username IS NOT NULL AND username != ''"
-        ).fetchall()
-    out = []
-    for r in rows:
-        item = {k: r[k] for k in _COLS}
-        if not item.get("username") or not item.get("password_salt") or not item.get("password_hash"):
-            continue
-        out.append(item)
-    return out
+        users = [{k: r[k] for k in _COLS}
+                 for r in c.execute(f"SELECT {', '.join(_COLS)} FROM users")]
+        sessions = [{k: r[k] for k in _SESSION_COLS}
+                    for r in c.execute(f"SELECT {', '.join(_SESSION_COLS)} FROM sessions WHERE expires_at>?",
+                                       (time.time(),))]
+    return {"v": 2, "saved_at": now_iso(), "users": users, "sessions": sessions}
 
 
-def dump_accounts() -> dict[str, Any]:
-    """注册 / 升级 / 删号后调用。失败只打日志，不让注册接口 500。"""
+def _write_atomic(path: Path, blob: bytes) -> None:
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_bytes(blob)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _set_aside_undecryptable(path: Path) -> None:
+    """旧副本用当前密钥解不开（密钥换了）：改名留着，不被新副本覆盖。"""
+    if not path.exists():
+        return
+    try:
+        _decrypt(path.read_bytes())
+        return
+    except Exception:
+        pass
+    note_error("invalid")
+    aside = path.with_name(f"{path.name}.undecryptable-{datetime.now().strftime('%Y%m%d')}")
+    if aside.exists():
+        aside = path.with_name(f"{aside.name}-{os.getpid()}-{int(time.time())}")
+    os.replace(path, aside)
+    print(json.dumps({"event": "account_store_set_aside", "to": aside.name}, ensure_ascii=False))
+
+
+def _dump_now() -> dict[str, Any]:
+    global _LAST_WRITE
     if not enabled():
         return {"ok": False, "reason": "disabled"}
-    try:
-        users = export_registered()
-        blob = _encrypt({"v": 1, "saved_at": now_iso(), "users": users})
-        via: list[str] = []
-        path = file_path()
-        if path:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(blob)
-            via.append("file")
-        if oss_enabled():
-            _put_oss(blob)
-            via.append("oss")
-        print(json.dumps({"event": "account_store_dump", "n": len(users), "via": via},
-                         ensure_ascii=False))
-        return {"ok": True, "n": len(users), "via": via}
-    except Exception as exc:
-        print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
-                         ensure_ascii=False))
-        return {"ok": False, "reason": type(exc).__name__}
+    with _WRITE_LOCK:
+        with _STATE_LOCK:
+            _LAST_WRITE = time.monotonic()
+        try:
+            payload = export_snapshot()
+            blob = _encrypt(payload)
+            via: list[str] = []
+            path = file_path()
+            if path:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _set_aside_undecryptable(path)
+                _write_atomic(path, blob)
+                via.append("file")
+            if oss_enabled():
+                _put_oss(blob)
+                via.append("oss")
+            with _STATE_LOCK:
+                _STATE["snapshot_users"] = len(payload["users"])
+                _STATE["snapshot_sessions"] = len(payload["sessions"])
+                _STATE["last_dump_at"] = time.time()
+            print(json.dumps({"event": "account_store_dump", "n": len(payload["users"]),
+                              "sessions": len(payload["sessions"]), "via": via}, ensure_ascii=False))
+            return {"ok": True, "n": len(payload["users"]), "via": via}
+        except Exception as exc:
+            note_error(type(exc).__name__)
+            print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
+                             ensure_ascii=False))
+            return {"ok": False, "reason": type(exc).__name__}
 
 
-def hydrate_if_empty() -> dict[str, Any]:
-    """空库（没有已注册用户）时从副本灌回。已有注册用户则以库为准，不覆盖。"""
+def _fire() -> None:
+    global _TIMER
+    with _STATE_LOCK:
+        _TIMER = None
+    _dump_now()
+
+
+def dump_accounts(immediate: bool = False) -> dict[str, Any]:
+    """账号或会话变了就调。2 秒内的连续触发合并成一次全量重写；失败只打日志，不让接口 500。"""
+    global _TIMER
+    if not enabled():
+        return {"ok": False, "reason": "disabled"}
+    with _STATE_LOCK:
+        if immediate:
+            if _TIMER is not None:
+                _TIMER.cancel()
+                _TIMER = None
+            wait = 0.0
+        else:
+            if _TIMER is not None:
+                return {"ok": True, "pending": True}
+            wait = _LAST_WRITE + COALESCE_SECONDS - time.monotonic()
+            if wait > 0:
+                _TIMER = threading.Timer(wait, _fire)
+                _TIMER.daemon = True
+                _TIMER.start()
+                return {"ok": True, "pending": True}
+    return _dump_now()
+
+
+def flush() -> dict[str, Any] | None:
+    """有合并中还没写的 dump 就马上写（进程退出前也走这里）。"""
+    global _TIMER
+    with _STATE_LOCK:
+        pending = _TIMER is not None
+        if pending:
+            _TIMER.cancel()
+            _TIMER = None
+    return _dump_now() if pending else None
+
+
+atexit.register(flush)
+
+
+def hydrate_file() -> dict[str, Any]:
+    """启动时（init_db）从本地副本文件合并灌回。OSS 的拉取不在这里，见 hydrate_oss。"""
+    reset()
     if not enabled():
         return {"skipped": "disabled"}
-    if _registered_count() > 0:
-        return {"skipped": "has_users"}
-    loaded = load_snapshot()
-    if not loaded:
-        return {"skipped": "no_snapshot"}
-    payload, via = loaded
-    n = import_users(payload["users"])
-    print(json.dumps({"event": "account_store_hydrated", "n": n, "via": via}, ensure_ascii=False))
-    return {"ok": True, "n": n, "via": via}
-
-
-def load_snapshot() -> tuple[dict[str, Any], str] | None:
-    sources: list[tuple[str, bytes]] = []
     path = file_path()
-    if path and path.exists():
-        sources.append(("file", path.read_bytes()))
-    if oss_enabled():
+    if not path or not path.exists():
+        return {"skipped": "no_snapshot"}
+    try:
+        payload = _decrypt(path.read_bytes())
+    except Exception:
+        note_error("invalid")
+        print(json.dumps({"event": "account_store_invalid", "via": "file"}, ensure_ascii=False))
+        return {"skipped": "invalid"}
+    return _hydrate_logged(payload, "file")
+
+
+def hydrate_oss() -> dict[str, Any]:
+    """main._lifespan 在线程池里调，带时限；失败只记日志与 health。"""
+    if not enabled() or not oss_enabled():
+        return {"skipped": "disabled"}
+    try:
         blob = _get_oss()
-        if blob:
-            sources.append(("oss", blob))
-    for via, blob in sources:
-        try:
-            return _decrypt(blob), via
-        except Exception:
-            print(json.dumps({"event": "account_store_invalid", "via": via}, ensure_ascii=False))
-    return None
+    except Exception as exc:
+        note_error(type(exc).__name__)
+        return {"skipped": type(exc).__name__}
+    if not blob:
+        return {"skipped": "no_snapshot"}
+    try:
+        payload = _decrypt(blob)
+    except Exception:
+        note_error("invalid")
+        print(json.dumps({"event": "account_store_invalid", "via": "oss"}, ensure_ascii=False))
+        return {"skipped": "invalid"}
+    return _hydrate_logged(payload, "oss")
 
 
-def import_users(rows: list[Any]) -> int:
-    n = 0
+def _hydrate_logged(payload: dict[str, Any], via: str) -> dict[str, Any]:
+    try:
+        out = hydrate(payload)
+    except Exception as exc:
+        note_error(type(exc).__name__)
+        print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
+                         ensure_ascii=False))
+        return {"skipped": type(exc).__name__}
+    print(json.dumps({"event": "account_store_hydrated", "via": via, **out}, ensure_ascii=False))
+    return {"ok": True, "via": via, **out}
+
+
+def hydrate(payload: dict[str, Any]) -> dict[str, Any]:
+    """合并灌回：users 按 id 不存在才插；用户名被别的 uid 占了记 collision 不插；
+    sessions 按 token_hash 不存在、用户在库里、未过期才插。v1 快照没有 sessions。"""
+    collisions: list[str] = []
+    users = sessions = 0
     with store._LOCK, store._conn() as c:
-        for raw in rows:
-            if not isinstance(raw, dict):
-                continue
-            if _insert_user(c, raw):
-                n += 1
-    return n
+        for raw in payload.get("users") or []:
+            if isinstance(raw, dict) and _insert_user_if_missing(c, raw, collisions):
+                users += 1
+        for raw in payload.get("sessions") or []:
+            if isinstance(raw, dict) and _insert_session_if_missing(c, raw):
+                sessions += 1
+    for uid in collisions:
+        print(json.dumps({"event": "account_store_collision", "uid": uid}, ensure_ascii=False))
+    with _STATE_LOCK:
+        _STATE["collisions"] = _STATE["collisions"] + collisions
+        _STATE["snapshot_users"] = len(payload.get("users") or [])
+        _STATE["snapshot_sessions"] = len(payload.get("sessions") or [])
+        _STATE["last_hydrate_at"] = time.time()
+    return {"users": users, "sessions": sessions, "collisions": len(collisions)}
 
 
-def _insert_user(c, row: dict[str, Any]) -> bool:
+def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bool:
     uid = str(row.get("id") or "").strip()
-    username = store.normalize_username(str(row.get("username") or ""))
-    salt = str(row.get("password_salt") or "")
-    hashed = str(row.get("password_hash") or "")
-    if not uid or not store.valid_username(username) or not salt or not hashed:
+    if not uid:
         return False
-    if c.execute("SELECT 1 FROM users WHERE id=? OR username=?", (uid, username)).fetchone():
+    if c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         return False
-    nick = (str(row.get("nickname") or username).strip() or username)[:24]
+    username = store.normalize_username(str(row.get("username") or "")) or None
+    salt = str(row.get("password_salt") or "") or None
+    hashed = str(row.get("password_hash") or "") or None
+    if username is not None:
+        if not store.valid_username(username) or not salt or not hashed:
+            return False
+        if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+            collisions.append(uid)
+            return False
     now = now_iso()
+    nick = (str(row.get("nickname") or username or "").strip() or username or "访客")[:24]
     try:
         c.execute(
             "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at, "
@@ -209,6 +374,28 @@ def _insert_user(c, row: dict[str, Any]) -> bool:
                 row.get("wechat_openid") or None,
             ),
         )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def _insert_session_if_missing(c, row: dict[str, Any]) -> bool:
+    h = str(row.get("token_hash") or "")
+    uid = str(row.get("user_id") or "")
+    try:
+        expires = float(row.get("expires_at"))
+        last_seen = float(row.get("last_seen") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not h or not uid or expires <= time.time():
+        return False
+    if c.execute("SELECT 1 FROM sessions WHERE token_hash=?", (h,)).fetchone():
+        return False
+    if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+        return False
+    try:
+        c.execute("INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen) VALUES(?,?,?,?,?)",
+                  (h, uid, row.get("created_at") or now_iso(), expires, last_seen))
     except sqlite3.IntegrityError:
         return False
     return True
