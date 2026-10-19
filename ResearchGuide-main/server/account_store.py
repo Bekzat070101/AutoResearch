@@ -77,6 +77,8 @@ def status() -> dict[str, Any]:
     if oss_enabled():
         via.append("oss")
     try:
+        if store.db_blocked():
+            raise OSError("db_blocked")
         registered = _registered_count()
         users = _user_count()
     except (sqlite3.Error, OSError):
@@ -166,6 +168,16 @@ def export_snapshot() -> dict[str, Any]:
     with store._conn() as c:
         users = [{k: r[k] for k in _COLS}
                  for r in c.execute(f"SELECT {', '.join(_COLS)} FROM users")]
+        entered: dict[str, Any] = {}
+        for r in c.execute("SELECT user_id, data FROM user_prefs"):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            if isinstance(data, dict):
+                entered[r["user_id"]] = data.get("entered_at")
+        for u in users:
+            u["entered_at"] = entered.get(u["id"])
         sessions = [{k: r[k] for k in _SESSION_COLS}
                     for r in c.execute(f"SELECT {', '.join(_SESSION_COLS)} FROM sessions WHERE expires_at>?",
                                        (time.time(),))]
@@ -339,14 +351,24 @@ def hydrate(payload: dict[str, Any]) -> dict[str, Any]:
     """合并灌回：users 按 id 不存在才插；用户名被别的 uid 占了记 collision 不插；
     sessions 按 token_hash 不存在、用户在库里、未过期才插。v1 快照没有 sessions。"""
     collisions: list[str] = []
-    users = sessions = 0
+    users = sessions = tombstoned = 0
+    entered: list[tuple[str, Any]] = []
     with store._LOCK, store._conn() as c:
         for raw in payload.get("users") or []:
-            if isinstance(raw, dict) and _insert_user_if_missing(c, raw, collisions):
+            if not isinstance(raw, dict):
+                continue
+            if c.execute("SELECT 1 FROM deleted_users WHERE id=?", (str(raw.get("id") or "").strip(),)).fetchone():
+                tombstoned += 1
+                continue
+            if _insert_user_if_missing(c, raw, collisions):
                 users += 1
+                if raw.get("entered_at"):
+                    entered.append((str(raw.get("id") or "").strip(), raw.get("entered_at")))
         for raw in payload.get("sessions") or []:
             if isinstance(raw, dict) and _insert_session_if_missing(c, raw):
                 sessions += 1
+    for uid, v in entered:
+        store.set_prefs(uid, extra={"entered_at": v})
     for uid in collisions:
         print(json.dumps({"event": "account_store_collision", "uid": uid}, ensure_ascii=False))
     with _STATE_LOCK:
@@ -354,7 +376,7 @@ def hydrate(payload: dict[str, Any]) -> dict[str, Any]:
         _STATE["snapshot_users"] = len(payload.get("users") or [])
         _STATE["snapshot_sessions"] = len(payload.get("sessions") or [])
         _STATE["last_hydrate_at"] = time.time()
-    return {"users": users, "sessions": sessions, "collisions": len(collisions)}
+    return {"users": users, "sessions": sessions, "collisions": len(collisions), "tombstoned": tombstoned}
 
 
 def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bool:

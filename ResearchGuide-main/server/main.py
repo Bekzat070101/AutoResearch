@@ -123,6 +123,21 @@ async def _hydrate_accounts_from_oss() -> None:
         print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__}, ensure_ascii=False))
 
 
+DB_RETRY_SECONDS = 5.0
+
+
+async def _retry_init_db() -> None:
+    """盘没挂上时启动不建空库：每 5 秒重试 init_db，成功后再跑 OSS 账号灌回。"""
+    while not store.DB_READY:
+        await asyncio.sleep(DB_RETRY_SECONDS)
+        try:
+            await run_in_threadpool(store.init_db)
+        except Exception as exc:
+            print(json.dumps({"event": "db_init_retry_failed", "error": type(exc).__name__}, ensure_ascii=False))
+    if account_store.enabled() and account_store.oss_enabled():
+        await _hydrate_accounts_from_oss()
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global _LIMITER
@@ -131,7 +146,11 @@ async def _lifespan(_app: FastAPI):
     if store.ephemeral():
         print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
                          ensure_ascii=False))
-    if account_store.enabled() and account_store.oss_enabled():
+    if not store.DB_READY:
+        task = asyncio.ensure_future(_retry_init_db())
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+    elif account_store.enabled() and account_store.oss_enabled():
         task = asyncio.ensure_future(_hydrate_accounts_from_oss())
         _BACKGROUND.add(task)
         task.add_done_callback(_BACKGROUND.discard)
@@ -153,6 +172,14 @@ async def maintenance_gate(request: Request, call_next):
         path = request.url.path or ""
         if path.startswith("/api/") and not path.startswith("/api/admin") and path not in ("/api/health", "/metrics"):
             return JSONResponse({"detail": "维护中"}, status_code=503)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def db_ready_gate(request: Request, call_next):
+    path = request.url.path or ""
+    if not store.DB_READY and path.startswith("/api/") and path != "/api/health":
+        return JSONResponse({"detail": "数据库所在的盘还没挂上，请稍后重试", "code": "db_not_ready"}, status_code=503)
     return await call_next(request)
 
 
@@ -2116,7 +2143,7 @@ def _model_pool() -> dict:
 async def health():
     cfg = llm.config()
     return {
-        "ok": True,
+        "ok": store.DB_READY,
         "service": "research-mentor",
         "version": "0.2.0",
         "llm": {
@@ -2128,6 +2155,8 @@ async def health():
         "db": {  # ephemeral true 就是库会随实例一起没：上线前必须是 false
             "ephemeral": store.ephemeral(),
             "writable": store.db_writable(),
+            "ready": store.DB_READY,
+            "blocked": store.db_blocked(),
             "account_store": account_store.status(),
         },
         "threads": THREADS,
