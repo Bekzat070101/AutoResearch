@@ -58,8 +58,9 @@ def status() -> dict[str, Any]:
         via.append("oss")
     try:
         registered = _registered_count()
-    except sqlite3.Error:
-        registered = 0
+    except (sqlite3.Error, OSError):
+        # 库打不开（路径只读、盘没挂上）时 health 也不能 500：探活本身就是用来发现这种事的
+        registered = None
     return {"enabled": enabled(), "via": via, "registered": registered}
 
 
