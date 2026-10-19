@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 DEFAULT_NAME = "qiyan"
+DEFAULT_PACKAGE_DB = "server/data/demo.db"
 REQUIRED_PROD = ("QIYAN_SECRET", "WECHAT_APP_ID")
 
 

@@ -14,7 +14,7 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import (DEFAULT_NAME, assert_db_under_nas, assert_health_persistent, is_function_missing, merge_env,
+from fc_safety import (DEFAULT_NAME, DEFAULT_PACKAGE_DB, assert_db_under_nas, assert_health_persistent, is_function_missing, merge_env,
                        nas_mount_dirs, production_release_checks, require_migration)
 from pack_fc import OUT, main as pack
 
@@ -138,9 +138,9 @@ def main(argv: list[str] | None = None) -> None:
     remote = existing_env(cli, name)
     env_vars = merge_env(remote, _local_defaults(name), db_flag=args.db, name=name)
     cfg = existing_function(cli, name) if name == DEFAULT_NAME else None
-    remote_db = (remote or {}).get("QIYAN_DB")
+    remote_db = (remote or {}).get("QIYAN_DB") or DEFAULT_PACKAGE_DB
     check_health = check_deployed_health
-    if args.db and remote_db and remote_db != args.db:
+    if remote is not None and args.db and remote_db != args.db:
         trig = cli.get_trigger(name, "http")
         http = getattr(trig.body, "http_trigger", None) if trig.body else None
         old_url = (getattr(http, "url_internet", None) or getattr(http, "url_intranet", None)) if http else None

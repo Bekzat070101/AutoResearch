@@ -344,3 +344,130 @@ def test_changing_db_path_requires_migration(monkeypatch, tmp_path):
         deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db", "--migrate-from-backup", str(backup)])
     assert "BACKUP_DIR" in str(exc.value)
     assert "backup" in calls and "deploy" not in calls
+
+
+def test_implicit_remote_db_requires_migration(monkeypatch, tmp_path):
+    import importlib
+    import io
+    import json
+    import sqlite3
+    import types
+    from urllib.parse import urlparse
+
+    class Obj:
+        def __init__(self, *a, **k):
+            self.__dict__.update(k)
+
+    def _mod(name, **attrs):
+        m = types.ModuleType(name)
+        m.__dict__.update(attrs)
+        return m
+
+    models = _mod("alibabacloud_fc20230330.models")
+    models.__getattr__ = lambda n: Obj
+    calls: list = []
+    remote_env = {"QIYAN_SECRET": "x", "WECHAT_APP_ID": "wx", "ADMIN_TOKEN": "tok",
+                  "BACKUP_DIR": "/mnt/nas/backup"}
+    users = {"n": 2}
+
+    missing = {"on": False}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_function(self, name, req):
+            if missing["on"]:
+                raise RuntimeError("FunctionNotFound")
+            return Obj(body=Obj(environment_variables=dict(remote_env),
+                                nas_config={"mount_points": [{"mount_dir": "/mnt/nas"}]}))
+
+        def create_function(self, req):
+            calls.append("deploy")
+            return Obj(body=Obj(function_name="qiyan"))
+
+        def update_function(self, name, req):
+            calls.append("deploy")
+
+        def create_trigger(self, *a, **k):
+            pass
+
+        def get_trigger(self, name, trig):
+            return Obj(body=Obj(http_trigger=Obj(url_internet="https://fc.example")))
+
+        def put_concurrency_config(self, *a, **k):
+            pass
+
+    monkeypatch.setitem(sys.modules, "alibabacloud_fc20230330", _mod("alibabacloud_fc20230330", models=models))
+    monkeypatch.setitem(sys.modules, "alibabacloud_fc20230330.client", _mod("alibabacloud_fc20230330.client", Client=FakeClient))
+    monkeypatch.setitem(sys.modules, "alibabacloud_fc20230330.models", models)
+    monkeypatch.setitem(sys.modules, "alibabacloud_tea_openapi", _mod("alibabacloud_tea_openapi"))
+    monkeypatch.setitem(sys.modules, "alibabacloud_tea_openapi.models", _mod("alibabacloud_tea_openapi.models", Config=Obj))
+    monkeypatch.setitem(sys.modules, "alibabacloud_tea_util", _mod("alibabacloud_tea_util"))
+    monkeypatch.setitem(sys.modules, "alibabacloud_tea_util.models", _mod("alibabacloud_tea_util.models", RuntimeOptions=Obj))
+    monkeypatch.delitem(sys.modules, "deploy_fc", raising=False)
+    deploy_fc = importlib.import_module("deploy_fc")
+    zip_file = tmp_path / "x.zip"
+    zip_file.write_bytes(b"zip")
+    monkeypatch.setattr(deploy_fc, "OUT", zip_file)
+    monkeypatch.setattr(deploy_fc, "pack", lambda: None)
+    monkeypatch.setattr(deploy_fc, "account_id", lambda ak, sk: "1234567")
+    monkeypatch.setattr(deploy_fc, "load_env", lambda *a, **k: {"AccessKey_ID": "a", "AccessKey_Secret": "b"})
+    monkeypatch.setattr(deploy_fc, "write_state", lambda rows: calls.append("record"))
+    monkeypatch.setattr(deploy_fc, "warm_after_deploy", lambda *a, **k: None)
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        path = urlparse(req.full_url).path
+        method = req.get_method()
+        if method == "POST" and path == "/api/admin/backup":
+            calls.append("backup")
+            return Resp(json.dumps({"ok": True, "object": "qiyan-1.db.gz.enc", "oss": "local"}).encode())
+        if method == "POST" and path == "/api/admin/restore":
+            calls.append("restore")
+            users["n"] = 2
+            return Resp(json.dumps({"ok": True, "object": "qiyan-1.db.gz.enc"}).encode())
+        if path == "/api/health":
+            calls.append("health")
+            body = {"qiyan_users": users["n"],
+                    "db": {"ephemeral": False, "writable": True, "account_store": {"registered": users["n"]}}}
+            return Resp(json.dumps(body).encode())
+        raise AssertionError(req.full_url)
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    real_connect = sqlite3.connect
+
+    def spy_connect(*a, **k):
+        calls.append("integrity")
+        return real_connect(*a, **k)
+
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+
+    with pytest.raises(SystemExit) as exc:
+        deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db"])
+    assert str(exc.value) == "换库必须先备份再恢复：加 --migrate-from-backup"
+    assert "deploy" not in calls and "record" not in calls
+
+    backup = tmp_path / "backup.db"
+    con = real_connect(backup)
+    con.execute("CREATE TABLE users(id INTEGER)")
+    con.commit()
+    con.close()
+    calls.clear()
+    monkeypatch.setattr(FakeClient, "update_function",
+                        lambda self, name, req: (calls.append("deploy"), users.__setitem__("n", 0)))
+    deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db", "--migrate-from-backup", str(backup)])
+    assert [c for c in calls if c != "health"] == ["backup", "integrity", "deploy", "restore", "record"]
+    assert users["n"] == 2
+
+    calls.clear()
+    missing["on"] = True
+    deploy_fc.main(["qiyan-test", "--db", "/tmp/qiyan-test.db", "--allow-ephemeral"])
+    assert "backup" not in calls and "deploy" in calls
