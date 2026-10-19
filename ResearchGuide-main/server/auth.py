@@ -40,8 +40,9 @@ TICKET_TTL = 300           # 网页上的数字五分钟有效
 # 原来 30，一个班两百人同时开访客号 170 个被拦（Codex 第五轮压测）。这里只挡脚本刷号；
 # 访客能花的模型钱另有全体访客合计的上限（budget.guests_cap），刷再多访客号也花不到绑了微信的人头上。
 PER_IP_HOUR = int(os.environ.get("AUTH_PER_IP_HOUR") or 600)
-SIGNIN_USER_LIMIT = 10     # 同一用户名 10 分钟内最多试这么多次（含对的密码）
-SIGNIN_USER_WINDOW = 600
+SIGNIN_PER_IP_HOUR = int(os.environ.get("AUTH_SIGNIN_PER_IP_HOUR") or 3000)
+SIGNIN_USER_LIMIT = int(os.environ.get("AUTH_SIGNIN_USER_LIMIT") or 10)  # 同一用户名窗口内最多失败这么多次
+SIGNIN_USER_WINDOW = int(os.environ.get("AUTH_SIGNIN_USER_WINDOW") or 600)
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
@@ -195,20 +196,25 @@ def _allow(key: str, limit: int, window: float = 3600) -> bool:
     return True
 
 
-def _used_up(key: str, limit: int) -> bool:
+def _used_up(key: str, limit: int, window: float = 3600) -> bool:
     """只查不记。"""
     with _HITS_LOCK:
-        hits = _recent(key, time.time())
+        hits = _recent(key, time.time(), window)
         return hits is None or len(hits) >= limit
 
 
-def _note(key: str) -> None:
+def _note(key: str, window: float = 3600) -> None:
     """只记不查。"""
     now = time.time()
     with _HITS_LOCK:
-        hits = _recent(key, now)
+        hits = _recent(key, now, window)
         if hits is not None:
             hits.append(now)
+
+
+def _clear(key: str) -> None:
+    with _HITS_LOCK:
+        _HITS.pop(key, None)
 
 
 def _ip_allows(request: Request, kind: str) -> bool:
@@ -274,8 +280,12 @@ def account(uid: str) -> dict[str, Any]:
 
 def status() -> dict[str, Any]:
     """给 /api/health：页面据此决定显示「微信登录」还是只给访客入口，以及公众号二维码。"""
+    st = os.environ.get("QIYAN_RECOVERY_STATE")
+    if st not in ("normal", "recovering", "accounts_restored", "lost"):
+        st = "normal"
     return {"wechat_login": wechat.configured() or _dev(), "dev": _dev(), "qr_url": wechat.qr_url(),
-            "account_name": wechat.account_name(), "privacy_version": PRIVACY_VERSION}
+            "account_name": wechat.account_name(), "privacy_version": PRIVACY_VERSION,
+            "recovery": {"event_id": os.environ.get("QIYAN_RECOVERY_EVENT") or "", "state": st}}
 
 
 # ---------- 接口 ----------
@@ -370,13 +380,16 @@ def signin(req: SigninReq, request: Request):
     username = store.normalize_username(req.username)
     if not store.valid_username(username):  # 形状不对的用户名直接 401，不给它建桶（R05：桶总数有上限，别让垃圾名占位）
         raise HTTPException(401, "用户名或密码不对")
-    if not _ip_allows(request, "signin"):
+    if not allow_ip(request, "signin", SIGNIN_PER_IP_HOUR):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
-    if username and not _allow(f"signin-user:{username}", SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
+    key = f"signin-user:{username}"
+    if username and _used_up(key, SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
     user = store.user_by_username(username)
     if not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash")):
+        _note(key, SIGNIN_USER_WINDOW)
         raise HTTPException(401, "用户名或密码不对")
+    _clear(key)
     return {**account(user["id"]), "token": store.create_session(user["id"], SESSION_TTL)}
 
 

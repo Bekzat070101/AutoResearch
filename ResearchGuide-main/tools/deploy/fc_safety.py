@@ -125,3 +125,11 @@ def production_release_checks(env_vars: dict[str, str], name: str, allow_ephemer
         raise SystemExit("发布未完成：health.db 不是 ephemeral=false 且 writable=true")
     record(url)
     return url
+
+
+def require_migration(remote_db, new_db, remote_users, migrate_from) -> None:
+    """远端已有用户且要换库路径时，必须带 --migrate-from-backup。"""
+    if not new_db or not remote_db or remote_db == new_db:
+        return
+    if (remote_users or 0) > 0 and not migrate_from:
+        raise SystemExit("换库必须先备份再恢复：加 --migrate-from-backup")

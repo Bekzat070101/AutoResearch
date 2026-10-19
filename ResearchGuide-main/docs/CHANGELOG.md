@@ -6,6 +6,30 @@
 
 ---
 
+## [2026-10-19] [FIX] 登录可靠性：Codex 第九轮三条速修（换库备份 oss 判定、DB_READY 等副本灌回后再开、显式未认领不替人认领）
+
+- 变更内容：Codex 第九轮对 4d5e09a 逐项验收后给 14 条令（R9-01…14，见 docs/tasks/25 文末与 PR #21 评论），先修三条最小的：`deploy_fc.backup_remote` 只把 admin 返回的 `oss == "ok"` 当上传成功（原来 `"local"` 字符串也算真，换库后新实例 restore 404）；`store.init_db` 把 `DB_READY = True` 挪到本地副本灌回之后（挂盘重试窗口里先进来一个注册会把唯一旧副本覆盖成只剩他一人）；`account_store` 灌回保留显式 `claimed_at = NULL`（旧的仅 uid 账号还能走 `/api/auth/legacy` 认领）。其余 11 条（会话吊销墓碑、OSS 迟到结果作废、认证 deadline 覆盖正文、启动资料 15 秒、公告绑定 event_id、enter 触发副本、`_conn` 遵守挂载门、隐式旧默认库路径也核数、在途失败名额、窗口 TTL、OSS 非 404 进 last_error）下一批。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/deploy_fc.py、server/store.py、server/account_store.py、server/tests/test_deploy_fc.py
+- 决策来源：陈浩文（Codex 第九轮）
+- 登记人：陈浩文
+
+## [2026-10-19] [FIX] 登录可靠性第二批（Codex 第八轮对账）：盘没挂上不建空库、墓碑不复活、只有 me 的 401/410 才清身份、启动与登录后有上限、全局恢复状态
+
+- 变更内容：Codex 第八轮按现网配置实测 8e606c2 后给了七条令，与第一批对账后本批做五件（其余推迟，见 docs/tasks/25 「第八轮对账」）。（L05）函数计算上设了 `QIYAN_DB` 而那个目录没挂盘时，`init_db` 不再在实例根盘上悄悄建一份空库（这正是 10-18 丢人的形状）：`store.db_blocked()` 返回 `nas_not_mounted`，`DB_READY=False`，所有 `/api/*`（除 `/api/health`）回 503 `{"detail":"数据库所在的盘还没挂上，请稍后重试","code":"db_not_ready"}`，health 200 但 `ok=false`、`db.ready=false`、`db.blocked`，`_lifespan` 每 5 秒重试直到挂上；副本灌回跳过 `deleted_users` 里的 uid（删号后 dump 失败也不复活，`tombstoned` 计数）；副本多存 `user_prefs` 里的 `entered_at`，灌回后老用户仍直接进今日而不是回到开场对话。（L06）`confirmSessionGone`/`recoverUser` 只在 `/api/auth/me` 对同一令牌回 401/410 时清身份，503/429/网络错误/超时一律保留并提示「暂时无法核验登录状态，请稍后再试」（原来发版、冷启动时整班被踢回登录页）；启动的 `/api/health`、`/api/paths` 5 秒上限，`/api/auth/me` 的 404 不再当会话失效，开场遮罩最多挡 5 秒；登录/注册成功后的初始化 15 秒上限，超时保留会话并提示「登录成功，页面资料暂未加载，请刷新重试」，不重发 POST；health `auth.recovery={event_id,state}` 来自 `QIYAN_RECOVERY_EVENT`/`QIYAN_RECOVERY_STATE`（normal|recovering|accounts_restored|lost），运维登记 `lost` 后，持旧令牌的浏览器在登录页直接看到「服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。」并默认到注册步骤；`normal` 时第一批的推断提示仍是兜底。
+- 影响文档：docs/CHANGELOG.md、docs/tasks/25-login-reliability.md
+- 影响模块：server/store.py、server/main.py、server/account_store.py、server/auth.py、web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_db_mount_gate.py、server/tests/test_recovery_status.py、server/tests/test_account_store_v2.py、server/tests/test_frontend_state.py
+- 决策来源：陈浩文（Codex 第八轮报告对账）
+- 登记人：陈浩文
+
+## [2026-10-19] [FIX] 登录可靠性：10-18 换库丢人之后——账号副本 v2、限频只计失败、登录页说清、换库必须迁移
+
+- 变更内容：现网 10-18 夜里把 `QIYAN_DB` 从 `/tmp` 换到 NAS 时没有迁数据，换库前的全部账号、会话、访客都没了，之后注册的 5 个用户名账号才进了上游新加的副本；学生看到的是「登录已失效」和「用户名或密码不对」，不是登录代码坏了（实测 signin 401 1.6 秒、register 400、CORS 正常）。本批四件事按 docs/tasks/25-login-reliability.md 的 L01–L04：（L01）`account_store` 副本升到 v2：导出 `users` 表全部行（含访客、微信号）和未过期会话（只有 token 哈希），不含个人 key、明文密码、原始 token；写入先落 `.tmp-<pid>` 再 `os.replace`；2 秒内连续触发合并成一次全量重写，删号立即写，进程退出前 `flush`；灌回改成**合并**（按 uid 补缺、同名不同 uid 记 `collisions` 不覆盖、会话按哈希补缺），不再只在空库时灌；OSS 的拉取从 `init_db` 挪到 `_lifespan` 线程池、10 秒上限，OSS 副本比本地文件旧就不灌（免得复活已删的号）；`/api/health` 的 `db.account_store` 多了 `users`（全部行）、`snapshot_users`、`snapshot_sessions`、`last_dump_at`、`last_hydrate_at`、`last_error`、`collisions`，metrics 多了 `qiyan_account_snapshot_users`、`qiyan_account_snapshot_age_seconds`；旧副本用当前密钥解不开就改名 `.undecryptable-<日期>` 留着。（L02）同用户名的登录桶只记失败、登录成功清桶（原来 10 分钟内含成功一共 10 次，一个班共用账号或输对后反复刷新也会被 429）；signin 的 IP 桶与访客注册桶分开，`AUTH_SIGNIN_PER_IP_HOUR` 默认 3000，`AUTH_SIGNIN_USER_LIMIT`/`AUTH_SIGNIN_USER_WINDOW` 可调。（L03）启动时 `/api/auth/me` 401/404/410 记一个本地标记，随后密码登录再 401 就在登录页加一句「登录已失效且这个账号现在不存在：服务器在 2026-10-18 更换过数据库，之前的账号需要重新注册（用户名可以沿用）…」，登录/注册成功清掉；标记只在 2026-12-01 前写；登录、注册、同意、`me` 四个请求 20 秒超时，超时提示「服务器响应慢（可能在冷启动），请 10 秒后再试」。（L04）`deploy_fc.py --db` 改路径且远端已有用户时必须带 `--migrate-from-backup <本地备份>`，否则拒绝发布；带了就按序 `POST /api/admin/backup` → 本地备份 `integrity_check` → 发版 → health → `POST /api/admin/restore` → 核 `db.account_store.users` 不少于发版前，少了不记成功；备份没上 OSS 且 `BACKUP_DIR` 不在 NAS 时发版前就拒绝（新实例拿不到老实例 /tmp 里的备份）。另：`account_store.status` 在库打不开时也不让 health 500（上游 main 上 `test_health_says_whether_the_db_will_survive_a_restart` 失败）。两版旧副本测试随 v2 契约改写（`v==2`、库里有人也合并、OSS 不在 `init_db` 里拉）。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、docs/tasks/25-login-reliability.md
+- 影响模块：server/account_store.py、server/store.py、server/main.py、server/metrics.py、server/auth.py、web/js/app.js、tools/deploy/deploy_fc.py、tools/deploy/fc_safety.py、tools/verify/verify_frontend_state.js、server/tests/test_account_store.py、server/tests/test_account_store_v2.py、server/tests/test_auth_password.py、server/tests/test_deploy_fc.py、server/tests/test_frontend_state.py
+- 决策来源：陈浩文（学生反馈登不上；实施令 docs/tasks/25）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 发版换空库后已注册账号密码仍能登录
 
 - 变更内容：叠在 GitHub main 35db933（PR #19/#20，界面 w102）上。对照现网「过一会账号密码无效、只能再注册」。根因仍是库在 `/tmp`（`health.db.ephemeral=true`），发版或实例回收换空 SQLite，原用户名不在库里，登录被说成密码不对。新增独立加密副本：注册/升级/删号后写入 `QIYAN_ACCOUNT_STORE` 或 OSS `durable/accounts.json.enc`（不走 `daily/` 的 7 天删除）。新空库启动时若还没有已注册用户，把同一批 uid、用户名、密码哈希灌回，原密码可登录。副本不含明文密码。对话记录、个人 key、方向仍随主库走；A5 NAS 未挂上，本轮不发生产函数。`/api/health` 的 `db` 保留上游 `writable`，并加 `account_store`。

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -13,7 +14,8 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import DEFAULT_NAME, assert_health_persistent, is_function_missing, merge_env, production_release_checks
+from fc_safety import (DEFAULT_NAME, assert_db_under_nas, assert_health_persistent, is_function_missing, merge_env,
+                       nas_mount_dirs, production_release_checks, require_migration)
 from pack_fc import OUT, main as pack
 
 REGION = "cn-hangzhou"
@@ -118,6 +120,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--db", default=None, help="显式改 QIYAN_DB；否则沿用函数上已有的")
     p.add_argument("--allow-ephemeral", action="store_true",
                    help="允许生产库仍在 /tmp 或缺少 QIYAN_SECRET/WECHAT_APP_ID。没有持久盘时不要用来发生产。")
+    p.add_argument("--migrate-from-backup", default=None, metavar="PATH",
+                   help="换库时：先远端备份、校验本地备份文件，发版后恢复并核对用户数。")
     args = p.parse_args(argv)
     name = args.name
     env = load_env()
@@ -134,10 +138,50 @@ def main(argv: list[str] | None = None) -> None:
     remote = existing_env(cli, name)
     env_vars = merge_env(remote, _local_defaults(name), db_flag=args.db, name=name)
     cfg = existing_function(cli, name) if name == DEFAULT_NAME else None
+    remote_db = (remote or {}).get("QIYAN_DB")
+    check_health = check_deployed_health
+    if args.db and remote_db and remote_db != args.db:
+        trig = cli.get_trigger(name, "http")
+        http = getattr(trig.body, "http_trigger", None) if trig.body else None
+        old_url = (getattr(http, "url_internet", None) or getattr(http, "url_intranet", None)) if http else None
+        if not old_url:
+            raise SystemExit("换库前取不到远端地址，无法核对用户数")
+        before = remote_user_count(old_url)
+        print("USERS_BEFORE", before)
+        require_migration(remote_db, args.db, before, args.migrate_from_backup)
+        if before > 0:
+            token = env_vars.get("ADMIN_TOKEN") or ""
+            if not token:
+                raise SystemExit("换库迁移需要函数上的 ADMIN_TOKEN")
+            obj, on_oss = backup_remote(old_url, token)
+            if not on_oss:
+                # 备份只落在老实例的本地盘：发版后的新实例拿不到它，恢复必失败——那就别发
+                try:
+                    assert_db_under_nas(env_vars.get("BACKUP_DIR") or "", nas_mount_dirs(cfg))
+                except SystemExit:
+                    raise SystemExit("备份没上 OSS 且 BACKUP_DIR 不在 NAS：发版后新实例拿不到备份，恢复必失败。"
+                                     "先设 BACKUP_OSS_BUCKET 或把 BACKUP_DIR 放到 NAS 再换库")
+            con = sqlite3.connect(args.migrate_from_backup)
+            try:
+                ok = con.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                con.close()
+            if ok != "ok":
+                raise SystemExit(f"备份文件 integrity_check={ok}，不准换库")
+            print("BACKUP_INTEGRITY ok")
+
+            def check_health(u: str) -> dict:
+                health = check_deployed_health(u)
+                restore_remote(u, token, obj)
+                after = remote_user_count(u)
+                print("USERS_AFTER", after)
+                if after < before:
+                    raise SystemExit(f"恢复后用户数 {after} 少于发版前 {before}，换库未完成")
+                return health
     url = production_release_checks(
         env_vars, name, args.allow_ephemeral, cfg,
         deploy=lambda: _deploy(cli, name, remote, env_vars, code),
-        check_health=check_deployed_health,
+        check_health=check_health,
         record=lambda u: write_state(
             {"REGION": REGION, "FC_FUNCTION": name, "PUBLIC_URL": u, "ACCOUNT_TAIL": aid[-4:]}
             if name == DEFAULT_NAME else {"FC_TEST_FUNCTION": name, "TEST_URL": u}),
@@ -220,6 +264,54 @@ def check_deployed_health(url: str) -> dict:
         body = json.loads(resp.read().decode() or "{}")
     assert_health_persistent(body)
     print("HEALTH persistent")
+    return body
+
+
+def remote_user_count(url: str) -> int:
+    """读 health 的 db.account_store.users（users 表全部行，含访客）；旧版 health 没有就退到 registered / qiyan_users。"""
+    import urllib.request
+    req = urllib.request.Request(f"{str(url).rstrip('/')}/api/health")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode() or "{}")
+    db = body.get("db") if isinstance(body, dict) else None
+    acc = db.get("account_store") if isinstance(db, dict) else None
+    n = None
+    if isinstance(acc, dict):
+        n = acc.get("users")
+        if n is None:
+            n = acc.get("registered")
+    if n is None and isinstance(body, dict):
+        n = body.get("qiyan_users")
+    if n is None:
+        raise SystemExit("health 里没有用户数，无法核对")
+    return int(n)
+
+
+def backup_remote(url: str, token: str) -> tuple[str, bool]:
+    """POST /api/admin/backup，返回 (备份对象名, 是否已上 OSS)。"""
+    import urllib.request
+    req = urllib.request.Request(f"{str(url).rstrip('/')}/api/admin/backup", method="POST",
+                                 headers={"X-Admin-Token": token})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        body = json.loads(resp.read().decode() or "{}")
+    if not body.get("ok") or not body.get("object"):
+        raise SystemExit("远端备份失败，不准换库")
+    on_oss = body.get("oss") == "ok"  # admin 的 oss 字段是 "ok" / "local" 字符串，非空不等于上传成功
+    print("BACKUP", body["object"], "oss" if on_oss else "local")
+    return str(body["object"]), on_oss
+
+
+def restore_remote(url: str, token: str, obj: str) -> dict:
+    """POST /api/admin/restore，把备份灌回新库。"""
+    import urllib.request
+    req = urllib.request.Request(f"{str(url).rstrip('/')}/api/admin/restore", method="POST",
+                                 data=json.dumps({"object": obj}).encode(),
+                                 headers={"X-Admin-Token": token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        body = json.loads(resp.read().decode() or "{}")
+    if not body.get("ok"):
+        raise SystemExit("恢复失败，换库未完成")
+    print("RESTORED", obj)
     return body
 
 

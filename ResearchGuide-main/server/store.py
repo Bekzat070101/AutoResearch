@@ -29,6 +29,7 @@ from schemas import MicroTask, UserFact, new_id, now_iso
 # 原来写死在 server/data/demo.db，Dockerfile 设的变量没人读，重建容器就丢光所有用户。
 DB_PATH = Path(os.environ.get("QIYAN_DB") or Path(__file__).resolve().parent / "data" / "demo.db")
 _LOCK = threading.Lock()
+DB_READY = False
 
 
 USER_DELETED = "user deleted"  # 触发器拒绝写入时的错误信息；main 把它转成 410
@@ -46,8 +47,17 @@ def ephemeral() -> bool:
     return not os.environ.get("QIYAN_DB") or not _own_mount(DB_PATH)
 
 
+def db_blocked() -> str | None:
+    """函数计算上设了 QIYAN_DB、那个目录却没挂盘：不建空库，返回原因；否则 None。"""
+    if os.environ.get("FC_FUNCTION_NAME") and os.environ.get("QIYAN_DB") and not _own_mount(DB_PATH):
+        return "nas_not_mounted"
+    return None
+
+
 def db_writable() -> bool:
     """库所在目录存在且可写；库文件已存在时也要可写。"""
+    if db_blocked():
+        return False
     parent = DB_PATH.parent
     if not parent.is_dir() or not os.access(parent, os.W_OK):
         return False
@@ -540,6 +550,12 @@ def _conn():
 
 
 def init_db() -> None:
+    global DB_READY
+    reason = db_blocked()
+    if reason:
+        DB_READY = False
+        print(json.dumps({"event": "db_blocked", "reason": reason, "path": str(DB_PATH)}, ensure_ascii=False))
+        return
     with _LOCK, _conn() as c:
         c.execute("PRAGMA journal_mode=WAL")  # 读写不互相阻塞，演示时多开几个页面也不锁库
         c.executescript(_SCHEMA)
@@ -557,10 +573,11 @@ def init_db() -> None:
     migrate_legacy_secrets()
     try:
         import account_store
-        account_store.hydrate_if_empty()
+        account_store.hydrate_file()
     except Exception as exc:
         print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
                          ensure_ascii=False))
+    DB_READY = True  # 本地副本灌回之前不开门：挂盘重试窗口里先进来一个注册会把唯一的旧副本覆盖成只剩他一人（Codex 第九轮复现）
 
 
 def migrate_legacy_secrets() -> None:
@@ -591,6 +608,7 @@ def create_user(nickname: str) -> dict[str, Any]:
             "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at) VALUES(?,?,?,?,?,?)",
             (uid, nickname, token, "{}", now, now),
         )
+    _accounts_changed()
     return {"uid": uid, "token": token, "nickname": nickname}
 
 
@@ -975,6 +993,7 @@ def create_wechat_user(nickname: str, openid: str) -> str:
         with _LOCK, _conn() as c:
             c.execute("DELETE FROM users WHERE id=?", (uid,))
         raise
+    _accounts_changed()
     return uid
 
 
@@ -983,6 +1002,8 @@ def bind_wechat(uid: str, openid: str) -> bool:
     with _LOCK, _conn() as c:
         cur = c.execute("UPDATE users SET wechat_openid=?, claimed_at=COALESCE(claimed_at, ?)"
                         " WHERE id=? AND wechat_openid IS NULL", (openid, now_iso(), uid))
+    if cur.rowcount == 1:
+        _accounts_changed()
     return cur.rowcount == 1
 
 
@@ -1006,6 +1027,7 @@ def create_session(uid: str, ttl: float) -> str:
     with _LOCK, _conn() as c:
         c.execute("INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen) VALUES(?,?,?,?,?)",
                   (_token_hash(token), uid, now_iso(), now + ttl, now))
+    _accounts_changed()
     return token
 
 
@@ -1040,6 +1062,7 @@ def session_user(token: str, ttl: float) -> str | None:
 def drop_session(token: str) -> None:
     with _LOCK, _conn() as c:
         c.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+    _accounts_changed()
 
 
 
@@ -1157,15 +1180,15 @@ def delete_user(uid: str) -> dict[str, int]:
         c.execute("DELETE FROM wechat_tickets WHERE guest_uid=?", (uid,))
         counts["users"] = c.execute("DELETE FROM users WHERE id=?", (uid,)).rowcount
     print(json.dumps({"event": "user_deleted", "uid": uid, "at": now_iso()}, ensure_ascii=False))
-    _accounts_changed()
+    _accounts_changed(immediate=True)
     return counts
 
 
-def _accounts_changed() -> None:
-    """把已注册账号的用户名和密码哈希写到独立副本。失败不影响主路径。"""
+def _accounts_changed(immediate: bool = False) -> None:
+    """把全部账号与未过期会话（只有哈希）写到独立副本；2 秒内合并一次，删号立即写。失败不影响主路径。"""
     try:
         import account_store
-        account_store.dump_accounts()
+        account_store.dump_accounts(immediate=immediate)
     except Exception as exc:
         print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
                          ensure_ascii=False))

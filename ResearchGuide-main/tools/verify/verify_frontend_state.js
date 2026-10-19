@@ -403,6 +403,12 @@ async function retry() {
   if (which === "direction-context-errors" || which === "all") await directionCtxErrors();
   if (which === "direction-context-save" || which === "all") await directionCtxSave();
   if (which === "direction-context-ui" || which === "all") await directionCtxUi();
+  if (which === "login-reset-hint" || which === "all") await loginResetHint();
+  if (which === "api-timeout" || which === "all") await apiTimeout();
+  if (which === "session-confirm-only-401" || which === "all") await l06SessionConfirm();
+  if (which === "boot-health-timeout" || which === "all") await l06BootHealthTimeout();
+  if (which === "after-enter-timeout" || which === "all") await l06AfterEnterTimeout();
+  if (which === "recovery-notice" || which === "all") await l06RecoveryNotice();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -1085,5 +1091,322 @@ async function directionCtxUi() {
     check(env.S.view === "today", `${name}: 最终仍停在今日页`, env.S.view);
     check(caches(env) === k0, `${name}: 两画像缓存/远端不变`, caches(env));
     check(env.toasts.length === t0, `${name}: 无旧操作提示`, J(env.toasts.slice(t0)));
+  }
+}
+
+/* ===================== 25-L03 换库后登录页说清「账号需要重新注册」、登录类请求超时（独立区块） ===================== */
+function l03Env(hint) {
+  const document = r6Dom();
+  const mk = document.createElement;
+  document.createElement = (tag) => { const n = mk(tag); n.addEventListener = () => {}; return n; };
+  document.createTextNode = (t) => { const n = mk("#text"); n.textContent = t; return n; };
+  const localStorage = r6Storage();
+  if (hint) { localStorage.setItem("rg_reset_hint", "1"); localStorage.setItem("rg_last_uid", "u-old"); }
+  const env = { document, localStorage, toasts: [], reply: null, S: { uid: "", token: "", auth: { wechat_login: false } } };
+  const noop = () => {};
+  const src = ["el", "consentRow", "renderLogin"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "document", "toast", "$nav", "$header", "$app",
+    "stopWxPoll", "startWechat", "openPrivacy", "revokeToken", "setSession", "afterEnter", "openConnect", "setView",
+    src + "; return { renderLogin };");
+  const $app = document.createElement("main");
+  document.body.appendChild($app);
+  const api = async () => { const r = env.reply; if (r instanceof Error) throw r; return r; };
+  Object.assign(env, { $app }, f(env.S, api, localStorage, document, (t) => env.toasts.push(t), {}, {}, $app,
+    noop, noop, noop, noop, () => false, async () => {}, noop, noop));
+  env.signinBtn = () => r6Walk($app).find((n) => n.tag === "button" && n.innerHTML === "登录");
+  return env;
+}
+
+/* 参数里有默认值 {} 时，函数体从 ") {" 开始数括号 */
+function l03Extract(name) {
+  const m = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`).exec(appSrc);
+  if (!m) throw new Error("找不到函数: " + name);
+  let i = appSrc.indexOf(") {", m.index) + 2, d = 0, j = i;
+  for (; j < appSrc.length; j++) {
+    if (appSrc[j] === "{") d++;
+    else if (appSrc[j] === "}") { d--; if (d === 0) break; }
+  }
+  return appSrc.slice(m.index, j + 1);
+}
+
+function l03Unauth() { const e = new Error("用户名或密码不对"); e.status = 401; return e; }
+
+async function loginResetHint() {
+  console.log("=== L03 换库后登录页说清「账号需要重新注册」 ===");
+  const HINT = "登录已失效且这个账号现在不存在：服务器在 2026-10-18 更换过数据库，之前的账号需要重新注册（用户名可以沿用）。如果你刚才只是密码输错，再试一次即可。";
+  // boot：/api/auth/me 401 → 记下标记与被清掉的 uid
+  {
+    const localStorage = r6Storage();
+    localStorage.setItem("rg_uid", "u-old"); localStorage.setItem("rg_token", "t-old");
+    const S = { uid: "u-old", token: "t-old" };
+    const reloads = [];
+    const api = async (m, url) => {
+      if (url === "/api/auth/me") throw l03Unauth();
+      if (url === "/api/health") return {};
+      return null;
+    };
+    const src = ["boot", "clearSession", "clearLocalDrafts", "sessionGoneMsg"].map((n) => extract(appSrc, n)).join("\n");
+    const f = new Function("S", "api", "localStorage", "sessionStorage", "applyLlmPill", "applyPaths", "buildTutorials",
+      "setSession", "loadPrefs", "ensurePortrait", "toast", "reloadInto",
+      "let directionEpoch = 0;\n" + src + "; return { boot };");
+    const noop = () => {};
+    const { boot: realBoot } = f(S, api, localStorage, r6Storage(), noop, noop, noop, noop, async () => {}, async () => {},
+      noop, (v, msg) => reloads.push([v, msg]));
+    await realBoot();
+    check(localStorage.getItem("rg_reset_hint") === "1", "boot 401 后 rg_reset_hint=1", String(localStorage.getItem("rg_reset_hint")));
+    check(localStorage.getItem("rg_last_uid") === "u-old", "boot 401 后 rg_last_uid 是被清掉的 uid", String(localStorage.getItem("rg_last_uid")));
+    check(S.uid === "" && reloads.length === 1 && reloads[0][0] === "login", "仍清会话并回登录页", JSON.stringify(reloads));
+  }
+  // 有标记：signin 401 → 表单下方出现固定文案，点两次也只有一段，toast 照旧
+  {
+    const env = l03Env(true);
+    env.renderLogin();
+    const btn = env.signinBtn();
+    check(!!(btn && btn.onclick), "找到登录按钮");
+    const form = btn.parent;
+    const [u, p] = form.children;
+    u.value = "xiaobei"; p.value = "pw123456";
+    env.reply = l03Unauth();
+    await btn.onclick();
+    await btn.onclick();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-reset-hint"));
+    check(notes.length === 1, "提示只出现一次", String(notes.length));
+    check(!!notes[0] && notes[0].innerHTML === HINT && notes[0].className === "login-note login-reset-hint", "提示文案与样式固定", notes[0] && notes[0].innerHTML);
+    check(!!notes[0] && notes[0].parent === form && form.children.indexOf(notes[0]) > form.children.indexOf(btn), "提示在表单下方");
+    check(env.toasts.length === 2 && env.toasts[0] === "用户名或密码不对", "toast 照旧", JSON.stringify(env.toasts));
+    env.reply = { uid: "u-new", token: "t-new", consent_ok: true };
+    await btn.onclick();
+    check(env.localStorage.getItem("rg_reset_hint") === null, "登录成功清掉 rg_reset_hint");
+    check(env.localStorage.getItem("rg_last_uid") === null, "登录成功清掉 rg_last_uid");
+  }
+  // 无标记：signin 401 只有 toast
+  {
+    const env = l03Env(false);
+    env.renderLogin();
+    const btn = env.signinBtn();
+    const [u, p] = btn.parent.children;
+    u.value = "xiaobei"; p.value = "pw123456";
+    env.reply = l03Unauth();
+    await btn.onclick();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-reset-hint"));
+    check(notes.length === 0 && env.toasts.length === 1, "无标记时 401 只有 toast", JSON.stringify(env.toasts));
+  }
+}
+
+async function apiTimeout() {
+  console.log("=== L03 登录类请求超时 ===");
+  const SLOW = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+  const signals = [];
+  const fetch = (url, opt) => { signals.push(opt.signal); return new Promise(() => {}); };
+  const src = ["api", "apiFetch", "authHeaders"].map((n) => l03Extract(n)).join("\n");
+  const f = new Function("S", "fetch", "apiUrl", "errText", "recoverUser", src + "; return { api };");
+  const { api } = f({ token: "" }, fetch, (p) => p, () => "", async () => false);
+  const t0 = Date.now();
+  const out = await Promise.race([
+    api("POST", "/api/auth/signin", { username: "a", password: "b" }, { timeoutMs: 50 }).then(() => "resolved", (e) => e),
+    new Promise((r) => setTimeout(() => r("pending"), 1000)),
+  ]);
+  check(out instanceof Error && out.message === SLOW, "带 timeoutMs 的请求 1 秒内以固定文案 reject", String(out && out.message || out));
+  check(Date.now() - t0 < 1000, "reject 在 1 秒内", String(Date.now() - t0));
+  check(!!signals[0] && signals[0].aborted === true, "超时后 fetch 被 abort");
+  let settled = false;
+  api("POST", "/api/chat", { text: "x" }).then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((r) => setTimeout(r, 200));
+  check(!settled && !(signals[1] && signals[1].aborted), "不带 timeoutMs 的请求不被 abort");
+}
+
+/* ===================== 25-L06 只有 me 的 401/410 才清身份、启动与登录后初始化有上限、恢复状态公告（独立区块） ===================== */
+function l06Clock() {
+  let now = 0, seq = 0;
+  const q = [];
+  const c = {
+    setTimeout: (fn, ms = 0) => { q.push({ id: ++seq, at: now + ms, fn }); return seq; },
+    clearTimeout: (id) => { const k = q.findIndex((t) => t.id === id); if (k >= 0) q.splice(k, 1); },
+    now: () => now,
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        await tick(); await tick();
+        q.sort((a, b) => a.at - b.at || a.id - b.id);
+        if (!q.length || q[0].at > end) break;
+        const t = q.shift();
+        now = t.at;
+        t.fn();
+      }
+      now = end;
+      await tick(); await tick();
+    },
+  };
+  return c;
+}
+
+function l06Res(status, body) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+function l06Api(S, fetch, clock) {
+  const src = ["api", "apiFetch", "authHeaders"].map((n) => l03Extract(n)).join("\n");
+  return new Function("S", "fetch", "apiUrl", "errText", "recoverUser", "confirmSessionGone", "setTimeout", "clearTimeout",
+    "let sessionKick = null;\n" + src + "; return { api };")(
+    S, fetch, (p) => p, (d, st) => (d && d.detail) || `请求失败 (${st})`, async () => false, async () => {},
+    clock.setTimeout, clock.clearTimeout).api;
+}
+
+async function l06SessionConfirm() {
+  console.log("=== L06 只有 me 的 401/410 才清身份 ===");
+  const MSG = "暂时无法核验登录状态，请稍后再试";
+  const src = ["lostUser", "sessionGoneMsg", "recoverUser", "confirmSessionGone"].map((n) => extract(appSrc, n)).join("\n");
+  const mkErr = (st) => { const e = new Error("x"); e.status = st; return e; };
+  const outcomes = [[200, false], [401, true], [404, false], [410, true], [429, false], [503, false], ["net", false]];
+  for (const fn of ["confirmSessionGone", "recoverUser"]) {
+    for (const [st, gone] of outcomes) {
+      const S = { uid: "u1", token: "t1" };
+      const toasts = [], outs = [];
+      const api = async (m, url, body, opt) => {
+        if (url !== "/api/auth/me" || !opt || opt.timeoutMs !== 20000) throw new Error("bad call " + url);
+        if (st === 200) return { uid: "u1" };
+        if (st === "net") throw new TypeError("Failed to fetch");
+        throw mkErr(st);
+      };
+      const signedOut = (m) => { outs.push(m); S.uid = ""; S.token = ""; };
+      const fns = new Function("S", "api", "signedOut", "toast", src + "; return { recoverUser, confirmSessionGone };")(
+        S, api, signedOut, (t) => toasts.push(t));
+      await (fn === "recoverUser" ? fns.recoverUser(new Error("user not found")) : fns.confirmSessionGone());
+      if (gone) check(S.uid === "" && S.token === "" && outs.length === 1, `${fn} me ${st}: 清身份`, JSON.stringify(S));
+      else check(S.uid === "u1" && S.token === "t1" && outs.length === 0, `${fn} me ${st}: 身份保留`, JSON.stringify(S));
+      if (gone || st === 200) check(toasts.length === 0, `${fn} me ${st}: 无核验失败 toast`, JSON.stringify(toasts));
+      else check(toasts.length === 1 && toasts[0] === MSG, `${fn} me ${st}: 「暂时无法核验登录状态」toast`, JSON.stringify(toasts));
+    }
+    // me 挂起期间换了令牌，返回 401：不清、不 toast
+    {
+      const S = { uid: "u1", token: "t1" };
+      const toasts = [], outs = [];
+      let rej;
+      const api = () => new Promise((_, r) => { rej = r; });
+      const fns = new Function("S", "api", "signedOut", "toast", src + "; return { recoverUser, confirmSessionGone };")(
+        S, api, (m) => { outs.push(m); S.uid = ""; S.token = ""; }, (t) => toasts.push(t));
+      const p = fn === "recoverUser" ? fns.recoverUser(new Error("user not found")) : fns.confirmSessionGone();
+      await tick();
+      S.token = "t2";
+      rej(mkErr(401));
+      await p;
+      check(S.uid === "u1" && S.token === "t2" && outs.length === 0 && toasts.length === 0, `${fn} 挂起期间换账号后 401：不清、不 toast`, JSON.stringify({ S, toasts }));
+    }
+  }
+}
+
+async function l06BootHealthTimeout() {
+  console.log("=== L06 health 卡住时启动 5 秒后继续 ===");
+  const clock = l06Clock();
+  const S = { uid: "u1", token: "t1", entered: true };
+  const calls = [];
+  const fetch = (url) => {
+    calls.push(url);
+    if (url === "/api/health") return new Promise(() => {});
+    if (url === "/api/paths") return Promise.resolve(l06Res(200, { paths: [] }));
+    if (url === "/api/auth/me") return Promise.resolve(l06Res(200, { uid: "u1", consent_ok: true, entered: true }));
+    return Promise.resolve(l06Res(200, {}));
+  };
+  const api = l06Api(S, fetch, clock);
+  const splash = { id: "boot", className: "", removedAt: null };
+  splash.classList = {
+    contains: (c) => String(splash.className).split(/\s+/).includes(c),
+    add: (c) => { splash.className = (splash.className + " " + c).trim(); },
+  };
+  splash.remove = () => { if (splash.removedAt === null) splash.removedAt = clock.now(); };
+  splash.outAt = null;
+  const origAdd = splash.classList.add;
+  splash.classList.add = (c) => { if (c === "out" && splash.outAt === null) splash.outAt = clock.now(); origAdd(c); };
+  const document = { getElementById: (id) => (id === "boot" && splash.removedAt === null ? splash : null) };
+  const views = [], sets = [];
+  const src = ["boot", "clearSession", "clearLocalDrafts", "sessionGoneMsg"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "sessionStorage", "applyLlmPill", "applyPaths", "buildTutorials",
+    "setSession", "loadPrefs", "ensurePortrait", "toast", "reloadInto", "setView", "openPrivacy", "document", "setTimeout",
+    "let directionEpoch = 0;\n" + src + "; return { boot };");
+  const noop = () => {};
+  const { boot: realBoot } = f(S, api, r6Storage(), r6Storage(), noop, noop, noop,
+    (r) => { sets.push(r); S.uid = r.uid; if (r.entered !== undefined) S.entered = !!r.entered; }, async () => {}, async () => {},
+    noop, noop, (v) => views.push(v), noop, document, clock.setTimeout);
+  let done = false;
+  realBoot().then(() => { done = true; });
+  await clock.advance(4999);
+  check(!done && views.length === 0, "5 秒前仍在等 health", JSON.stringify(calls));
+  await clock.advance(1);
+  check(splash.outAt !== null && splash.outAt <= 5000, "遮罩在 5 秒内开始移除", String(splash.outAt));
+  await clock.advance(1000);
+  check(done, "5 秒后启动继续并结束");
+  check(calls.includes("/api/auth/me") && sets.length === 1, "/api/auth/me 照常请求", JSON.stringify(calls));
+  check(S.uid === "u1" && S.token === "t1", "me 200 时身份保留", JSON.stringify(S));
+  check(views.length === 1, "setView 被调用", JSON.stringify(views));
+  check(splash.removedAt !== null && splash.removedAt <= 5600, "遮罩已移除", String(splash.removedAt));
+}
+
+function l06LoginEnv(opts = {}) {
+  const document = r6Dom();
+  const mk = document.createElement;
+  document.createElement = (tag) => { const n = mk(tag); n.addEventListener = () => {}; return n; };
+  document.createTextNode = (t) => { const n = mk("#text"); n.textContent = t; return n; };
+  const localStorage = r6Storage();
+  if (opts.recovery !== undefined) localStorage.setItem("rg_recovery_state", opts.recovery);
+  const clock = l06Clock();
+  const env = { document, localStorage, clock, toasts: [], fetches: [], S: { uid: "", token: "", auth: { wechat_login: false } } };
+  const fetch = (url) => {
+    env.fetches.push(url);
+    if (url === "/api/auth/signin") return Promise.resolve(l06Res(200, { uid: "u-new", token: "t-new", consent_ok: true }));
+    return Promise.resolve(l06Res(200, {}));
+  };
+  const api = l06Api(env.S, fetch, clock);
+  const noop = () => {};
+  const src = ["el", "consentRow", "renderLogin"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "document", "toast", "$nav", "$header", "$app",
+    "stopWxPoll", "startWechat", "openPrivacy", "revokeToken", "setSession", "afterEnter", "openConnect", "setView", "setTimeout",
+    src + "; return { renderLogin };");
+  const $app = document.createElement("main");
+  document.body.appendChild($app);
+  const setSession = (r) => { env.S.uid = r.uid; if (r.token) env.S.token = r.token; return false; };
+  Object.assign(env, { $app }, f(env.S, api, localStorage, document, (t) => env.toasts.push(t), {}, {}, $app,
+    noop, noop, noop, noop, setSession, opts.afterEnter || (async () => {}), noop, noop, clock.setTimeout));
+  env.btn = (label) => r6Walk($app).find((n) => n.tag === "button" && n.innerHTML === label);
+  return env;
+}
+
+async function l06AfterEnterTimeout() {
+  console.log("=== L06 登录成功后初始化 15 秒上限 ===");
+  const MSG = "登录成功，页面资料暂未加载，请刷新重试";
+  const env = l06LoginEnv({ afterEnter: () => new Promise(() => {}) });
+  env.renderLogin();
+  const btn = env.btn("登录");
+  const [u, p] = btn.parent.children;
+  u.value = "xiaobei"; p.value = "pw123456";
+  let done = false;
+  btn.onclick().then(() => { done = true; });
+  await env.clock.advance(14999);
+  check(!done && btn.disabled === true, "15 秒前仍在等 afterEnter");
+  await env.clock.advance(1);
+  check(done, "15 秒后 onclick 结束");
+  check(env.S.token === "t-new", "S.token 仍在", env.S.token);
+  check(env.toasts.includes(MSG), "toast 文案逐字", JSON.stringify(env.toasts));
+  check(btn.disabled === false, "按钮恢复可点");
+  check(env.fetches.filter((x) => x === "/api/auth/signin").length === 1, "signin 只请求一次", JSON.stringify(env.fetches));
+}
+
+async function l06RecoveryNotice() {
+  console.log("=== L06 登录页的全局恢复状态公告 ===");
+  const LOST = "服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。";
+  {
+    const env = l06LoginEnv({ recovery: "lost" });
+    env.renderLogin();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-recovery"));
+    check(notes.length === 1 && notes[0].innerHTML === LOST && notes[0].className === "login-note login-recovery", "lost：逐字文案", notes[0] && notes[0].innerHTML);
+    const rbtn = env.btn("注册并进入");
+    check(!!rbtn && rbtn.parent.hidden === false, "lost：注册步骤展开");
+    const sbtn = env.btn("登录");
+    check(!!sbtn && sbtn.parent.hidden === true, "lost：登录步骤收起");
+  }
+  for (const st of ["normal", undefined]) {
+    const env = l06LoginEnv({ recovery: st });
+    env.renderLogin();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-recovery"));
+    check(notes.length === 0, `${st || "缺省"}：没有 .login-recovery`, String(notes.length));
   }
 }
