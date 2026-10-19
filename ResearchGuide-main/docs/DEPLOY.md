@@ -103,6 +103,7 @@ curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" $PUBLIC_URL/api/admin/stats
 2. 控制台核对：实例数限制是否为 1；是否已挂 NAS `/mnt/nas`；环境变量有无 `QIYAN_SECRET` / `WECHAT_APP_ID` / `TRUST_PROXY` / `ADMIN_TOKEN`；日志是否投递 SLS。`BACKUP_DIR` 挂盘后必须指到持久卷，不要再用 `/tmp/qiyan-backup`。
 3. 先在 `qiyan-test` 验 NAS：挂同一盘、压测 SQLite 30 分钟并中途发版 2 次，看 `integrity_check` 和 `database is locked`，两次发版后用户数不变。不过关不切生产。
 4. 持久盘（A5，待确认）：给 `qiyan` 配 VPC + NAS 挂 `/mnt/nas`，设 `QIYAN_DB=/mnt/nas/qiyan.db`。验收：`curl -fsS $PUBLIC_URL/api/health | python -c "import json,sys; d=json.load(sys.stdin); assert d['db']['ephemeral'] is False"`。发两次版后用户数不变。**没有这一步，禁止把生产发版写成已完成。**
+5. 换库（改 `QIYAN_DB` 路径）= 备份 → 换 → 恢复 → 核数，缺一步不算完成：先拉一份远端备份到本地，再 `python deploy_fc.py --db /mnt/nas/qiyan.db --migrate-from-backup <本地备份文件>`。脚本按序：`POST /api/admin/backup` → 本地备份 `PRAGMA integrity_check` → 发版 → health 后检 → `POST /api/admin/restore` → 核 `qiyan_users` 不少于发版前；少了不记成功。远端有用户而不带 `--migrate-from-backup` 时脚本拒绝发布。副本是兜底，不是迁移。
 5. 钉钉/企微群机器人：GitHub `secrets.ALERT_WEBHOOK` + `secrets.QIYAN_URL`。工作时间 1 小时内响应。未建群前探活失败只在 Actions 里红。
 6. RAM 子账号：只给张效端 FC/OSS/BSS 只读发布权。未开子账号前不要用主账号 AK 当长期方案。
 7. OSS 备份桶：私有、SSE-OSS、`daily/` 前缀 7 天删除。设 `BACKUP_OSS_BUCKET` 后备份才上云；没设时只写 `BACKUP_DIR`。
