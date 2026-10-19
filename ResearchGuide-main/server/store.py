@@ -304,6 +304,10 @@ CREATE TABLE IF NOT EXISTS deleted_users (
   id TEXT PRIMARY KEY,
   deleted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+  token_hash TEXT PRIMARY KEY,
+  revoked_at REAL NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(user_id, task_id, created_at);
@@ -528,6 +532,8 @@ def restore_gate(timeout: float = 5):
 @contextmanager
 def _conn():
     """一次调用一个连接：成功提交、异常回滚，最后一定关闭（原来只提交不关闭，连接会一直泄漏）。"""
+    if db_blocked():
+        raise OSError("db_not_ready")
     me = threading.get_ident()
     with _GATE:
         while _GATE_STATE["owner"] not in (None, me):
@@ -1060,8 +1066,11 @@ def session_user(token: str, ttl: float) -> str | None:
 
 
 def drop_session(token: str) -> None:
+    h, now = _token_hash(token), time.time()
     with _LOCK, _conn() as c:
-        c.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+        c.execute("INSERT OR IGNORE INTO revoked_sessions(token_hash, revoked_at) VALUES(?, ?)", (h, now))
+        c.execute("DELETE FROM sessions WHERE token_hash=?", (h,))
+        c.execute("DELETE FROM revoked_sessions WHERE revoked_at < ?", (now - 45 * 86400,))
     _accounts_changed()
 
 
@@ -1173,6 +1182,8 @@ def delete_user(uid: str) -> dict[str, int]:
         row = c.execute("SELECT wechat_openid FROM users WHERE id=?", (uid,)).fetchone()
         # 先立墓碑（同一个事务里）：从这一刻起，还在路上的请求再写这个人的行都会被触发器拒绝
         c.execute("INSERT OR IGNORE INTO deleted_users(id, deleted_at) VALUES(?, ?)", (uid, now_iso()))
+        c.execute("INSERT OR IGNORE INTO revoked_sessions(token_hash, revoked_at) "
+                  "SELECT token_hash, ? FROM sessions WHERE user_id=?", (time.time(), uid))
         for t in _user_tables(c):
             counts[t] = c.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,)).rowcount
         if row and row["wechat_openid"]:

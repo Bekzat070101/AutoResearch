@@ -181,7 +181,12 @@ def export_snapshot() -> dict[str, Any]:
         sessions = [{k: r[k] for k in _SESSION_COLS}
                     for r in c.execute(f"SELECT {', '.join(_SESSION_COLS)} FROM sessions WHERE expires_at>?",
                                        (time.time(),))]
-    return {"v": 2, "saved_at": now_iso(), "users": users, "sessions": sessions}
+        revoked = [{"token_hash": r["token_hash"], "revoked_at": r["revoked_at"]}
+                   for r in c.execute("SELECT token_hash, revoked_at FROM revoked_sessions")]
+        deleted = [{"id": r["id"], "deleted_at": r["deleted_at"]}
+                   for r in c.execute("SELECT id, deleted_at FROM deleted_users")]
+    return {"v": 2, "saved_at": now_iso(), "users": users, "sessions": sessions,
+            "revoked": revoked, "deleted": deleted}
 
 
 def _write_atomic(path: Path, blob: bytes) -> None:
@@ -227,6 +232,8 @@ def _dump_now() -> dict[str, Any]:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 _set_aside_undecryptable(path)
                 _write_atomic(path, blob)
+                with _STATE_LOCK:
+                    _STATE["file_saved_at"] = payload["saved_at"]
                 via.append("file")
             if oss_enabled():
                 _put_oss(blob)
@@ -308,31 +315,44 @@ def hydrate_file() -> dict[str, Any]:
     return _hydrate_logged(payload, "file")
 
 
-def hydrate_oss() -> dict[str, Any]:
-    """main._lifespan 在线程池里调，带时限；失败只记日志与 health。"""
-    if not enabled() or not oss_enabled():
-        return {"skipped": "disabled"}
-    try:
-        blob = _get_oss()
-    except Exception as exc:
-        note_error(type(exc).__name__)
-        return {"skipped": type(exc).__name__}
+def fetch_oss_payload() -> dict[str, Any] | None:
+    """只取 + 解密，不灌库：main._lifespan 在线程池里跑它，超时就丢掉结果。没有副本或解不开返回 None；取的异常上抛。"""
+    blob = _get_oss()
     if not blob:
-        return {"skipped": "no_snapshot"}
+        return None
     try:
-        payload = _decrypt(blob)
+        return _decrypt(blob)
     except Exception:
         note_error("invalid")
         print(json.dumps({"event": "account_store_invalid", "via": "oss"}, ensure_ascii=False))
-        return {"skipped": "invalid"}
-    with _STATE_LOCK:
-        file_at = _STATE["file_saved_at"]
-    if file_at and str(payload.get("saved_at") or "") <= file_at:
-        # 本地文件副本更新（OSS 那次 put 失败过）：旧副本不往回灌，免得把已删的号复活
-        print(json.dumps({"event": "account_store_oss_stale", "oss": payload.get("saved_at"), "file": file_at},
-                         ensure_ascii=False))
-        return {"skipped": "older_than_file"}
-    return _hydrate_logged(payload, "oss")
+        return None
+
+
+def apply_oss_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """新鲜度比较与灌回在同一把 _WRITE_LOCK 里：比较之后、灌回之前落下的本地 dump 不会被旧 OSS 越过。"""
+    with _WRITE_LOCK:
+        with _STATE_LOCK:
+            file_at = _STATE["file_saved_at"]
+        if file_at and str(payload.get("saved_at") or "") <= file_at:
+            # 本地文件副本更新（OSS 那次 put 失败过）：旧副本不往回灌，免得把已删的号复活
+            print(json.dumps({"event": "account_store_oss_stale", "oss": payload.get("saved_at"), "file": file_at},
+                             ensure_ascii=False))
+            return {"skipped": "older_than_file"}
+        return _hydrate_logged(payload, "oss")
+
+
+def hydrate_oss() -> dict[str, Any]:
+    """同步入口：取到就灌（测试与手动重试用）；失败只记日志与 health。"""
+    if not enabled() or not oss_enabled():
+        return {"skipped": "disabled"}
+    try:
+        payload = fetch_oss_payload()
+    except Exception as exc:
+        note_error(type(exc).__name__)
+        return {"skipped": type(exc).__name__}
+    if payload is None:
+        return {"skipped": "no_snapshot"}
+    return apply_oss_payload(payload)
 
 
 def _hydrate_logged(payload: dict[str, Any], via: str) -> dict[str, Any]:
@@ -354,6 +374,19 @@ def hydrate(payload: dict[str, Any]) -> dict[str, Any]:
     users = sessions = tombstoned = 0
     entered: list[tuple[str, Any]] = []
     with store._LOCK, store._conn() as c:
+        for raw in payload.get("deleted") or []:
+            if isinstance(raw, dict) and str(raw.get("id") or "").strip():
+                c.execute("INSERT OR IGNORE INTO deleted_users(id, deleted_at) VALUES(?, ?)",
+                          (str(raw["id"]).strip(), str(raw.get("deleted_at") or now_iso())))
+        for raw in payload.get("revoked") or []:
+            if not isinstance(raw, dict) or not str(raw.get("token_hash") or ""):
+                continue
+            try:
+                at = float(raw.get("revoked_at"))
+            except (TypeError, ValueError):
+                at = time.time()
+            c.execute("INSERT OR IGNORE INTO revoked_sessions(token_hash, revoked_at) VALUES(?, ?)",
+                      (str(raw["token_hash"]), at))
         for raw in payload.get("users") or []:
             if not isinstance(raw, dict):
                 continue
@@ -430,6 +463,8 @@ def _insert_session_if_missing(c, row: dict[str, Any]) -> bool:
         return False
     if c.execute("SELECT 1 FROM sessions WHERE token_hash=?", (h,)).fetchone():
         return False
+    if c.execute("SELECT 1 FROM revoked_sessions WHERE token_hash=?", (h,)).fetchone():
+        return False
     if not c.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
         return False
     try:
@@ -471,13 +506,14 @@ def _put_oss(blob: bytes) -> None:
 
 
 def _get_oss() -> bytes | None:
+    import urllib.error
     import urllib.request
     try:
         with urllib.request.urlopen(_oss_signed("GET"), timeout=30) as resp:
             return resp.read()
     except Exception as exc:
-        if "404" in str(exc) or "NoSuchKey" in str(exc):
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
             return None
         print(json.dumps({"event": "account_store_oss_get_failed", "error": type(exc).__name__},
                          ensure_ascii=False))
-        return None
+        raise
