@@ -221,6 +221,8 @@ async def record_metrics(request: Request, call_next):
     t0 = time.time()
     raw = request.url.path or ""
     watch = raw.startswith("/api/") or raw in ("/", "/metrics")
+    if watch:
+        _metrics.observe_start()
     try:
         resp = await call_next(request)
     except Exception:
@@ -2162,6 +2164,7 @@ async def health():
         "threads": THREADS,
         "model_pool": _model_pool(),  # 模型池实值 + 公用线程借用 + pdf 池
         "checks": {
+            "uptime_seconds": __import__("metrics").process_uptime_seconds(),  # 进程寿命（单调时钟），与 /metrics 同源
             "secret_set": bool(os.environ.get("QIYAN_SECRET")),
             "wechat_secure": _wechat_secure(),
             "build": _build_stamp(),

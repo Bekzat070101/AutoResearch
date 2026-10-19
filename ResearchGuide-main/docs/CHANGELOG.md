@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FEAT] 监控：本机 Prometheus + Grafana 看启研（tools/monitoring），按路径延迟直方图，告警规则
+
+- 变更内容：照 isse-labs lab4 的做法（不要 Docker，官方二进制放 `.tools/`，运行数据放 `.runtime/`），新建 `tools/monitoring/`：`prometheus.yml`（抓本机 8100）与 `prometheus-prod.yml`（再抓生产，Bearer 读 `.runtime/metrics-token`）、`alerts.yml` 九条规则（抓不到、库没就绪、生产库在临时盘、5xx 比例、注册用户骤降、账号副本过期、刮取错误、SSE 错误、对话 p95）与 `tests/alerts.test.yml`（promtool 单测）、`grafana.ini` + provisioning（数据源 uid `qiyan-prometheus`、仪表盘目录）、`start-prometheus.zsh` / `start-grafana.zsh` / `fetch-tools.zsh`（按 OS/架构下载并校验 sha256，或软链已有的一份）、`smoke_traffic.py`（造一点流量）、README。仪表盘从 `docs/grafana/qiyan-overview.json` 搬到 `tools/monitoring/grafana/dashboards/`，重做成 19 个面板（状态格：进程/持久盘/库就绪/模型/注册/访客/副本用户/副本年龄；请求速率按状态码、在途、5xx 与流错误、p50/p95、按路径 p95、用户数、会话、按路径速率、论文库、刮取错误）。`server/metrics.py`：新增按路由模板的延迟直方图 `qiyan_http_latency_seconds`（21-D34 的桶界）、`qiyan_http_inflight`、`qiyan_db_ready`，`qiyan_process_uptime_seconds` 改单调时钟（21-D38），health `checks.uptime_seconds` 同源；旧全站 p95 保留标 legacy。`server/tests/test_metrics_sync.py` 新增：直方图桶界与路径隔离、在途/就绪/单调寿命、面板与规则引用的指标族都在 `/metrics` 且数据源 uid 一致、有 promtool 就 `check rules` + `test rules`。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/monitoring/README.md、.env.example
+- 影响模块：server/metrics.py、server/main.py、server/tests/test_metrics_sync.py、tools/monitoring/*
+- 决策来源：陈浩文（把 lab4 的监控搬过来）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 登录可靠性：Codex 第九轮三条速修（换库备份 oss 判定、DB_READY 等副本灌回后再开、显式未认领不替人认领）
 
 - 变更内容：Codex 第九轮对 4d5e09a 逐项验收后给 14 条令（R9-01…14，见 docs/tasks/25 文末与 PR #21 评论），先修三条最小的：`deploy_fc.backup_remote` 只把 admin 返回的 `oss == "ok"` 当上传成功（原来 `"local"` 字符串也算真，换库后新实例 restore 404）；`store.init_db` 把 `DB_READY = True` 挪到本地副本灌回之后（挂盘重试窗口里先进来一个注册会把唯一旧副本覆盖成只剩他一人）；`account_store` 灌回保留显式 `claimed_at = NULL`（旧的仅 uid 账号还能走 `/api/auth/legacy` 认领）。其余 11 条（会话吊销墓碑、OSS 迟到结果作废、认证 deadline 覆盖正文、启动资料 15 秒、公告绑定 event_id、enter 触发副本、`_conn` 遵守挂载门、隐式旧默认库路径也核数、在途失败名额、窗口 TTL、OSS 非 404 进 last_error）下一批。

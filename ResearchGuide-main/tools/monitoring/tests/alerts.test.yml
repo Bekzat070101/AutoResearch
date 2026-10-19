@@ -1,0 +1,79 @@
+# promtool test rules tests/alerts.test.yml
+rule_files:
+  - ../alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qiyan", instance="127.0.0.1:8100", env="local"}'
+        values: "1 1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QiyanDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: QiyanDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: qiyan
+              instance: "127.0.0.1:8100"
+              env: local
+            exp_annotations:
+              summary: "抓不到 /metrics 已 2 分钟（进程没起来、网络不通或 METRICS_TOKEN 不对）"
+
+  - interval: 1m
+    input_series:
+      # 10 分钟里 200 个请求，其中 20 个 500 → 10% > 5% 且总数 ≥ 20
+      - series: 'qiyan_http_requests_total{job="qiyan", path="/api/x", code="200"}'
+        values: "0+18x20"
+      - series: 'qiyan_http_requests_total{job="qiyan", path="/api/x", code="500"}'
+        values: "0+2x20"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: QiyanHigh5xxRatio
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: qiyan
+            exp_annotations:
+              summary: "10 分钟内 5xx 比例超过 5%（且请求数 ≥ 20）"
+
+  - interval: 1m
+    input_series:
+      # 注册用户 50 → 突然 5（换库）：告警；访客数不参与
+      - series: 'qiyan_users{job="qiyan-prod", kind="registered", env="prod"}'
+        values: "50 50 50 50 50 5 5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: QiyanRegisteredUsersDrop
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: QiyanRegisteredUsersDrop
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: qiyan-prod
+              kind: registered
+              env: prod
+            exp_annotations:
+              summary: "注册用户数比 15 分钟内的峰值少了 20% 以上：像是换了库或库被覆盖（10-18 那种）"
+
+  - interval: 1m
+    input_series:
+      - series: 'qiyan_db_ephemeral{job="qiyan-prod", env="prod"}'
+        values: "1 1"
+      - series: 'qiyan_db_ephemeral{job="qiyan", env="local"}'
+        values: "1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QiyanDbEphemeral
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: qiyan-prod
+              env: prod
+            exp_annotations:
+              summary: "生产库在临时盘：实例回收会丢掉全部账号，立刻按 docs/DEPLOY.md 换到 NAS"
