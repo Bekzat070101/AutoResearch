@@ -405,7 +405,7 @@ def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bo
                 uid, nick, secrets.token_hex(16),
                 row.get("onboard_state") or "{}",
                 row.get("created_at") or now,
-                row.get("claimed_at") or now,
+                row["claimed_at"] if "claimed_at" in row else now,  # 显式 NULL 是「还没认领的旧 uid」，不能替人认领
                 username, salt, hashed,
                 row.get("consent_at"),
                 row.get("consent_version") or "",

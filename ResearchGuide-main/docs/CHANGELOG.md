@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FIX] 登录可靠性：Codex 第九轮三条速修（换库备份 oss 判定、DB_READY 等副本灌回后再开、显式未认领不替人认领）
+
+- 变更内容：Codex 第九轮对 4d5e09a 逐项验收后给 14 条令（R9-01…14，见 docs/tasks/25 文末与 PR #21 评论），先修三条最小的：`deploy_fc.backup_remote` 只把 admin 返回的 `oss == "ok"` 当上传成功（原来 `"local"` 字符串也算真，换库后新实例 restore 404）；`store.init_db` 把 `DB_READY = True` 挪到本地副本灌回之后（挂盘重试窗口里先进来一个注册会把唯一旧副本覆盖成只剩他一人）；`account_store` 灌回保留显式 `claimed_at = NULL`（旧的仅 uid 账号还能走 `/api/auth/legacy` 认领）。其余 11 条（会话吊销墓碑、OSS 迟到结果作废、认证 deadline 覆盖正文、启动资料 15 秒、公告绑定 event_id、enter 触发副本、`_conn` 遵守挂载门、隐式旧默认库路径也核数、在途失败名额、窗口 TTL、OSS 非 404 进 last_error）下一批。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/deploy_fc.py、server/store.py、server/account_store.py、server/tests/test_deploy_fc.py
+- 决策来源：陈浩文（Codex 第九轮）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 登录可靠性第二批（Codex 第八轮对账）：盘没挂上不建空库、墓碑不复活、只有 me 的 401/410 才清身份、启动与登录后有上限、全局恢复状态
 
 - 变更内容：Codex 第八轮按现网配置实测 8e606c2 后给了七条令，与第一批对账后本批做五件（其余推迟，见 docs/tasks/25 「第八轮对账」）。（L05）函数计算上设了 `QIYAN_DB` 而那个目录没挂盘时，`init_db` 不再在实例根盘上悄悄建一份空库（这正是 10-18 丢人的形状）：`store.db_blocked()` 返回 `nas_not_mounted`，`DB_READY=False`，所有 `/api/*`（除 `/api/health`）回 503 `{"detail":"数据库所在的盘还没挂上，请稍后重试","code":"db_not_ready"}`，health 200 但 `ok=false`、`db.ready=false`、`db.blocked`，`_lifespan` 每 5 秒重试直到挂上；副本灌回跳过 `deleted_users` 里的 uid（删号后 dump 失败也不复活，`tombstoned` 计数）；副本多存 `user_prefs` 里的 `entered_at`，灌回后老用户仍直接进今日而不是回到开场对话。（L06）`confirmSessionGone`/`recoverUser` 只在 `/api/auth/me` 对同一令牌回 401/410 时清身份，503/429/网络错误/超时一律保留并提示「暂时无法核验登录状态，请稍后再试」（原来发版、冷启动时整班被踢回登录页）；启动的 `/api/health`、`/api/paths` 5 秒上限，`/api/auth/me` 的 404 不再当会话失效，开场遮罩最多挡 5 秒；登录/注册成功后的初始化 15 秒上限，超时保留会话并提示「登录成功，页面资料暂未加载，请刷新重试」，不重发 POST；health `auth.recovery={event_id,state}` 来自 `QIYAN_RECOVERY_EVENT`/`QIYAN_RECOVERY_STATE`（normal|recovering|accounts_restored|lost），运维登记 `lost` 后，持旧令牌的浏览器在登录页直接看到「服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。」并默认到注册步骤；`normal` 时第一批的推断提示仍是兜底。

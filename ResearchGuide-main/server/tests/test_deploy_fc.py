@@ -274,7 +274,7 @@ def test_changing_db_path_requires_migration(monkeypatch, tmp_path):
         method = req.get_method()
         if method == "POST" and path == "/api/admin/backup":
             calls.append("backup")
-            return Resp(json.dumps({"ok": True, "object": "qiyan-1.db.gz.enc"}).encode())
+            return Resp(json.dumps({"ok": True, "object": "qiyan-1.db.gz.enc", "oss": "local"}).encode())
         if method == "POST" and path == "/api/admin/restore":
             calls.append("restore")
             users["n"] = 12

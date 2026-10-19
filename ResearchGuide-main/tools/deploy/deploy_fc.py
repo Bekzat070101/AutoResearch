@@ -296,8 +296,9 @@ def backup_remote(url: str, token: str) -> tuple[str, bool]:
         body = json.loads(resp.read().decode() or "{}")
     if not body.get("ok") or not body.get("object"):
         raise SystemExit("远端备份失败，不准换库")
-    print("BACKUP", body["object"], "oss" if body.get("oss") else "local")
-    return str(body["object"]), bool(body.get("oss"))
+    on_oss = body.get("oss") == "ok"  # admin 的 oss 字段是 "ok" / "local" 字符串，非空不等于上传成功
+    print("BACKUP", body["object"], "oss" if on_oss else "local")
+    return str(body["object"]), on_oss
 
 
 def restore_remote(url: str, token: str, obj: str) -> dict:

@@ -570,7 +570,6 @@ def init_db() -> None:
             c.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{t}_not_deleted BEFORE INSERT ON {t} "
                       "WHEN EXISTS (SELECT 1 FROM deleted_users WHERE id = NEW.user_id) "
                       f"BEGIN SELECT RAISE(ABORT, '{USER_DELETED}'); END")
-    DB_READY = True
     migrate_legacy_secrets()
     try:
         import account_store
@@ -578,6 +577,7 @@ def init_db() -> None:
     except Exception as exc:
         print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
                          ensure_ascii=False))
+    DB_READY = True  # 本地副本灌回之前不开门：挂盘重试窗口里先进来一个注册会把唯一的旧副本覆盖成只剩他一人（Codex 第九轮复现）
 
 
 def migrate_legacy_secrets() -> None:
