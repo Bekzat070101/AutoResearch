@@ -59,6 +59,11 @@ def guests_cap() -> int:
     return _int("LLM_DAILY_GUESTS", 500)
 
 
+def agent_cap() -> int:
+    """一个 operator（拿同一个 AGENT_TOKENS 令牌的人）名下全部人工学生每天合计最多调几次模型。"""
+    return _int("LLM_DAILY_AGENT", 200)
+
+
 GUESTS = "*guest"  # llm_usage 里全体访客合计的那一行
 LLM_DAILY_XLATE = int(os.environ.get("LLM_DAILY_XLATE") or 300)  # 标题机翻（*xlate 伪账号）每天上限，计入全站
 
@@ -91,6 +96,9 @@ def _caps(uid: str) -> dict[str, int]:
     u = store.get_user(uid)
     if not u or u.get("consent_version") != auth.PRIVACY_VERSION:
         return {uid: 0, "*": total_cap()}
+    agent = store.agent_account(uid)
+    if agent:  # 人工学生：自己按注册用户算，另加该 operator 名下所有人工学生合计的一道上限
+        return {uid: user_cap(), "*": total_cap(), f"*agent:{agent['operator']}": agent_cap()}
     if u.get("wechat_openid") or u.get("username"):  # 绑了微信、或注册了用户名密码：都是能找回的账号，不按访客算
         return {uid: user_cap(), "*": total_cap()}
     return {uid: guest_cap(), "*": total_cap(), GUESTS: guests_cap()}

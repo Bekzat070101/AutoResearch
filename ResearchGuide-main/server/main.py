@@ -221,6 +221,7 @@ async def record_metrics(request: Request, call_next):
     t0 = time.time()
     raw = request.url.path or ""
     watch = raw.startswith("/api/") or raw in ("/", "/metrics")
+    syn = bool(request.headers.get("x-qiyan-agent"))  # 人工学生的请求另计一份，面板上和真人分开
     if watch:
         _metrics.observe_start()
     try:
@@ -229,7 +230,7 @@ async def record_metrics(request: Request, call_next):
         if watch:
             route = request.scope.get("route")
             path = getattr(route, "path", None) or "unknown"
-            _metrics.observe_request(path, 500, time.time() - t0)
+            _metrics.observe_request(path, 500, time.time() - t0, synthetic=syn)
         raise
     if watch:
         code = getattr(resp, "status_code", None)
@@ -249,10 +250,10 @@ async def record_metrics(request: Request, call_next):
                         yield chunk
                 finally:
                     _metrics.observe_request(path, 500 if err else (0 if code is None else int(code)),
-                                             time.time() - t0)
+                                             time.time() - t0, synthetic=syn)
             resp.body_iterator = _wrap()
         else:
-            _metrics.observe_request(path, 0 if code is None else int(code), time.time() - t0)
+            _metrics.observe_request(path, 0 if code is None else int(code), time.time() - t0, synthetic=syn)
     return resp
 
 
@@ -1269,6 +1270,134 @@ def mcp_info():
     return {"ok": True, "endpoint": "/mcp", "protocol": mcp_curriculum.PROTOCOL,
             "tools": [t["name"] for t in mcp_curriculum.list_tools()],
             "hint": "MCP streamable-http：POST JSON-RPC（initialize / tools/list / tools/call）"}
+
+
+# ---------- 人工学生：AI agent 当学生用网站（server/mcp_student.py） ----------
+
+def _agent_operator(request: Request) -> str:
+    """AGENT_TOKENS="组名:令牌,组名2:令牌2"：Bearer 对上哪个令牌就是哪个 operator。没配就整个功能关闭。"""
+    import mcp_student
+    authz = request.headers.get("Authorization") or ""
+    got = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
+    op = mcp_student.operator_for(got)
+    if not op:
+        raise HTTPException(401, "需要 AGENT_TOKENS 里的 operator 令牌（Authorization: Bearer ...）")
+    return op
+
+
+class AgentRegisterReq(BaseModel):
+    persona: str = ""
+    agent_model: str = ""
+
+
+class AgentEventReq(BaseModel):
+    uid: str
+    run_id: str
+    kind: str
+    screen: str = ""
+    detail: str = ""
+
+
+class AgentRunEndReq(BaseModel):
+    uid: str
+    run_id: str
+    summary: str = ""
+
+
+@app.get("/api/agent/personas")
+def agent_personas(request: Request):
+    _agent_operator(request)
+    import personas
+    return {"personas": personas.PERSONAS, "plan": personas.PLAN}
+
+
+@app.post("/api/agent/register")
+def agent_register(req: AgentRegisterReq, request: Request):
+    """给 operator 开一个人工学生账号：走和真人一样的注册（用户名密码 + 同意隐私说明），
+    另在 agent_accounts 记 operator / 人设 / 模型，metrics 与管理员统计据此把它和真人分开。"""
+    import secrets as _secrets
+    import personas
+    op = _agent_operator(request)
+    card = personas.get(req.persona) if req.persona else None
+    if req.persona and not card:
+        raise HTTPException(400, f"没有这个人设：{req.persona}；可选 {[p['id'] for p in personas.PERSONAS]}")
+    if not card:
+        card = personas.PERSONAS[0]
+    if not auth.allow_ip(request, "agent-register", 200):
+        raise HTTPException(429, "开的人工学生太多了，过一会儿再试")
+    for _ in range(5):
+        username = f"bot_{op[:8]}_{_secrets.token_hex(3)}"
+        if not store.user_by_username(username):
+            break
+    password = _secrets.token_urlsafe(12)
+    row = store.register_user(username, password, card["name"])
+    store.record_consent(row["uid"], auth.PRIVACY_VERSION)
+    store.agent_register_account(row["uid"], op, card["id"], (req.agent_model or "")[:60])
+    rid = store.agent_run_start(row["uid"], op, card["id"], (req.agent_model or "")[:60])
+    return {**auth.account(row["uid"]), "token": store.create_session(row["uid"], auth.SESSION_TTL),
+            "username": username, "persona": card, "plan": personas.PLAN, "run_id": rid, "operator": op}
+
+
+@app.post("/api/agent/event")
+def agent_event(req: AgentEventReq, request: Request):
+    _user_or_404(req.uid)
+    if store.agent_run_owner(req.run_id) != req.uid:
+        raise HTTPException(404, "run not found")
+    kind = req.kind if req.kind in ("step", "stuck") or req.kind.startswith("done:") else "step"
+    store.agent_event(req.run_id, req.uid, kind, req.screen, req.detail)
+    return {"ok": True}
+
+
+@app.post("/api/agent/run/end")
+def agent_run_end(req: AgentRunEndReq, request: Request):
+    _user_or_404(req.uid)
+    if store.agent_run_owner(req.run_id) != req.uid:
+        raise HTTPException(404, "run not found")
+    return {"run": store.agent_run_end(req.run_id, req.summary)}
+
+
+@app.get("/api/admin/agent-runs")
+def admin_agent_runs(request: Request, limit: int = 200):
+    admin._admin(request)
+    return store.agent_runs_summary(limit=max(1, min(limit, 1000)))
+
+
+@app.post("/mcp/student")
+async def mcp_student_endpoint(request: Request):
+    """人工学生的 MCP（streamable-http）。工具层通过 QIYAN_SELF_URL 回环调用本服务的公开接口，
+    所以限频、预算、锁都和真人一样；没设 QIYAN_SELF_URL 就不开远程模式（用 stdio：python server/mcp_student.py）。"""
+    import mcp_student
+    if not os.environ.get("QIYAN_SELF_URL"):
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32000, "message": "远程模式未开：服务器没设 QIYAN_SELF_URL；请用 stdio 方式运行 server/mcp_student.py"}},
+                            status_code=503)
+    try:
+        op = _agent_operator(request)
+    except HTTPException as exc:
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": str(exc.detail)}}, status_code=401)
+    if not auth.allow_ip(request, "mcp-student", 3000):
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "too many requests"}}, status_code=429)
+    try:
+        raw = await _read_capped(request, MCP_MAX_BODY, f"request body over {MCP_MAX_BODY // 1024} KB")
+        payload = json.loads(raw)
+    except HTTPException as exc:
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc.detail)}}, status_code=413)
+    except Exception:                                          # noqa: BLE001
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}, status_code=200)
+    session_key = f"{op}:{request.headers.get('Mcp-Session-Id') or 'default'}"
+    resp = await run_in_threadpool(mcp_student.remote_handle, payload, op, session_key)
+    if resp is None:
+        return Response(status_code=202)
+    return JSONResponse(resp)
+
+
+@app.get("/mcp/student")
+def mcp_student_info():
+    import mcp_student
+    return {"ok": True, "endpoint": "/mcp/student", "protocol": mcp_student.PROTOCOL,
+            "remote": bool(os.environ.get("QIYAN_SELF_URL")),
+            "tools": [t["name"] for t in mcp_student.TOOLS],
+            "hint": "AI agent 当学生：Authorization: Bearer <AGENT_TOKENS 里的令牌>，POST JSON-RPC；或本地 stdio：python server/mcp_student.py --base <API> --token <令牌>"}
 
 
 # ---------- 边学边练：项目检索 / 选定 / 交成果（任务 3） ----------

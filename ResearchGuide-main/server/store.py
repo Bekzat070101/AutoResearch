@@ -304,6 +304,36 @@ CREATE TABLE IF NOT EXISTS deleted_users (
   id TEXT PRIMARY KEY,
   deleted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_accounts (
+  user_id TEXT PRIMARY KEY,
+  operator TEXT NOT NULL,
+  persona TEXT NOT NULL DEFAULT '',
+  agent_model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  operator TEXT NOT NULL,
+  persona TEXT NOT NULL DEFAULT '',
+  agent_model TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  steps INTEGER NOT NULL DEFAULT 0,
+  stuck INTEGER NOT NULL DEFAULT 0,
+  done TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS agent_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  screen TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id);
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(user_id, task_id, created_at);
@@ -2576,3 +2606,87 @@ def delete_enrollment(uid: str, eid: str) -> bool:
     with _conn() as c:
         cur = c.execute("DELETE FROM enrollments WHERE id=? AND user_id=?", (eid, uid))
         return cur.rowcount > 0
+
+
+# ---------- 人工学生（AI agent 当学生）：账号标记、一次「上线」的记录、逐步事件 ----------
+
+def agent_register_account(uid: str, operator: str, persona: str = "", agent_model: str = "") -> None:
+    with _LOCK, _conn() as c:
+        c.execute("INSERT OR REPLACE INTO agent_accounts(user_id, operator, persona, agent_model, created_at) VALUES(?,?,?,?,?)",
+                  (uid, operator, persona, agent_model, now_iso()))
+
+
+def agent_account(uid: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM agent_accounts WHERE user_id=?", (uid,)).fetchone()
+    return dict(row) if row else None
+
+
+def agent_account_count() -> int:
+    with _conn() as c:
+        return int(c.execute("SELECT COUNT(*) FROM agent_accounts").fetchone()[0])
+
+
+def agent_run_start(uid: str, operator: str, persona: str, agent_model: str) -> str:
+    rid = new_id()
+    with _LOCK, _conn() as c:
+        c.execute("INSERT INTO agent_runs(id, user_id, operator, persona, agent_model, started_at) VALUES(?,?,?,?,?,?)",
+                  (rid, uid, operator, persona, agent_model, now_iso()))
+    return rid
+
+
+def agent_event(run_id: str, uid: str, kind: str, screen: str = "", detail: str = "") -> None:
+    """kind：step（一次工具调用）/ stuck（agent 说不知道怎么办）/ done:<plan_id>（完成一项目标）。"""
+    with _LOCK, _conn() as c:
+        c.execute("INSERT INTO agent_events(run_id, user_id, kind, screen, detail, at) VALUES(?,?,?,?,?,?)",
+                  (run_id, uid, kind, screen[:40], detail[:2000], now_iso()))
+        if kind == "step":
+            c.execute("UPDATE agent_runs SET steps=steps+1 WHERE id=?", (run_id,))
+        elif kind == "stuck":
+            c.execute("UPDATE agent_runs SET stuck=stuck+1 WHERE id=?", (run_id,))
+        elif kind.startswith("done:"):
+            row = c.execute("SELECT done FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            done = json.loads(row["done"] or "[]") if row else []
+            pid = kind[5:]
+            if pid not in done:
+                done.append(pid)
+                c.execute("UPDATE agent_runs SET done=? WHERE id=?", (json.dumps(done, ensure_ascii=False), run_id))
+
+
+def agent_run_end(run_id: str, summary: str = "") -> dict[str, Any] | None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE agent_runs SET ended_at=?, summary=? WHERE id=? AND ended_at IS NULL", (now_iso(), summary[:2000], run_id))
+        row = c.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["done"] = json.loads(out.get("done") or "[]")
+    return out
+
+
+def agent_run_owner(run_id: str) -> str | None:
+    with _conn() as c:
+        row = c.execute("SELECT user_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+    return row["user_id"] if row else None
+
+
+def agent_runs_summary(limit: int = 200) -> dict[str, Any]:
+    """给管理员看：每次上线一行 + 按 operator/persona/模型 汇总 + 卡住最多的屏幕。"""
+    with _conn() as c:
+        runs = [dict(r) for r in c.execute("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?", (limit,))]
+        stuck = [dict(r) for r in c.execute(
+            "SELECT screen, COUNT(*) n FROM agent_events WHERE kind='stuck' GROUP BY screen ORDER BY n DESC LIMIT 20")]
+        by = [dict(r) for r in c.execute(
+            "SELECT operator, agent_model, persona, COUNT(*) runs, SUM(steps) steps, SUM(stuck) stuck, "
+            "SUM(CASE WHEN ended_at IS NOT NULL THEN 1 ELSE 0 END) ended FROM agent_runs GROUP BY operator, agent_model, persona")]
+    for r in runs:
+        r["done"] = json.loads(r.get("done") or "[]")
+    return {"runs": runs, "by": by, "stuck_screens": stuck, "accounts": agent_account_count()}
+
+
+def agent_counts() -> dict[str, int]:
+    with _conn() as c:
+        runs = int(c.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0])
+        stuck = int(c.execute("SELECT COALESCE(SUM(stuck),0) FROM agent_runs").fetchone()[0])
+        done = int(c.execute("SELECT COUNT(*) FROM agent_events WHERE kind LIKE 'done:%'").fetchone()[0])
+    return {"runs": runs, "stuck": stuck, "done": done}
