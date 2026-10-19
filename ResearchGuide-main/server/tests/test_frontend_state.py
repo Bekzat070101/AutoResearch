@@ -77,3 +77,15 @@ def test_session_confirm_boot_and_recovery():
     _run("boot-health-timeout")
     _run("after-enter-timeout")
     _run("recovery-notice")
+
+
+def test_auth_timeout_includes_body():
+    _run("api-body-timeout")
+
+
+def test_boot_profile_deadline_and_late_result():
+    _run("boot-profile-deadline")
+
+
+def test_recovery_notice_tracks_event_and_session():
+    _run("recovery-notice-event")
