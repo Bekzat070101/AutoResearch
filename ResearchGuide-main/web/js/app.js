@@ -219,9 +219,11 @@ async function api(method, path, body, opt = {}) {
   const slow = new Promise((_, reject) => {
     timer = setTimeout(() => { ctrl.abort(); reject(new Error(slowMsg)); }, opt.timeoutMs);
   });
+  const pending = request();
   try {
-    return await Promise.race([request(), slow]);
+    return await Promise.race([pending, slow]);
   } catch (e) {
+    pending.catch(() => {});  // 超时后被 abort 的那次请求自己会再拒绝一次：别让它变成控制台里的未处理 rejection
     if (e && e.name === "AbortError") throw new Error(slowMsg);
     throw e;
   } finally { clearTimeout(timer); }
