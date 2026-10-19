@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FIX] 登录可靠性第三批（PR #22）：Codex 第九轮剩余 11 条边界
+
+- 变更内容：接 PR #21。副本与库：登出写 `revoked_sessions` 墓碑（45 天后清），快照带会话吊销与删号墓碑，灌回先合并墓碑再插人/会话，已登出的令牌不会被旧副本灌回来（R9-03）；本地文件写成功即更新新鲜度标记，OSS 旧副本不再越过最新本地提交；OSS 取副本拆成「只取+解密」与「比较+灌回」，10 秒超时后迟到的结果作废（R9-11）；OSS 只有 404 算没有副本，其它错误进 health `last_error`（R9-14）；第一次「进入启研」写 `entered_at` 后触发副本更新（R9-07）；`_conn()` 在盘没挂上时抛 `OSError("db_not_ready")`，`/metrics` 不会在根盘建空库（R9-08），挂载确认后按路径记住、不再每次 stat NAS。登录限频：同用户名失败名额在验密码前原子预约（在途数只记活请求，归零即删），并发 11 个错密码只验 10 个（R9-12）；失败桶 TTL 用实际 `AUTH_SIGNIN_USER_WINDOW`，`AUTH_*` 非正整数启动即拒（R9-13）。发布脚本：远端没显式 `QIYAN_DB` 而本次带 `--db` 时按旧默认库 `server/data/demo.db` 核数、要求 `--migrate-from-backup`（R9-10）。前端：登录/注册/me/同意的 20 秒上限盖住响应正文（R9-04）；启动时 `me` 成功先画页面，prefs/画像/trail 加载 15 秒上限，超时提示「页面资料暂未加载，请刷新重试」，迟到响应不落缓存不导航，资料接口 404/503 不清身份（R9-05）；恢复公告存 `{event_id,state}`，health 回到 normal 即清，登录成功记下已见事件，之后普通到期只显示「登录已失效，请重新登录」（R9-06）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/store.py、server/account_store.py、server/main.py、server/auth.py、tools/deploy/deploy_fc.py、tools/deploy/fc_safety.py、web/js/app.js、tools/verify/verify_frontend_state.js、server/tests/test_account_store_v2.py、server/tests/test_db_mount_gate.py、server/tests/test_auth_password.py、server/tests/test_deploy_fc.py、server/tests/test_frontend_state.py
+- 决策来源：陈浩文（Codex 第九轮报告 R9-03…14）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 登录可靠性：Codex 第九轮三条速修（换库备份 oss 判定、DB_READY 等副本灌回后再开、显式未认领不替人认领）
 
 - 变更内容：Codex 第九轮对 4d5e09a 逐项验收后给 14 条令（R9-01…14，见 docs/tasks/25 文末与 PR #21 评论），先修三条最小的：`deploy_fc.backup_remote` 只把 admin 返回的 `oss == "ok"` 当上传成功（原来 `"local"` 字符串也算真，换库后新实例 restore 404）；`store.init_db` 把 `DB_READY = True` 挪到本地副本灌回之后（挂盘重试窗口里先进来一个注册会把唯一旧副本覆盖成只剩他一人）；`account_store` 灌回保留显式 `claimed_at = NULL`（旧的仅 uid 账号还能走 `/api/auth/legacy` 认领）。其余 11 条（会话吊销墓碑、OSS 迟到结果作废、认证 deadline 覆盖正文、启动资料 15 秒、公告绑定 event_id、enter 触发副本、`_conn` 遵守挂载门、隐式旧默认库路径也核数、在途失败名额、窗口 TTL、OSS 非 404 进 last_error）下一批。

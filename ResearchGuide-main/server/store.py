@@ -47,10 +47,20 @@ def ephemeral() -> bool:
     return not os.environ.get("QIYAN_DB") or not _own_mount(DB_PATH)
 
 
+_MOUNT_OK_PATH: str | None = None  # 这条路径已经确认挂上了：之后每次 _conn 不再 stat 一遍 NAS（挂上的盘不会悄悄没掉，没掉写入自己会报错）
+
+
 def db_blocked() -> str | None:
     """函数计算上设了 QIYAN_DB、那个目录却没挂盘：不建空库，返回原因；否则 None。"""
-    if os.environ.get("FC_FUNCTION_NAME") and os.environ.get("QIYAN_DB") and not _own_mount(DB_PATH):
+    global _MOUNT_OK_PATH
+    if not (os.environ.get("FC_FUNCTION_NAME") and os.environ.get("QIYAN_DB")):
+        return None
+    path = str(DB_PATH)
+    if _MOUNT_OK_PATH == path:
+        return None
+    if not _own_mount(DB_PATH):
         return "nas_not_mounted"
+    _MOUNT_OK_PATH = path
     return None
 
 
