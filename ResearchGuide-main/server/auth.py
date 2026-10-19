@@ -39,10 +39,20 @@ TICKET_TTL = 300           # 网页上的数字五分钟有效
 # 同一来源一小时最多开几次微信登录、几个访客号。学校机房、宿舍的出口常常是同一个公网地址、几百人共用：
 # 原来 30，一个班两百人同时开访客号 170 个被拦（Codex 第五轮压测）。这里只挡脚本刷号；
 # 访客能花的模型钱另有全体访客合计的上限（budget.guests_cap），刷再多访客号也花不到绑了微信的人头上。
-PER_IP_HOUR = int(os.environ.get("AUTH_PER_IP_HOUR") or 600)
-SIGNIN_PER_IP_HOUR = int(os.environ.get("AUTH_SIGNIN_PER_IP_HOUR") or 3000)
-SIGNIN_USER_LIMIT = int(os.environ.get("AUTH_SIGNIN_USER_LIMIT") or 10)  # 同一用户名窗口内最多失败这么多次
-SIGNIN_USER_WINDOW = int(os.environ.get("AUTH_SIGNIN_USER_WINDOW") or 600)
+def _positive_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name) or default)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise SystemExit("AUTH_* 配置必须是正整数")
+    return value
+
+
+PER_IP_HOUR = _positive_env("AUTH_PER_IP_HOUR", 600)
+SIGNIN_PER_IP_HOUR = _positive_env("AUTH_SIGNIN_PER_IP_HOUR", 3000)
+SIGNIN_USER_LIMIT = _positive_env("AUTH_SIGNIN_USER_LIMIT", 10)  # 同一用户名窗口内最多失败这么多次
+SIGNIN_USER_WINDOW = _positive_env("AUTH_SIGNIN_USER_WINDOW", 600)
 PER_OPENID_HOUR = 10       # 同一个微信一小时最多发错十次数字（防止乱发数字把别人的网页登进自己的号）
 
 # 隐私说明改了就改这个日期：老用户下次打开会再看到一次说明并重新同意。说明正文在 web/js/app.js 的 PRIVACY_HTML。
@@ -144,6 +154,7 @@ def me(request: Request) -> str | None:
 
 _HITS: dict[str, list[float]] = {}
 _HITS_LOCK = threading.Lock()
+_INFLIGHT: dict[str, int] = {}  # 正在验密码的请求数，归零即删
 
 
 def _client_ip(request: Request) -> str | None:
@@ -165,7 +176,7 @@ _NEXT_SWEEP = [0.0]
 
 
 def _ttl(key: str) -> float:
-    return 600 if key.startswith("signin-user:") else 3600
+    return SIGNIN_USER_WINDOW if key.startswith("signin-user:") else 3600
 
 
 def _sweep_expired(now: float) -> None:
@@ -215,6 +226,30 @@ def _note(key: str, window: float = 3600) -> None:
 def _clear(key: str) -> None:
     with _HITS_LOCK:
         _HITS.pop(key, None)
+
+
+def _reserve(key: str, limit: int, window: float) -> bool:
+    """失败数 + 在途数 >= limit 时拒绝；否则占一个在途名额。"""
+    with _HITS_LOCK:
+        hits = _recent(key, time.time(), window)
+        if hits is None or len(hits) + _INFLIGHT.get(key, 0) >= limit:
+            return False
+        _INFLIGHT[key] = _INFLIGHT.get(key, 0) + 1
+    return True
+
+
+def _release(key: str, failed: bool | None) -> None:
+    """还在途名额；failed=True 记一次失败，False 清桶，None（异常）只还名额。"""
+    with _HITS_LOCK:
+        left = _INFLIGHT.get(key, 0) - 1
+        if left > 0:
+            _INFLIGHT[key] = left
+        else:
+            _INFLIGHT.pop(key, None)
+    if failed:
+        _note(key, SIGNIN_USER_WINDOW)
+    elif failed is False:
+        _clear(key)
 
 
 def _ip_allows(request: Request, kind: str) -> bool:
@@ -383,13 +418,16 @@ def signin(req: SigninReq, request: Request):
     if not allow_ip(request, "signin", SIGNIN_PER_IP_HOUR):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
     key = f"signin-user:{username}"
-    if username and _used_up(key, SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
+    if not _reserve(key, SIGNIN_USER_LIMIT, SIGNIN_USER_WINDOW):
         raise HTTPException(429, "试得太频繁了，过一会儿再试")
-    user = store.user_by_username(username)
-    if not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash")):
-        _note(key, SIGNIN_USER_WINDOW)
+    failed = None
+    try:
+        user = store.user_by_username(username)
+        failed = not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash"))
+    finally:
+        _release(key, failed)
+    if failed:
         raise HTTPException(401, "用户名或密码不对")
-    _clear(key)
     return {**account(user["id"]), "token": store.create_session(user["id"], SESSION_TTL)}
 
 
