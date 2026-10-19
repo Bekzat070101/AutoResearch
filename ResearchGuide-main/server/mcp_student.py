@@ -146,6 +146,7 @@ class Student:
         self.persona: dict = {}
         self.plan: list[dict] = []
         self.done: list[str] = []
+        self.skipped: set[str] = set()
         self.screen = "login"
         self.title = ""
         self.body = ""
@@ -308,11 +309,12 @@ class Tools:
         if s.buttons:
             lines.append("可以按的：" + " ".join(f"[{lab}]" for lab, _ in s.buttons))
         if s.plan:
-            todo = [p for p in s.plan if p["id"] not in s.done]
+            todo = [p for p in s.plan if p["id"] not in s.done and p["id"] not in s.skipped]
+            skipped = f"，跳过 {len(s.skipped)}" if s.skipped else ""
             if todo:
-                lines.append(f"你的目标（{len(s.done)}/{len(s.plan)} 已完成）：下一项 → {todo[0]['text']}")
+                lines.append(f"你的目标（{len(s.done)}/{len(s.plan)} 已完成{skipped}）：下一项 → {todo[0]['text']}")
             else:
-                lines.append("今天的目标都做完了，可以 end_day。")
+                lines.append(f"今天的目标都做完了{skipped}，可以 end_day。")
         return {"ok": True, "screen": s.screen, "text": "\n".join(lines), "done": list(s.done)}
 
     def _guard(self, fn: Callable[[], Any]) -> dict:
@@ -460,6 +462,8 @@ class Tools:
         s = self.s
         self.api.call("POST", "/api/onboard/enter", {"uid": s.uid}, token=s.token)
         s.entered = True
+        if "guide" not in s.done:
+            s.skipped.add("guide")  # 提前进入：引导算跳过，不再当下一项目标；统计里 done 不含它
         self._mark_done("enter")
         return self._today_screen()
 
@@ -551,8 +555,21 @@ class Tools:
         s.screen, s.title = "paper", "论文"
         s.body = f"{title}\n{(it.get('abstract') or '')[:400]}\n{text[:1200]}".strip()
         s.input_hint = ""
-        s.buttons = self._nav_buttons([("开始带读", self._start_tutor), ("返回研读", self._read_screen)])
+        s.buttons = self._nav_buttons([("开始带读", self._start_tutor),
+                                       ("留下这篇", lambda: self._triage("keep")), ("不留这篇", lambda: self._triage("skip")),
+                                       ("返回研读", self._read_screen)])
         return ""
+
+    def _triage(self, verdict: str) -> str:
+        """今日的分拣：每篇说要不要留下。"""
+        s = self.s
+        aid = str(s.paper.get("id") or "")
+        if not aid:
+            return "先打开一篇论文。"
+        self.api.call("POST", "/api/daily/triage", {"uid": s.uid, "kit": s.kit or "", "arxiv_id": aid, "verdict": verdict,
+                                                     "why": "留着以后读" if verdict == "keep" else "暂时不看",
+                                                     "title": str(s.paper.get("title") or "")}, token=s.token, timeout=60)
+        return "留下了这篇。" if verdict == "keep" else "跳过了这篇。"
 
     # 带读
     def _start_tutor(self) -> str:
@@ -570,20 +587,25 @@ class Tools:
         return self._tutor_screen()
 
     def _current_q(self) -> dict | None:
+        """当前要答的题：session.cur 指向的那道；答完所有题（cur ≥ total）就没有了，只能交卷。"""
         t = self.s.tutor or {}
-        qs = t.get("questions") or t.get("slots") or t.get("items") or []
-        for q in qs:
-            if isinstance(q, dict) and q.get("qid") and (q.get("status") or "active") in ("active", "pending", "open", "", None):
-                return q
-        return next((q for q in qs if isinstance(q, dict) and q.get("qid")), None)
+        qs = [q for q in (t.get("slots") or t.get("questions") or t.get("items") or []) if isinstance(q, dict) and q.get("qid")]
+        if not qs:
+            return None
+        cur = t.get("cur")
+        if isinstance(cur, int):
+            return qs[cur] if 0 <= cur < len(qs) else None
+        return next((q for q in qs if (q.get("status") or "pending") == "pending"), None)
 
     def _tutor_screen(self) -> str:
         s = self.s
         q = self._current_q()
         t = s.tutor or {}
         lines = [f"带读：{s.paper.get('title_zh') or s.paper.get('title') or s.paper.get('id')}"]
-        if t.get("status"):
-            lines.append(f"状态：{t['status']}")
+        if isinstance(t.get("cur"), int) and t.get("total"):
+            lines.append(f"第 {min(int(t['cur']) + 1, int(t['total']))} / {t['total']} 题")
+        if t.get("note") or t.get("notice"):
+            lines.append(str(t.get("note") or t.get("notice")))
         if q:
             lines.append(f"问题（{q.get('qid')}）：{q.get('question') or ''}")
             if q.get("hint"):
@@ -618,9 +640,21 @@ class Tools:
         s = self.s
         r = self.api.call("POST", f"/api/tutor/{s.paper['id']}/finish", {"uid": s.uid, "kit": s.kit}, token=s.token, timeout=120)
         self._mark_done("tutor")
-        summary = r.get("summary") or r.get("result") or r
+        sess = r.get("session") if isinstance(r.get("session"), dict) else {}
+        slots = [q for q in (sess.get("slots") or []) if isinstance(q, dict)]
+        passed = sum(1 for q in slots if (q.get("status") or "") in ("pass", "passed", "ok"))
+        lines = ["交卷了。"]
+        if slots:
+            lines.append(f"通过 {passed} / {len(slots)} 题。")
+        review = r.get("review")
+        if review:
+            lines.append(f"评语：{json.dumps(review, ensure_ascii=False) if not isinstance(review, str) else review}"[:700])
+        if r.get("missing"):
+            lines.append(f"还缺：{json.dumps(r['missing'], ensure_ascii=False)[:300]}")
+        if r.get("prefill"):
+            lines.append(f"网站替你整理的读后记录：{json.dumps(r['prefill'], ensure_ascii=False)[:500]}")
         s.screen, s.title = "tutor_done", "带读结束"
-        s.body = f"交卷了。结果：{json.dumps(summary, ensure_ascii=False)[:600]}"
+        s.body = "\n".join(lines)
         s.input_hint = ""
         s.buttons = self._nav_buttons([("返回研读", self._read_screen)])
         return ""
