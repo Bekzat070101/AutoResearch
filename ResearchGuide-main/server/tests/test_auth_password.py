@@ -232,3 +232,104 @@ def test_signin_ip_budget_is_separate_from_guest_budget(client, monkeypatch):
     assert client.post("/api/auth/signin", json={"username": "class_user", "password": "secret-ok"},
                        headers=xff).status_code == 429
     assert client.post("/api/auth/login", json={"nickname": "访客"}, headers=xff).status_code == 200
+
+
+def test_inflight_failure_slots_are_bounded(client, monkeypatch):
+    import threading
+    client.post("/api/auth/register", json={
+        "username": "race_user", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    real_ok = store.password_ok
+    entered = threading.Semaphore(0)
+    gate = threading.Event()
+    calls = []
+
+    def latched(*a, **k):
+        calls.append(1)
+        entered.release()
+        gate.wait(10)
+        return False
+
+    monkeypatch.setattr(store, "password_ok", latched)
+    codes = []
+
+    def attempt():
+        r = client.post("/api/auth/signin", json={"username": "race_user", "password": "nope-nope"})
+        codes.append(r.status_code)
+
+    threads = [threading.Thread(target=attempt) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for _ in range(10):
+        assert entered.acquire(timeout=10)
+    eleventh = client.post("/api/auth/signin", json={"username": "race_user", "password": "nope-nope"})
+    assert eleventh.status_code == 429
+    assert eleventh.json() == {"detail": "试得太频繁了，过一会儿再试"}
+    gate.set()
+    for t in threads:
+        t.join(10)
+    assert sorted(codes) == [401] * 10
+    assert len(calls) == 10
+    assert auth._INFLIGHT == {}
+    assert len(auth._HITS["signin-user:race_user"]) == 10
+
+    auth._HITS.clear()
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "password_ok", boom)
+    loose = TestClient(main.app, raise_server_exceptions=False)
+    assert loose.post("/api/auth/signin", json={"username": "race_user", "password": "nope-nope"}).status_code == 500
+    assert auth._INFLIGHT == {}
+    assert not auth._HITS.get("signin-user:race_user")
+    monkeypatch.setattr(store, "password_ok", real_ok)
+    assert client.post("/api/auth/signin", json={"username": "race_user", "password": "nope-nope"}).status_code == 401
+    assert client.post("/api/auth/signin", json={"username": "race_user", "password": "secret-ok"}).status_code == 200
+    assert auth._INFLIGHT == {}
+    assert "signin-user:race_user" not in auth._HITS
+
+
+def test_configured_failure_window_controls_sweep(client, monkeypatch):
+    import os
+    import subprocess
+    clock = [10000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    monkeypatch.setattr(auth, "SIGNIN_USER_WINDOW", 1200)
+    client.post("/api/auth/register", json={
+        "username": "slow_user", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    for _ in range(10):
+        assert client.post("/api/auth/signin", json={"username": "slow_user", "password": "nope-nope"}).status_code == 401
+    for t, code in ((10600, 429), (11199.999, 429), (11200, 200)):
+        clock[0] = t
+        assert client.post("/api/auth/signin", json={"username": "slow_user", "password": "secret-ok"}).status_code == code
+
+    monkeypatch.setattr(auth, "SIGNIN_USER_WINDOW", 30)
+    auth._HITS.clear()
+    clock[0] = 20000.0
+    for _ in range(10):
+        assert client.post("/api/auth/signin", json={"username": "slow_user", "password": "nope-nope"}).status_code == 401
+    for t, code in ((20029.999, 429), (20030, 200)):
+        clock[0] = t
+        assert client.post("/api/auth/signin", json={"username": "slow_user", "password": "secret-ok"}).status_code == code
+
+    auth._HITS.clear()
+    clock[0] = 30000.0
+    for i in range(auth._HITS_CAP):
+        auth._HITS[f"signin-user:ghost_{i}"] = [clock[0]]
+    auth._NEXT_SWEEP[0] = 0.0
+    clock[0] = 30030.0
+    assert client.post("/api/auth/signin", json={"username": "slow_user", "password": "secret-ok"}).status_code == 200
+    assert len(auth._HITS) < 10
+
+    server_dir = Path(auth.__file__).resolve().parent
+    for name in ("AUTH_SIGNIN_USER_LIMIT", "AUTH_SIGNIN_USER_WINDOW", "AUTH_SIGNIN_PER_IP_HOUR", "AUTH_PER_IP_HOUR"):
+        for bad in ("0", "-5", "abc"):
+            env = {**os.environ, name: bad, "LLM_API_KEY": ""}
+            r = subprocess.run([sys.executable, "-c", "import auth"], cwd=server_dir, env=env,
+                               capture_output=True, text=True, timeout=60)
+            assert r.returncode != 0
+            assert "AUTH_* 配置必须是正整数" in r.stderr
