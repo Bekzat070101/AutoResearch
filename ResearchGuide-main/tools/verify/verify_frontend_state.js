@@ -403,6 +403,8 @@ async function retry() {
   if (which === "direction-context-errors" || which === "all") await directionCtxErrors();
   if (which === "direction-context-save" || which === "all") await directionCtxSave();
   if (which === "direction-context-ui" || which === "all") await directionCtxUi();
+  if (which === "login-reset-hint" || which === "all") await loginResetHint();
+  if (which === "api-timeout" || which === "all") await apiTimeout();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -1086,4 +1088,125 @@ async function directionCtxUi() {
     check(caches(env) === k0, `${name}: 两画像缓存/远端不变`, caches(env));
     check(env.toasts.length === t0, `${name}: 无旧操作提示`, J(env.toasts.slice(t0)));
   }
+}
+
+/* ===================== 25-L03 换库后登录页说清「账号需要重新注册」、登录类请求超时（独立区块） ===================== */
+function l03Env(hint) {
+  const document = r6Dom();
+  const mk = document.createElement;
+  document.createElement = (tag) => { const n = mk(tag); n.addEventListener = () => {}; return n; };
+  document.createTextNode = (t) => { const n = mk("#text"); n.textContent = t; return n; };
+  const localStorage = r6Storage();
+  if (hint) { localStorage.setItem("rg_reset_hint", "1"); localStorage.setItem("rg_last_uid", "u-old"); }
+  const env = { document, localStorage, toasts: [], reply: null, S: { uid: "", token: "", auth: { wechat_login: false } } };
+  const noop = () => {};
+  const src = ["el", "consentRow", "renderLogin"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "document", "toast", "$nav", "$header", "$app",
+    "stopWxPoll", "startWechat", "openPrivacy", "revokeToken", "setSession", "afterEnter", "openConnect", "setView",
+    src + "; return { renderLogin };");
+  const $app = document.createElement("main");
+  document.body.appendChild($app);
+  const api = async () => { const r = env.reply; if (r instanceof Error) throw r; return r; };
+  Object.assign(env, { $app }, f(env.S, api, localStorage, document, (t) => env.toasts.push(t), {}, {}, $app,
+    noop, noop, noop, noop, () => false, async () => {}, noop, noop));
+  env.signinBtn = () => r6Walk($app).find((n) => n.tag === "button" && n.innerHTML === "登录");
+  return env;
+}
+
+/* 参数里有默认值 {} 时，函数体从 ") {" 开始数括号 */
+function l03Extract(name) {
+  const m = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`).exec(appSrc);
+  if (!m) throw new Error("找不到函数: " + name);
+  let i = appSrc.indexOf(") {", m.index) + 2, d = 0, j = i;
+  for (; j < appSrc.length; j++) {
+    if (appSrc[j] === "{") d++;
+    else if (appSrc[j] === "}") { d--; if (d === 0) break; }
+  }
+  return appSrc.slice(m.index, j + 1);
+}
+
+function l03Unauth() { const e = new Error("用户名或密码不对"); e.status = 401; return e; }
+
+async function loginResetHint() {
+  console.log("=== L03 换库后登录页说清「账号需要重新注册」 ===");
+  const HINT = "登录已失效且这个账号现在不存在：服务器在 2026-10-18 更换过数据库，之前的账号需要重新注册（用户名可以沿用）。如果你刚才只是密码输错，再试一次即可。";
+  // boot：/api/auth/me 401 → 记下标记与被清掉的 uid
+  {
+    const localStorage = r6Storage();
+    localStorage.setItem("rg_uid", "u-old"); localStorage.setItem("rg_token", "t-old");
+    const S = { uid: "u-old", token: "t-old" };
+    const reloads = [];
+    const api = async (m, url) => {
+      if (url === "/api/auth/me") throw l03Unauth();
+      if (url === "/api/health") return {};
+      return null;
+    };
+    const src = ["boot", "clearSession", "clearLocalDrafts", "sessionGoneMsg"].map((n) => extract(appSrc, n)).join("\n");
+    const f = new Function("S", "api", "localStorage", "sessionStorage", "applyLlmPill", "applyPaths", "buildTutorials",
+      "setSession", "loadPrefs", "ensurePortrait", "toast", "reloadInto",
+      "let directionEpoch = 0;\n" + src + "; return { boot };");
+    const noop = () => {};
+    const { boot: realBoot } = f(S, api, localStorage, r6Storage(), noop, noop, noop, noop, async () => {}, async () => {},
+      noop, (v, msg) => reloads.push([v, msg]));
+    await realBoot();
+    check(localStorage.getItem("rg_reset_hint") === "1", "boot 401 后 rg_reset_hint=1", String(localStorage.getItem("rg_reset_hint")));
+    check(localStorage.getItem("rg_last_uid") === "u-old", "boot 401 后 rg_last_uid 是被清掉的 uid", String(localStorage.getItem("rg_last_uid")));
+    check(S.uid === "" && reloads.length === 1 && reloads[0][0] === "login", "仍清会话并回登录页", JSON.stringify(reloads));
+  }
+  // 有标记：signin 401 → 表单下方出现固定文案，点两次也只有一段，toast 照旧
+  {
+    const env = l03Env(true);
+    env.renderLogin();
+    const btn = env.signinBtn();
+    check(!!(btn && btn.onclick), "找到登录按钮");
+    const form = btn.parent;
+    const [u, p] = form.children;
+    u.value = "xiaobei"; p.value = "pw123456";
+    env.reply = l03Unauth();
+    await btn.onclick();
+    await btn.onclick();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-reset-hint"));
+    check(notes.length === 1, "提示只出现一次", String(notes.length));
+    check(!!notes[0] && notes[0].innerHTML === HINT && notes[0].className === "login-note login-reset-hint", "提示文案与样式固定", notes[0] && notes[0].innerHTML);
+    check(!!notes[0] && notes[0].parent === form && form.children.indexOf(notes[0]) > form.children.indexOf(btn), "提示在表单下方");
+    check(env.toasts.length === 2 && env.toasts[0] === "用户名或密码不对", "toast 照旧", JSON.stringify(env.toasts));
+    env.reply = { uid: "u-new", token: "t-new", consent_ok: true };
+    await btn.onclick();
+    check(env.localStorage.getItem("rg_reset_hint") === null, "登录成功清掉 rg_reset_hint");
+    check(env.localStorage.getItem("rg_last_uid") === null, "登录成功清掉 rg_last_uid");
+  }
+  // 无标记：signin 401 只有 toast
+  {
+    const env = l03Env(false);
+    env.renderLogin();
+    const btn = env.signinBtn();
+    const [u, p] = btn.parent.children;
+    u.value = "xiaobei"; p.value = "pw123456";
+    env.reply = l03Unauth();
+    await btn.onclick();
+    const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-reset-hint"));
+    check(notes.length === 0 && env.toasts.length === 1, "无标记时 401 只有 toast", JSON.stringify(env.toasts));
+  }
+}
+
+async function apiTimeout() {
+  console.log("=== L03 登录类请求超时 ===");
+  const SLOW = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+  const signals = [];
+  const fetch = (url, opt) => { signals.push(opt.signal); return new Promise(() => {}); };
+  const src = ["api", "apiFetch", "authHeaders"].map((n) => l03Extract(n)).join("\n");
+  const f = new Function("S", "fetch", "apiUrl", "errText", "recoverUser", src + "; return { api };");
+  const { api } = f({ token: "" }, fetch, (p) => p, () => "", async () => false);
+  const t0 = Date.now();
+  const out = await Promise.race([
+    api("POST", "/api/auth/signin", { username: "a", password: "b" }, { timeoutMs: 50 }).then(() => "resolved", (e) => e),
+    new Promise((r) => setTimeout(() => r("pending"), 1000)),
+  ]);
+  check(out instanceof Error && out.message === SLOW, "带 timeoutMs 的请求 1 秒内以固定文案 reject", String(out && out.message || out));
+  check(Date.now() - t0 < 1000, "reject 在 1 秒内", String(Date.now() - t0));
+  check(!!signals[0] && signals[0].aborted === true, "超时后 fetch 被 abort");
+  let settled = false;
+  api("POST", "/api/chat", { text: "x" }).then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((r) => setTimeout(r, 200));
+  check(!settled && !(signals[1] && signals[1].aborted), "不带 timeoutMs 的请求不被 abort");
 }
