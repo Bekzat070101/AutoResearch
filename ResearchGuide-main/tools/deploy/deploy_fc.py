@@ -14,7 +14,8 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import DEFAULT_NAME, assert_health_persistent, is_function_missing, merge_env, production_release_checks, require_migration
+from fc_safety import (DEFAULT_NAME, assert_db_under_nas, assert_health_persistent, is_function_missing, merge_env,
+                       nas_mount_dirs, production_release_checks, require_migration)
 from pack_fc import OUT, main as pack
 
 REGION = "cn-hangzhou"
@@ -152,7 +153,14 @@ def main(argv: list[str] | None = None) -> None:
             token = env_vars.get("ADMIN_TOKEN") or ""
             if not token:
                 raise SystemExit("换库迁移需要函数上的 ADMIN_TOKEN")
-            obj = backup_remote(old_url, token)
+            obj, on_oss = backup_remote(old_url, token)
+            if not on_oss:
+                # 备份只落在老实例的本地盘：发版后的新实例拿不到它，恢复必失败——那就别发
+                try:
+                    assert_db_under_nas(env_vars.get("BACKUP_DIR") or "", nas_mount_dirs(cfg))
+                except SystemExit:
+                    raise SystemExit("备份没上 OSS 且 BACKUP_DIR 不在 NAS：发版后新实例拿不到备份，恢复必失败。"
+                                     "先设 BACKUP_OSS_BUCKET 或把 BACKUP_DIR 放到 NAS 再换库")
             con = sqlite3.connect(args.migrate_from_backup)
             try:
                 ok = con.execute("PRAGMA integrity_check").fetchone()[0]
@@ -260,23 +268,27 @@ def check_deployed_health(url: str) -> dict:
 
 
 def remote_user_count(url: str) -> int:
-    """读 health 的 qiyan_users，没有就读 db.account_store.registered。"""
+    """读 health 的 db.account_store.users（users 表全部行，含访客）；旧版 health 没有就退到 registered / qiyan_users。"""
     import urllib.request
     req = urllib.request.Request(f"{str(url).rstrip('/')}/api/health")
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = json.loads(resp.read().decode() or "{}")
-    n = body.get("qiyan_users") if isinstance(body, dict) else None
-    if n is None:
-        db = body.get("db") if isinstance(body, dict) else None
-        store = db.get("account_store") if isinstance(db, dict) else None
-        n = store.get("registered") if isinstance(store, dict) else None
+    db = body.get("db") if isinstance(body, dict) else None
+    acc = db.get("account_store") if isinstance(db, dict) else None
+    n = None
+    if isinstance(acc, dict):
+        n = acc.get("users")
+        if n is None:
+            n = acc.get("registered")
+    if n is None and isinstance(body, dict):
+        n = body.get("qiyan_users")
     if n is None:
         raise SystemExit("health 里没有用户数，无法核对")
     return int(n)
 
 
-def backup_remote(url: str, token: str) -> str:
-    """POST /api/admin/backup，返回备份对象名。"""
+def backup_remote(url: str, token: str) -> tuple[str, bool]:
+    """POST /api/admin/backup，返回 (备份对象名, 是否已上 OSS)。"""
     import urllib.request
     req = urllib.request.Request(f"{str(url).rstrip('/')}/api/admin/backup", method="POST",
                                  headers={"X-Admin-Token": token})
@@ -284,8 +296,8 @@ def backup_remote(url: str, token: str) -> str:
         body = json.loads(resp.read().decode() or "{}")
     if not body.get("ok") or not body.get("object"):
         raise SystemExit("远端备份失败，不准换库")
-    print("BACKUP", body["object"])
-    return str(body["object"])
+    print("BACKUP", body["object"], "oss" if body.get("oss") else "local")
+    return str(body["object"]), bool(body.get("oss"))
 
 
 def restore_remote(url: str, token: str, obj: str) -> dict:

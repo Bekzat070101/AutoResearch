@@ -44,7 +44,7 @@ _STATE: dict[str, Any] = {}
 
 def _fresh_state() -> dict[str, Any]:
     return {"snapshot_users": None, "snapshot_sessions": None, "last_dump_at": None,
-            "last_hydrate_at": None, "last_error": None, "collisions": []}
+            "last_hydrate_at": None, "last_error": None, "collisions": [], "file_saved_at": None}
 
 
 _STATE.update(_fresh_state())
@@ -78,12 +78,13 @@ def status() -> dict[str, Any]:
         via.append("oss")
     try:
         registered = _registered_count()
+        users = _user_count()
     except (sqlite3.Error, OSError):
         # 库打不开（路径只读、盘没挂上）时 health 也不能 500：探活本身就是用来发现这种事的
-        registered = None
+        registered = users = None
     with _STATE_LOCK:
         st = dict(_STATE)
-    return {"enabled": enabled(), "via": via, "registered": registered,
+    return {"enabled": enabled(), "via": via, "registered": registered, "users": users,
             "snapshot_users": st["snapshot_users"], "snapshot_sessions": st["snapshot_sessions"],
             "last_dump_at": st["last_dump_at"], "last_hydrate_at": st["last_hydrate_at"],
             "last_error": st["last_error"], "collisions": len(st["collisions"])}
@@ -145,6 +146,12 @@ def _decrypt(blob: bytes) -> dict[str, Any]:
     if data.get("v") == 2 and not isinstance(data.get("sessions", []), list):
         raise ValueError("account_store_shape")
     return data
+
+
+def _user_count() -> int:
+    """users 表全部行（含访客）：换库前后核数用这个，不用只数用户名账号的 registered。"""
+    with store._conn() as c:
+        return int(c.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
 
 def _registered_count() -> int:
@@ -284,6 +291,8 @@ def hydrate_file() -> dict[str, Any]:
         note_error("invalid")
         print(json.dumps({"event": "account_store_invalid", "via": "file"}, ensure_ascii=False))
         return {"skipped": "invalid"}
+    with _STATE_LOCK:
+        _STATE["file_saved_at"] = str(payload.get("saved_at") or "")
     return _hydrate_logged(payload, "file")
 
 
@@ -304,6 +313,13 @@ def hydrate_oss() -> dict[str, Any]:
         note_error("invalid")
         print(json.dumps({"event": "account_store_invalid", "via": "oss"}, ensure_ascii=False))
         return {"skipped": "invalid"}
+    with _STATE_LOCK:
+        file_at = _STATE["file_saved_at"]
+    if file_at and str(payload.get("saved_at") or "") <= file_at:
+        # 本地文件副本更新（OSS 那次 put 失败过）：旧副本不往回灌，免得把已删的号复活
+        print(json.dumps({"event": "account_store_oss_stale", "oss": payload.get("saved_at"), "file": file_at},
+                         ensure_ascii=False))
+        return {"skipped": "older_than_file"}
     return _hydrate_logged(payload, "oss")
 
 
@@ -375,6 +391,7 @@ def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bo
             ),
         )
     except sqlite3.IntegrityError:
+        collisions.append(uid)  # 多半是 wechat_openid 被别的 uid 占了（换库后那个人用微信重新进过）：也算冲突，不静默
         return False
     return True
 

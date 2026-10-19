@@ -216,7 +216,8 @@ def test_changing_db_path_requires_migration(monkeypatch, tmp_path):
     models = _mod("alibabacloud_fc20230330.models")
     models.__getattr__ = lambda n: Obj
     calls: list = []
-    remote_env = {"QIYAN_DB": "/tmp/a.db", "QIYAN_SECRET": "x", "WECHAT_APP_ID": "wx", "ADMIN_TOKEN": "tok"}
+    remote_env = {"QIYAN_DB": "/tmp/a.db", "QIYAN_SECRET": "x", "WECHAT_APP_ID": "wx", "ADMIN_TOKEN": "tok",
+                  "BACKUP_DIR": "/mnt/nas/backup"}
     users = {"n": 12}
 
     class FakeClient:
@@ -334,3 +335,12 @@ def test_changing_db_path_requires_migration(monkeypatch, tmp_path):
     monkeypatch.setattr(FakeClient, "update_function", lambda self, name, req: calls.append("deploy"))
     deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db"])
     assert "backup" not in calls and "deploy" in calls and "record" in calls
+
+    # 备份只在老实例 /tmp 且没上 OSS：新实例拿不到，发版前就拒绝
+    calls.clear()
+    users["n"] = 12
+    remote_env["BACKUP_DIR"] = "/tmp/qiyan-backup"
+    with pytest.raises(SystemExit) as exc:
+        deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db", "--migrate-from-backup", str(backup)])
+    assert "BACKUP_DIR" in str(exc.value)
+    assert "backup" in calls and "deploy" not in calls

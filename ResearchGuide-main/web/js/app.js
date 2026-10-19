@@ -7362,7 +7362,10 @@ document.addEventListener("keydown", (e) => {
       await ensurePortrait();
     } catch (e) {
       if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么
-        try { localStorage.setItem("rg_last_uid", S.uid); localStorage.setItem("rg_reset_hint", "1"); } catch (_) { /* 无痕模式等 */ }
+        // 提示文案写死了 10-18 换库这件事：12 月起会话自然过期就不再挂这个提示
+        if (Date.now() < Date.parse("2026-12-01T00:00:00+08:00")) {
+          try { localStorage.setItem("rg_last_uid", S.uid); localStorage.setItem("rg_reset_hint", "1"); } catch (_) { /* 无痕模式等 */ }
+        }
         clearSession();
         reloadInto("login", sessionGoneMsg());
         return;

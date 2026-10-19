@@ -74,10 +74,11 @@ def test_account_store_keeps_password_across_empty_db(client, tmp_path, monkeypa
     raw = durable.read_bytes()
     assert b"secret-ok" not in raw
     payload = json.loads(gzip.decompress(account_store._aes(raw, KEY.encode(), False)))
-    assert payload["v"] == 1
-    assert payload["users"][0]["username"] == "keep_me"
-    assert "password" not in payload["users"][0]
-    assert payload["users"][0]["password_hash"]
+    assert payload["v"] == 2
+    assert isinstance(payload["sessions"], list)
+    me = next(u for u in payload["users"] if u["username"] == "keep_me")
+    assert "password" not in me
+    assert me["password_hash"]
 
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "after-deploy" / "qiyan.db")
     store.init_db()
@@ -105,11 +106,14 @@ def test_deleted_account_does_not_return_after_hydrate(client, tmp_path, monkeyp
     assert again.status_code == 401
 
 
-def test_hydrate_does_not_overwrite_existing_users(client, tmp_path, monkeypatch):
+def test_hydrate_merges_into_db_that_already_has_users(client, tmp_path, monkeypatch):
+    """v2：库里已有人也灌回（按 id 补缺），已有的不动；换库后有人抢注了同名就记 collision、不覆盖。"""
     durable = tmp_path / "durable" / "accounts.json.enc"
     monkeypatch.setenv("QIYAN_ACCOUNT_STORE", str(durable))
     monkeypatch.setenv("BACKUP_KEY", KEY)
-    _reg(client, "old_one")
+    old_uid = _reg(client, "old_one")["uid"]
+    _reg(client, "taken_name")
+    account_store.flush()  # 两次注册在 2 秒合并窗内：把还没写的那次先写掉（进程退出前也是这么做）
     monkeypatch.delenv("QIYAN_ACCOUNT_STORE")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "kept" / "qiyan.db")
     store.init_db()
@@ -117,10 +121,15 @@ def test_hydrate_does_not_overwrite_existing_users(client, tmp_path, monkeypatch
         "username": "new_one", "password": "secret-ok", "nickname": "新库", "consent": True,
     })
     assert second.status_code == 200
+    squatter = _reg(client, "taken_name", "other-pw")
     monkeypatch.setenv("QIYAN_ACCOUNT_STORE", str(durable))
     store.init_db()
     assert store.user_by_username("new_one")["id"] == second.json()["uid"]
-    assert store.user_by_username("old_one") is None
+    assert store.user_by_username("old_one")["id"] == old_uid
+    assert store.user_by_username("taken_name")["id"] == squatter["uid"]
+    assert account_store.status()["collisions"] == 1
+    again = client.post("/api/auth/signin", json={"username": "old_one", "password": "secret-ok"})
+    assert again.status_code == 200
 
 
 def test_oss_durable_prefix_not_daily(client, tmp_path, monkeypatch):
@@ -158,6 +167,11 @@ def test_oss_durable_prefix_not_daily(client, tmp_path, monkeypatch):
     assert "blob" in uploaded
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "after-deploy" / "qiyan.db")
     store.init_db()
+    # v2：init_db 不碰网络；OSS 的副本由 _lifespan 在线程池里拉（这里直接调它调的函数）
+    before = client.post("/api/auth/signin", json={"username": "oss_user", "password": "secret-ok"})
+    assert before.status_code == 401
+    out = account_store.hydrate_oss()
+    assert out.get("ok") and out["via"] == "oss", out
     again = client.post("/api/auth/signin", json={"username": "oss_user", "password": "secret-ok"})
     assert again.status_code == 200
     assert again.json()["uid"] == uid
