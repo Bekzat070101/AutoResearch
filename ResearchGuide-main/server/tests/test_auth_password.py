@@ -196,3 +196,39 @@ def test_invalid_signin_full_capacity_still_401(client, monkeypatch):
     assert r.json() == {"detail": "用户名或密码不对"}
     assert looked == []
     assert len(auth._HITS) == auth._HITS_CAP
+
+
+def test_successful_logins_do_not_consume_the_username_bucket(client):
+    client.post("/api/auth/register", json={
+        "username": "good_user", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    for _ in range(9):
+        assert client.post("/api/auth/signin", json={"username": "good_user", "password": "secret-ok"}).status_code == 200
+    assert client.post("/api/auth/signin", json={"username": "good_user", "password": "secret-ok"}).status_code == 200
+    for _ in range(9):
+        assert client.post("/api/auth/signin", json={"username": "good_user", "password": "nope-nope"}).status_code == 401
+    assert client.post("/api/auth/signin", json={"username": "good_user", "password": "nope-nope"}).status_code == 401
+    assert client.post("/api/auth/signin", json={"username": "good_user", "password": "nope-nope"}).status_code == 429
+
+
+def test_signin_ip_budget_is_separate_from_guest_budget(client, monkeypatch):
+    monkeypatch.setenv("TRUST_PROXY", "1")
+    xff = {"X-Forwarded-For": "8.8.8.8"}
+    client.post("/api/auth/register", json={
+        "username": "class_user", "password": "secret-ok", "nickname": "甲", "consent": True,
+    })
+    auth._HITS.clear()
+    for _ in range(auth.PER_IP_HOUR):
+        assert client.post("/api/auth/login", json={"nickname": "访客"}, headers=xff).status_code == 200
+    assert client.post("/api/auth/login", json={"nickname": "访客"}, headers=xff).status_code == 429
+    assert client.post("/api/auth/signin", json={"username": "class_user", "password": "secret-ok"},
+                       headers=xff).status_code == 200
+    auth._HITS.clear()
+    monkeypatch.setattr(auth, "SIGNIN_PER_IP_HOUR", 5, raising=False)
+    for _ in range(5):
+        assert client.post("/api/auth/signin", json={"username": "class_user", "password": "secret-ok"},
+                           headers=xff).status_code == 200
+    assert client.post("/api/auth/signin", json={"username": "class_user", "password": "secret-ok"},
+                       headers=xff).status_code == 429
+    assert client.post("/api/auth/login", json={"nickname": "访客"}, headers=xff).status_code == 200
