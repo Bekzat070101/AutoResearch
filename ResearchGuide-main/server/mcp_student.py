@@ -437,17 +437,22 @@ class Tools:
             code = str(d.get("code") or d.get("id") or "")
             if code:
                 found.append((code, str(d.get("name") or d.get("title") or code), str(c.get("why_you") or d.get("blurb") or "")[:60]))
-        if not found:
-            try:
-                import planner
-                found = [(k, v["name"], v.get("blurb", "")[:60]) for k, v in planner.DIRECTIONS.items()][:8]
-            except Exception:
-                found = []
-        if found:
+        rest: list[tuple[str, str, str]] = []
+        try:
+            import planner
+            have = {c for c, _, _ in found}
+            rest = [(k, v["name"], "") for k, v in planner.DIRECTIONS.items() if k not in have]
+        except Exception:
+            rest = []
+        if found or rest:
             lines.append("还没有方向，先选一个：")
             for code, name, why in found:
-                lines.append(f"· {name}（{code}）{('：' + why) if why else ''}")
+                lines.append(f"· {name}（{code}）{('：' + why) if why else ''}（按你说过的推荐）")
                 btns.append((f"选方向：{code}", (lambda cd=code: self._choose_direction(cd))))
+            if rest:
+                lines.append("其它方向：" + "、".join(f"{name}（{code}）" for code, name, _ in rest))
+                for code, name, _ in rest:
+                    btns.append((f"选方向：{code}", (lambda cd=code: self._choose_direction(cd))))
         else:
             lines.append("还没有方向，去「对话」里说说你感兴趣什么。")
 
@@ -467,6 +472,19 @@ class Tools:
             self._mark_done("enter")
         d = self.api.call("GET", f"/api/daily?uid={s.uid}", token=s.token, timeout=120)
         items = [i for i in (d.get("items") or []) if isinstance(i, dict)][:6]
+        if not items and (s.direction or d.get("kit")):
+            # 兴趣抓取没东西（本机没联网、或还没采集）：退到这个方向的阅读工具包，论文随仓库自带
+            try:
+                kits = (self.api.call("GET", "/api/kits") or {}).get("kits") or []
+                kit = next((k for k in kits if k.get("direction") == s.direction), None) or (kits[0] if kits else None)
+                if kit:
+                    s.kit = str(kit["id"])
+                    d2 = self.api.call("GET", f"/api/daily?uid={s.uid}&kit={s.kit}", token=s.token, timeout=120)
+                    items = [i for i in (d2.get("items") or []) if isinstance(i, dict)][:6]
+                    if items:
+                        d = {**d2, "note": f"来自工具包「{kit.get('name') or s.kit}」"}
+            except ApiError:
+                pass
         s.papers = items
         lines = []
         goal = d.get("goal")
@@ -476,6 +494,8 @@ class Tools:
             lines.append(goal)
         if d.get("error"):
             lines.append(f"提示：{d['error']}")
+        if d.get("note"):
+            lines.append(str(d["note"]))
         btns: list[tuple[str, Callable[[], str]]] = []
         if not items:
             if s.direction or d.get("kit"):
