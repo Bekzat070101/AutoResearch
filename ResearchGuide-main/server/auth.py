@@ -280,8 +280,12 @@ def account(uid: str) -> dict[str, Any]:
 
 def status() -> dict[str, Any]:
     """给 /api/health：页面据此决定显示「微信登录」还是只给访客入口，以及公众号二维码。"""
+    st = os.environ.get("QIYAN_RECOVERY_STATE")
+    if st not in ("normal", "recovering", "accounts_restored", "lost"):
+        st = "normal"
     return {"wechat_login": wechat.configured() or _dev(), "dev": _dev(), "qr_url": wechat.qr_url(),
-            "account_name": wechat.account_name(), "privacy_version": PRIVACY_VERSION}
+            "account_name": wechat.account_name(), "privacy_version": PRIVACY_VERSION,
+            "recovery": {"event_id": os.environ.get("QIYAN_RECOVERY_EVENT") or "", "state": st}}
 
 
 # ---------- 接口 ----------

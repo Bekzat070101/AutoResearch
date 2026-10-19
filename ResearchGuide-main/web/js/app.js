@@ -155,14 +155,16 @@ function sessionGoneMsg() {
 
 async function recoverUser(err) {
   if (!lostUser(err)) return false;
-  if (S.token) {
-    try {
-      const me = await apiFetch("/api/auth/me");
-      if (me.ok) return false;
-    } catch (_) { return false; }
+  const was = { uid: S.uid, token: S.token };
+  try {
+    await api("GET", "/api/auth/me", undefined, { timeoutMs: 20000 });
+    return false;
+  } catch (e) {
+    if (S.uid !== was.uid || S.token !== was.token) return false;  // 核验期间换了账号：不动
+    if (e && (e.status === 401 || e.status === 410)) { signedOut(sessionGoneMsg()); return true; }
+    toast("暂时无法核验登录状态，请稍后再试");  // 503、429、网络错误、超时：身份和草稿都留着
+    return false;
   }
-  signedOut("登录已失效，请用用户名和密码重新登录。提示用户名不存在的话，说明服务器数据被重置过，需要重新注册");
-  return true;
 }
 
 /* 函数多实例时，登录写在 A、下一请求落到 B，B 的临时库里没有这份会话，会回 401。
@@ -170,11 +172,14 @@ async function recoverUser(err) {
 let sessionKick = null;
 
 async function confirmSessionGone() {
+  const was = { uid: S.uid, token: S.token };
   try {
-    const me = await apiFetch("/api/auth/me");
-    if (me.ok) return;
-    signedOut("登录已失效，请用用户名和密码重新登录。提示用户名不存在的话，说明服务器数据被重置过，需要重新注册");
-  } catch (_) { /* 网络抖一下不踢人 */ }
+    await api("GET", "/api/auth/me", undefined, { timeoutMs: 20000 });
+  } catch (e) {
+    if (S.uid !== was.uid || S.token !== was.token) return;  // 核验期间换了账号：不动
+    if (e && (e.status === 401 || e.status === 410)) { signedOut(sessionGoneMsg()); return; }
+    toast("暂时无法核验登录状态，请稍后再试");  // 503、429、网络错误、超时：身份和草稿都留着
+  }
 }
 
 async function apiFetch(path, opt = {}) {
@@ -1699,6 +1704,14 @@ function renderLogin() {
   const binding = !!(S.uid && S.guest);  // 访客来绑微信：start 时带着访客会话，记录跟着走
   const wxOn = !S.auth || S.auth.wechat_login;
   const hero = el("section", "hero stagger");
+  let recovery = "";
+  try { recovery = localStorage.getItem("rg_recovery_state") || ""; } catch (_) { /* 无痕模式等 */ }
+  const RECOVERY_NOTE = {
+    lost: "服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。",
+    accounts_restored: "用户名账号已恢复，请用原用户名和密码登录；原访客、仅微信账号无法找回。",
+    recovering: "账号正在恢复，请稍后重试。",
+  };
+  if (RECOVERY_NOTE[recovery]) hero.appendChild(el("p", "login-note login-recovery", RECOVERY_NOTE[recovery]));
   hero.appendChild(el("p", "hero-kicker", binding ? "启研 · 绑定微信" : "启研 · 登录"));
   hero.appendChild(el("h2", "", binding ? "绑定微信" : "登录"));
   hero.appendChild(el("p", "hero-lead", binding
@@ -1736,10 +1749,17 @@ function renderLogin() {
     try {
       const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value }, { timeoutMs: 20000 });
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
+      try { localStorage.removeItem("rg_recovery_state"); } catch (_) { /* 无痕模式等 */ }
       const previous = S.token;  // 访客登进自己的账号：采用新令牌之后再吊销访客的
       if (previous && previous !== r.token) revokeToken(previous);
       if (setSession(r, "today")) return;
-      await afterEnter();
+      try {
+        await Promise.race([afterEnter(), new Promise((_, rej) => setTimeout(() => rej(new Error("after_enter_timeout")), 15000))]);
+      } catch (e) {
+        if (!e || e.message !== "after_enter_timeout") throw e;
+        toast("登录成功，页面资料暂未加载，请刷新重试");  // 会话已生效，不重发登录
+        sbtn.disabled = false; sbtn.textContent = "登录";
+      }
       if (!r.consent_ok) openPrivacy(true);
     } catch (e) {
       toast(e.message); sbtn.disabled = false; sbtn.textContent = "登录";
@@ -1773,10 +1793,18 @@ function renderLogin() {
         nickname: rnick.value.trim() || ruser.value.trim(), consent: true,
       }, { timeoutMs: 20000 });
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
+      try { localStorage.removeItem("rg_recovery_state"); } catch (_) { /* 无痕模式等 */ }
       if (setSession(r, "dialogue")) return;
-      await afterEnter();
+      try {
+        await Promise.race([afterEnter(), new Promise((_, rej) => setTimeout(() => rej(new Error("after_enter_timeout")), 15000))]);
+      } catch (e) {
+        if (!e || e.message !== "after_enter_timeout") throw e;
+        toast("登录成功，页面资料暂未加载，请刷新重试");  // 会话已生效，不重发注册
+        rbtn.disabled = false; rbtn.textContent = "注册并进入";
+      }
     } catch (e) { toast(e.message); rbtn.disabled = false; rbtn.textContent = "注册并进入"; }
   };
+  if (recovery === "recovering") rbtn.disabled = true;
   rpass.addEventListener("keydown", onEnter(rbtn));
   registerStep.append(ruser, rnick, rpass, rbtn);
 
@@ -1804,7 +1832,7 @@ function renderLogin() {
   guestBox.append(guestRow, el("p", "form-note", "访客的记录只能在这台浏览器里找回，之后可以在「记录」页绑定微信或设用户名密码。"));
 
   const steps = { wechat: wxStep, signin: signinStep, register: registerStep };
-  let mode = wxOn ? "wechat" : "signin";
+  let mode = recovery === "lost" ? "register" : wxOn ? "wechat" : "signin";
   const tabs = el("div", "login-tabs");
   const paint = () => {
     tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
@@ -7336,8 +7364,16 @@ document.addEventListener("keydown", (e) => {
 
 (async function boot() {
   const t0 = performance.now();
+  const removeSplash = () => {
+    const splash = document.getElementById("boot");
+    if (!splash || splash.classList.contains("out")) return;
+    splash.classList.add("out");
+    setTimeout(() => splash.remove(), 600);
+  };
+  setTimeout(removeSplash, 5000);  // 开场遮罩最多挡 5 秒：health、me 卡住也不让人对着遮罩干等
   try {
-    const [h, paths] = await Promise.all([api("GET", "/api/health"), api("GET", "/api/paths").catch(() => null)]);
+    const [h, paths] = await Promise.all([api("GET", "/api/health", undefined, { timeoutMs: 5000 }),
+      api("GET", "/api/paths", undefined, { timeoutMs: 5000 }).catch(() => null)]);
     S.llmInfo = h.llm || null;  // 服务器那把兜底密钥的状态，登录、退出时重画侧栏的模型钮要用
     applyLlmPill(h.llm);
     S.auth = h.auth || null;
@@ -7361,10 +7397,13 @@ document.addEventListener("keydown", (e) => {
       await loadPrefs();  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
       await ensurePortrait();
     } catch (e) {
-      if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么
+      if ([401, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么；404 是发版瞬间路由缺失，不算
         // 提示文案写死了 10-18 换库这件事：12 月起会话自然过期就不再挂这个提示
         if (Date.now() < Date.parse("2026-12-01T00:00:00+08:00")) {
           try { localStorage.setItem("rg_last_uid", S.uid); localStorage.setItem("rg_reset_hint", "1"); } catch (_) { /* 无痕模式等 */ }
+        }
+        if (S.auth && S.auth.recovery && S.auth.recovery.state !== "normal") {
+          try { localStorage.setItem("rg_recovery_state", S.auth.recovery.state); } catch (_) { /* 无痕模式等 */ }
         }
         clearSession();
         reloadInto("login", sessionGoneMsg());
@@ -7391,12 +7430,7 @@ document.addEventListener("keydown", (e) => {
   if (note) toast(note);
   if (needConsent) openPrivacy(true);
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒
-  const splash = document.getElementById("boot");
-  setTimeout(() => {
-    if (!splash) return;
-    splash.classList.add("out");
-    setTimeout(() => splash.remove(), 600);
-  }, Math.max(0, 700 - (performance.now() - t0)));
+  setTimeout(removeSplash, Math.max(0, 700 - (performance.now() - t0)));
 })();
 
 function transcriptImportPanel() {
