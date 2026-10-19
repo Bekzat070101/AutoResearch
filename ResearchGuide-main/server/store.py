@@ -557,7 +557,7 @@ def init_db() -> None:
     migrate_legacy_secrets()
     try:
         import account_store
-        account_store.hydrate_if_empty()
+        account_store.hydrate_file()
     except Exception as exc:
         print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
                          ensure_ascii=False))
@@ -591,6 +591,7 @@ def create_user(nickname: str) -> dict[str, Any]:
             "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at) VALUES(?,?,?,?,?,?)",
             (uid, nickname, token, "{}", now, now),
         )
+    _accounts_changed()
     return {"uid": uid, "token": token, "nickname": nickname}
 
 
@@ -975,6 +976,7 @@ def create_wechat_user(nickname: str, openid: str) -> str:
         with _LOCK, _conn() as c:
             c.execute("DELETE FROM users WHERE id=?", (uid,))
         raise
+    _accounts_changed()
     return uid
 
 
@@ -983,6 +985,8 @@ def bind_wechat(uid: str, openid: str) -> bool:
     with _LOCK, _conn() as c:
         cur = c.execute("UPDATE users SET wechat_openid=?, claimed_at=COALESCE(claimed_at, ?)"
                         " WHERE id=? AND wechat_openid IS NULL", (openid, now_iso(), uid))
+    if cur.rowcount == 1:
+        _accounts_changed()
     return cur.rowcount == 1
 
 
@@ -1006,6 +1010,7 @@ def create_session(uid: str, ttl: float) -> str:
     with _LOCK, _conn() as c:
         c.execute("INSERT INTO sessions(token_hash, user_id, created_at, expires_at, last_seen) VALUES(?,?,?,?,?)",
                   (_token_hash(token), uid, now_iso(), now + ttl, now))
+    _accounts_changed()
     return token
 
 
@@ -1040,6 +1045,7 @@ def session_user(token: str, ttl: float) -> str | None:
 def drop_session(token: str) -> None:
     with _LOCK, _conn() as c:
         c.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+    _accounts_changed()
 
 
 
@@ -1157,15 +1163,15 @@ def delete_user(uid: str) -> dict[str, int]:
         c.execute("DELETE FROM wechat_tickets WHERE guest_uid=?", (uid,))
         counts["users"] = c.execute("DELETE FROM users WHERE id=?", (uid,)).rowcount
     print(json.dumps({"event": "user_deleted", "uid": uid, "at": now_iso()}, ensure_ascii=False))
-    _accounts_changed()
+    _accounts_changed(immediate=True)
     return counts
 
 
-def _accounts_changed() -> None:
-    """把已注册账号的用户名和密码哈希写到独立副本。失败不影响主路径。"""
+def _accounts_changed(immediate: bool = False) -> None:
+    """把全部账号与未过期会话（只有哈希）写到独立副本；2 秒内合并一次，删号立即写。失败不影响主路径。"""
     try:
         import account_store
-        account_store.dump_accounts()
+        account_store.dump_accounts(immediate=immediate)
     except Exception as exc:
         print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
                          ensure_ascii=False))

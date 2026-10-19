@@ -105,6 +105,24 @@ def _model_work(fn):
     return endpoint
 
 
+ACCOUNT_OSS_TIMEOUT = 10.0
+_BACKGROUND: set = set()
+
+
+async def _hydrate_accounts_from_oss() -> None:
+    """OSS 上的账号副本在线程池里拉，最多等 ACCOUNT_OSS_TIMEOUT 秒；超时 / 失败只记日志与 health，不挡启动。"""
+    job = asyncio.ensure_future(run_in_threadpool(account_store.hydrate_oss))
+    done, _ = await asyncio.wait({job}, timeout=ACCOUNT_OSS_TIMEOUT)
+    if not done:
+        account_store.note_error("timeout")
+        print(json.dumps({"event": "account_store_oss_timeout", "seconds": ACCOUNT_OSS_TIMEOUT}, ensure_ascii=False))
+        return
+    exc = job.exception()
+    if exc is not None:
+        account_store.note_error(type(exc).__name__)
+        print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__}, ensure_ascii=False))
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global _LIMITER
@@ -113,6 +131,10 @@ async def _lifespan(_app: FastAPI):
     if store.ephemeral():
         print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
                          ensure_ascii=False))
+    if account_store.enabled() and account_store.oss_enabled():
+        task = asyncio.ensure_future(_hydrate_accounts_from_oss())
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
     yield
     await anyio.to_thread.run_sync(_MODEL.drain)  # 还在跑的模型活（浏览器走了照样在写的那一轮）做完再退
     await anyio.to_thread.run_sync(_REVIEW.drain)  # 在评的项目也是：评完记进项目再退（原来只等了 _MODEL，评阅写一半就没了，Codex 复现）
