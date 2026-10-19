@@ -1753,13 +1753,15 @@ function renderLogin() {
       const previous = S.token;  // 访客登进自己的账号：采用新令牌之后再吊销访客的
       if (previous && previous !== r.token) revokeToken(previous);
       if (setSession(r, "today")) return;
+      let slowTimer;
+      const slow = new Promise((_, rej) => { slowTimer = setTimeout(() => rej(new Error("after_enter_timeout")), 15000); });
       try {
-        await Promise.race([afterEnter(), new Promise((_, rej) => setTimeout(() => rej(new Error("after_enter_timeout")), 15000))]);
+        await Promise.race([afterEnter(), slow]);
       } catch (e) {
         if (!e || e.message !== "after_enter_timeout") throw e;
         toast("登录成功，页面资料暂未加载，请刷新重试");  // 会话已生效，不重发登录
         sbtn.disabled = false; sbtn.textContent = "登录";
-      }
+      } finally { clearTimeout(slowTimer); slow.catch(() => {}); }
       if (!r.consent_ok) openPrivacy(true);
     } catch (e) {
       toast(e.message); sbtn.disabled = false; sbtn.textContent = "登录";
@@ -1795,13 +1797,15 @@ function renderLogin() {
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
       try { localStorage.removeItem("rg_recovery_state"); } catch (_) { /* 无痕模式等 */ }
       if (setSession(r, "dialogue")) return;
+      let slowTimer;
+      const slow = new Promise((_, rej) => { slowTimer = setTimeout(() => rej(new Error("after_enter_timeout")), 15000); });
       try {
-        await Promise.race([afterEnter(), new Promise((_, rej) => setTimeout(() => rej(new Error("after_enter_timeout")), 15000))]);
+        await Promise.race([afterEnter(), slow]);
       } catch (e) {
         if (!e || e.message !== "after_enter_timeout") throw e;
         toast("登录成功，页面资料暂未加载，请刷新重试");  // 会话已生效，不重发注册
         rbtn.disabled = false; rbtn.textContent = "注册并进入";
-      }
+      } finally { clearTimeout(slowTimer); slow.catch(() => {}); }
     } catch (e) { toast(e.message); rbtn.disabled = false; rbtn.textContent = "注册并进入"; }
   };
   if (recovery === "recovering") rbtn.disabled = true;
