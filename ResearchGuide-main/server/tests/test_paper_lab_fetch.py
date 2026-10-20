@@ -49,6 +49,17 @@ def test_sentences_split_rules(fp):
     assert s("") == []
 
 
+def test_cert_failure_message_not_traceback(fp, monkeypatch):
+    import urllib.error
+    def boom(*a, **k):
+        raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    monkeypatch.setattr(fp.urllib.request, "urlopen", boom)
+    monkeypatch.setitem(__import__("sys").modules, "certifi", None)  # 当作没装 certifi
+    with pytest.raises(SystemExit) as e:
+        fp._get("https://arxiv.org/abs/0000.00000")
+    assert "--html" in str(e.value) and "Install Certificates" in str(e.value)
+
+
 def test_tex_alttext_cleanup(fp):
     assert fp._tex(r"43.9\%") == "43.9%"
     assert fp._tex(r"\mathrm{acc}\approx 0.5\times 10^{3}") == "acc≈ 0.5× 10^3"
@@ -57,7 +68,9 @@ def test_tex_alttext_cleanup(fp):
 def test_article_blocks_and_render(fp, tmp_path):
     page = tmp_path / "p.html"
     page.write_text(PAGE, encoding="utf-8")
-    blocks = fp.html_blocks("0000.00000", str(page))
+    art = fp.parse_html("0000.00000", str(page))
+    assert (art.title, art.authors, art.abstract) == ("Measuring Things", ["Ann Author"], "Body abstract copy.")
+    blocks = art.blocks
     kinds = [k for k, _ in blocks]
     heads = [t for k, t in blocks if k == "head"]
     assert heads == ["1 Introduction", "1.1 Setup", "2 Empty Container", "2.1 Results"]
