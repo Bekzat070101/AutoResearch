@@ -435,3 +435,50 @@ def test_privacy_export_and_sidebar_copy():
     assert "/api/me/export" in js
     assert 'id="llmPill"' in html and "我的 DeepSeek" in html
     assert 'id="llmPill"' in html and "连接模型" not in html.split('id="llmPill"')[1][:80]
+
+
+def test_card_page_cta_and_tools():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "带读答题" in js
+    assert "paper-lede" in js
+    assert "paper-tools" in js
+    assert 'el("nav", "ws-tabs bench-modes")' not in js
+
+
+def test_phone_reading_pane_not_sticky():
+    css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+    start = css.index("@media (max-width: 920px)")
+    depth = 0
+    end = start
+    for i in range(css.index("{", start), len(css)):
+        if css[i] == "{":
+            depth += 1
+        elif css[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    block = css[start:end]
+    rule = re.search(r"[^{}]*\.bench-paper[^{}]*\{([^}]*)\}", block)
+    assert rule and "position: static" in rule.group(1)
+
+
+def test_no_empty_direction_copy():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "还没有方向" not in js
+    assert "还没选方向" in js
+
+
+def test_soon_rooms_hidden_and_pass_copy():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    for v in ("position", "projects"):
+        btn = re.search(rf'<button[^>]*data-view="{v}"[^>]*>', html).group(0)
+        assert "hidden" in btn
+    assert "过线 ${passed}" not in js
+
+
+def test_read_list_zh_first_and_search_placeholder():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "kp-en" in js
+    assert "搜论文（arXiv 只认英文关键词）" in js

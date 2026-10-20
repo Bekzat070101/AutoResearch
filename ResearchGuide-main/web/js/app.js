@@ -2169,11 +2169,13 @@ function applyNavCollapsed() {
 function paintChrome() {
   const nick = document.getElementById("userNickname");
   if (nick) nick.textContent = S.nickname || "";
+  const dot = document.querySelector("#userMenuBtn .dot");
+  if (dot) dot.textContent = (S.nickname || "")[0] || "我";
   applyNavCollapsed();
   const chip = document.getElementById("dirChip");
   if (!chip) return;
   const name = portraitChipLabel();
-  chip.textContent = name || "还没有方向";
+  chip.textContent = name || "选个方向 ▾";
   chip.classList.toggle("empty", !name);
 }
 
@@ -4607,7 +4609,7 @@ async function renderToday() {
   const wrap = el("div", "stagger");
   wrap.appendChild(workspaceHead("今日", "打开就看这一件。"));
   const status = el("div", "status-chips");
-  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没有方向"));
+  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没选方向"));
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
   if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
   wrap.appendChild(status);
@@ -4740,7 +4742,7 @@ async function renderRead() {
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
   const q = el("input");
-  q.placeholder = "英文关键词，例如 evaluation benchmark";
+  q.placeholder = "搜论文（arXiv 只认英文关键词）";
   q.name = "q";
   const goSearch = el("button", "btn small", "搜索");
   goSearch.type = "submit";
@@ -4798,7 +4800,7 @@ async function renderRead() {
   const leftPane = el("section", "read-pane");
   const leftHead = el("div", "read-pane-head");
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
-  leftHead.appendChild(el("small", "", `过线 ${passed} 张`));
+  if (passed > 0) leftHead.appendChild(el("small", "", `已完成 ${passed} 张阅读卡`));
   const leftBody = el("div", "read-pane-body");
   const recPapers = catalog.length ? catalog.map((p, i) => ({
     arxiv_id: p.paper_id || p.id,
@@ -4833,15 +4835,16 @@ async function renderRead() {
       const li = el("li", "kit-paper");
       const main = el("div", "kp-main");
       const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
-      const title = el("button", "linkish", esc(p.title));
+      const title = el("button", "linkish");
+      title.textContent = p.title_zh || p.title;
       title.type = "button";
       title.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       main.appendChild(el("span", "kp-n", String(p.order || i + 1)));
       main.appendChild(title);
       if (p.title_zh) {
-        const zh = el("p", "kp-zh");
-        zh.textContent = p.title_zh;
-        main.appendChild(zh);
+        const en = el("p", "kp-en");
+        en.textContent = p.title;
+        main.appendChild(en);
       }
       if ((p.keywords || []).length) {
         const kws = el("p", "kp-kw");
@@ -4858,11 +4861,11 @@ async function renderRead() {
       }
       if (c) {
         main.appendChild(el("span", c.status === "pass" ? "kp-state pass" : "kp-state revise",
-          c.status === "pass" ? `✓ 过线 v${c.version}` : `待改 v${c.version}`));
+          c.status === "pass" ? `✓ 已完成 v${c.version}` : `待改 v${c.version}`));
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
       li.appendChild(main);
-      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "写阅读卡" : "打开"));
+      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "带读答题" : "打开"));
       const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
       go.type = "button";
       go.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
@@ -5342,9 +5345,26 @@ async function renderCard() {
 
   const head = el("div", "card-head");
   head.appendChild(back);
-  head.appendChild(el("h2", "", esc(paper.title)));
   const kitP = (kit.papers || []).find((p) => p.arxiv_id === aid);
   const titleZh = paper.title_zh || (kitP && kitP.title_zh) || "";
+  const zhNote = /（[^（）]*）\s*$/.exec(titleZh);
+  const zhTitle = zhNote ? titleZh.slice(0, zhNote.index).trim() : titleZh;
+  if (zhTitle) {
+    const h2 = el("h2");
+    h2.textContent = zhTitle;
+    head.appendChild(h2);
+    const en = el("p", "paper-en");
+    en.textContent = paper.title;
+    head.appendChild(en);
+  } else {
+    head.appendChild(el("h2", "", esc(paper.title)));
+  }
+  const ledeText = (kitP && kitP.why) || paper.why || "";
+  if (ledeText) {
+    const lede = el("p", "paper-lede");
+    lede.textContent = ledeText;
+    head.appendChild(lede);
+  }
   const kws = (paper.keywords && paper.keywords.length) ? paper.keywords : ((kitP && kitP.keywords) || []);
   let absNote = "正文已取到，引文可逐字核对";
   if (paper.source === "pdf") absNote = "你导入的 PDF · 只有你能看到";
@@ -5354,6 +5374,11 @@ async function renderCard() {
     status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a>`));
   }
   status.appendChild(el("span", "", absNote));
+  if (zhNote) {
+    const noteSpan = el("span");
+    noteSpan.textContent = zhNote[0].replace(/^（|）$/g, "");
+    status.appendChild(noteSpan);
+  }
   if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
   if (paper.source !== "html" && paper.source !== "pdf") {
     const retry = el("button", "linkish", "重新取正文");
@@ -5370,11 +5395,6 @@ async function renderCard() {
   }
   head.appendChild(status);
   $app.appendChild(head);
-  if (titleZh) {
-    const zh = el("p", "paper-zh");
-    zh.textContent = titleZh;
-    $app.appendChild(zh);
-  }
   if (kws.length) {
     const row = el("p", "paper-kw");
     kws.slice(0, 5).forEach((k) => {
@@ -5403,11 +5423,11 @@ async function renderCard() {
     passedCount, canGrade, inKit: showCard && inKit,
   });
 
-  const tabs = el("nav", "ws-tabs bench-modes");
-  const tabTutor = el("button", "ws-tab", "AI 带读");
+  const tabs = el("div", "bench-cta");
+  const tabTutor = el("button", "btn", "带读答题");
   tabTutor.type = "button";
   tabTutor.dataset.mode = "tutor";
-  const tabCard = el("button", "ws-tab", "写阅读卡");
+  const tabCard = el("button", "linkish", "或：写阅读卡");
   tabCard.type = "button";
   tabCard.dataset.mode = "card";
   if (!canGrade) {
@@ -5548,7 +5568,9 @@ async function renderCard() {
   window.requestAnimationFrame(() => window.requestAnimationFrame(spy));
 
   // 「选中原文」和「跳到章节」的按钮收进同一个工具栏，放不下就换行，不再横向滚动
-  const toolBar = el("div", "paper-tools");
+  const toolBar = el("details", "paper-tools");
+  toolBar.open = !!(window.matchMedia && window.matchMedia("(min-width: 921px)").matches);
+  toolBar.appendChild(el("summary", "", "原文工具（选句、跳转）"));
   toolBar.append(tools, jump);
   left.append(toolBar, pane);
 
