@@ -154,8 +154,191 @@ const q = byClass(box2, "tutor-q")[0];
 check(q && q.textContent === "<b>leak</b>", "题面走 textContent");
 check(q && q.innerHTML === "", "题面不进 innerHTML");
 
-if (fails) {
-  console.log("失败 " + fails + " 项");
-  process.exit(1);
+async function testPaperScrollTargets() {
+  const made = [];
+  const raf = [];
+  const flush = () => { for (let k = 0; raf.length && k < 100; k++) raf.shift()(); };
+  const fire = (n, ev) => (n._ls[ev] || []).slice().forEach((fn) => fn({ type: ev }));
+  const listen = {
+    addEventListener(n, fn) { (this._ls[n] = this._ls[n] || []).push(fn); },
+    removeEventListener(n, fn) { const a = this._ls[n] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+  };
+  const window = {
+    scrollY: 0, innerWidth: 390, _ls: {}, ...listen,
+    scrollTo(o) { this.scrollY = Math.max(0, o.top); },
+    requestAnimationFrame(cb) { raf.push(cb); return raf.length; },
+    matchMedia(q) { const m = /min-width:\s*(\d+)px/.exec(q); return { matches: m ? this.innerWidth >= Number(m[1]) : false }; },
+    getSelection() { return ""; },
+  };
+  const isPane = (n) => (n.className || "").split(/\s+/).includes("paper-text");
+  let appTop = null;
+  const rectOf = (n) => {
+    if (n === appTop) return { top: 0, bottom: 64 };
+    if (isPane(n)) return { top: 240 - window.scrollY, bottom: 240 - window.scrollY + n.clientHeight };
+    let p = n.parent;
+    while (p && !isPane(p)) p = p.parent;
+    if (!p) return { top: 0, bottom: 0 };
+    const top = 240 - window.scrollY + n.offsetTop - p.scrollTop;
+    return { top, bottom: top + 20 };
+  };
+  const sel = (c, q) => (q.startsWith(".") ? (c.className || "").split(/\s+/).includes(q.slice(1)) : c.tagName === q.toUpperCase());
+  let $app = null;
+  function mk(tag) {
+    const e = {
+      tagName: String(tag || "div").toUpperCase(), children: [], parent: null, className: "", dataset: {}, style: {},
+      _text: "", _html: "", _ls: {}, hidden: false, disabled: false, open: false,
+      offsetTop: 0, scrollTop: 0, clientHeight: 0, scrollHeight: 0, ...listen,
+      set textContent(v) { this._text = String(v); this._html = ""; this.children = []; },
+      get textContent() { return this._text + (this._html || "") + this.children.map((c) => c.textContent).join(""); },
+      set innerHTML(v) { this._html = String(v); this._text = ""; this.children = []; },
+      get innerHTML() { return this._html; },
+      get classList() {
+        const self = this;
+        const list = () => (self.className || "").split(/\s+/).filter(Boolean);
+        return {
+          add(c) { if (!list().includes(c)) self.className = [...list(), c].join(" "); },
+          remove(c) { self.className = list().filter((x) => x !== c).join(" "); },
+          toggle(c, on) { if (on === undefined) on = !list().includes(c); if (on) this.add(c); else this.remove(c); },
+          contains(c) { return list().includes(c); },
+        };
+      },
+      appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); return c; },
+      append(...cs) { cs.forEach((c) => this.appendChild(c)); },
+      remove() { if (this.parent) this.parent.children = this.parent.children.filter((x) => x !== this); this.parent = null; },
+      querySelector(q) { return walk(this).find((c) => sel(c, q)) || null; },
+      querySelectorAll(q) { return walk(this).filter((c) => sel(c, q)); },
+      contains(n) { return walk(this).includes(n); },
+      get isConnected() {
+        let n = this;
+        while (n.parent) { if (!n.parent.children.includes(n)) return false; n = n.parent; }
+        return n === $app;
+      },
+      getBoundingClientRect() { return rectOf(this); },
+      scrollTo(o) { this.scrollTop = Math.max(0, Math.min(o.top, this.scrollHeight - this.clientHeight)); },
+      scrollIntoView() {},
+    };
+    made.push(e);
+    return e;
+  }
+  const el = (tag, cls, html) => {
+    const e = mk(tag);
+    if (cls) e.className = cls;
+    if (html !== undefined) e.innerHTML = String(html);
+    return e;
+  };
+  $app = mk("main");
+  appTop = el("header", "app-top");
+  const document = {
+    querySelectorAll(q) { return q.split(",").includes(".app-top") ? [appTop] : []; },
+    createTextNode(t) { const n = mk("#text"); n._text = String(t); return n; },
+  };
+  const getComputedStyle = (n) => ({ position: n === appTop ? "sticky" : "static" });
+  const store = {};
+  const localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: (k) => { delete store[k]; } };
+  const setView = () => {};
+  const S = { uid: "u1", view: "card", cardId: "2009.03300", cardKit: "", cardFrom: "", renderSeq: 1 };
+  const lines = ["Alice Bob", "Introduction", "intro body", "Method", "method body", "Experiments", "exp body", "Conclusion", "end body"];
+  const labels = { Introduction: "引言", Method: "方法", Experiments: "实验", Conclusion: "结论" };
+  const layout = { Introduction: 100, Method: 480, Experiments: 800, Conclusion: 1300 };
+  const sections = [];
+  let at = 0;
+  lines.forEach((ln) => { if (labels[ln]) sections.push({ at, label: labels[ln] }); at += ln.length + 1; });
+  const methodAt = sections.find((x) => x.label === "方法").at;
+  const paper = { title: "T", title_zh: "", text: lines.join("\n"), sections, tables: [], source: "html", url: "https://arxiv.org/abs/2009.03300", keywords: [] };
+  const sess = {
+    status: "active", rev: 1, voice: "rules", notice: "", cur: 0, total: 1,
+    slots: [{ qid: "q1", station: "method", type: "own", question: "q", hint: "", attempts: 0, status: "open", answer: "", last: "", note: "" }],
+    stations: [{ key: "method", label: "方法", heading: "Method", start: methodAt }],
+  };
+  const api = (method, url) => {
+    if (url.startsWith("/api/papers/")) return Promise.resolve(paper);
+    if (url.startsWith("/api/tutor/")) return Promise.resolve({ session: sess, can_grade: true, in_kit: true });
+    return Promise.resolve({});
+  };
+  const renderToday = async () => { $app.innerHTML = ""; };
+  let stopPaperSpy = null;
+  eval(extract("stale"));
+  eval(extract("tutorPanel"));
+  eval(extract("render"));
+  const at0 = src.search(/async\s+function\s+renderCard\s*\(/);
+  eval(src.slice(at0, src.indexOf("\n}\n", at0) + 2));
+
+  const live = () => {
+    const pane = walk($app).find(isPane);
+    const toolBar = walk($app).find((c) => sel(c, ".paper-tools"));
+    const chips = walk($app).filter((c) => sel(c, ".sec-chip"));
+    const node = (t) => pane.children.find((c) => c.tagName === "H4" && c.textContent.trim() === t);
+    const stationBtn = walk($app).find((c) => c.tagName === "BUTTON" && c.textContent === "跳到本节");
+    return { pane, toolBar, chips, node, stationBtn };
+  };
+  const mount = async () => {
+    await renderCard();
+    const v = live();
+    v.pane.clientHeight = 1680;
+    v.pane.scrollHeight = 1680;
+    Object.keys(layout).forEach((t) => { v.node(t).offsetTop = layout[t]; });
+    flush();
+    return v;
+  };
+  const entries = (v) => [
+    ["章节「方法」", () => v.chips.find((c) => c.textContent === "方法").onclick()],
+    ["带读「跳到本节」", () => v.stationBtn.onclick()],
+  ];
+
+  let v = null;
+  for (const w of [390, 920]) {
+    window.innerWidth = w;
+    window.scrollY = 0;
+    v = await mount();
+    check(!!v.stationBtn, `${w}px 带读有「跳到本节」`);
+    for (const [name, act] of entries(v)) {
+      window.scrollY = 0;
+      v.pane.scrollTop = 0;
+      act();
+      check(window.scrollY === 648, `${w}px ${name} 整页滚到 648`, String(window.scrollY));
+      check(v.pane.scrollTop === 0, `${w}px ${name} 原文框不动`, String(v.pane.scrollTop));
+      const top = v.node("Method").getBoundingClientRect().top;
+      check(top === 72, `${w}px ${name} 目标落在视口 72`, String(top));
+    }
+  }
+  window.scrollY = 1000;
+  fire(window, "scroll");
+  flush();
+  const lit = v.chips.filter((c) => c.classList.contains("on"));
+  check(lit.length === 1 && lit[0].textContent === "实验", "整页滚到 1000 只亮「实验」", lit.map((c) => c.textContent).join(","));
+
+  window.innerWidth = 921;
+  v.pane.clientHeight = 654;
+  for (const [name, act] of entries(v)) {
+    window.scrollY = 1000;
+    v.pane.scrollTop = 0;
+    act();
+    check(v.pane.scrollTop === 472, `921px ${name} 原文框滚到 472`, String(v.pane.scrollTop));
+    check(window.scrollY === 1000, `921px ${name} 整页不动`, String(window.scrollY));
+  }
+
+  [920, 921, 920].forEach((w) => { window.innerWidth = w; fire(window, "resize"); flush(); });
+  v.toolBar.open = !v.toolBar.open;
+  fire(v.toolBar, "toggle");
+  flush();
+  S.view = "today";
+  await render();
+  S.view = "card";
+  await mount();
+  await mount();
+  const count = (n, ev) => (n._ls[ev] || []).length;
+  const sum = (ev) => made.reduce((a, n) => a + count(n, ev), 0);
+  check(count(window, "scroll") === 1, "window scroll 监听只剩 1 个", String(count(window, "scroll")));
+  check(count(window, "resize") === 1, "window resize 监听只剩 1 个", String(count(window, "resize")));
+  check(sum("scroll") === 1, "原文框 scroll 监听只剩 1 个", String(sum("scroll")));
+  check(sum("toggle") === 1, "工具栏 toggle 监听只剩 1 个", String(sum("toggle")));
+  check(sum("resize") === 0, "元素上没有 resize 监听", String(sum("resize")));
 }
-console.log("全部通过");
+
+testPaperScrollTargets().then(() => {
+  if (fails) {
+    console.log("失败 " + fails + " 项");
+    process.exit(1);
+  }
+  console.log("全部通过");
+}, (e) => { console.log(e); process.exit(1); });

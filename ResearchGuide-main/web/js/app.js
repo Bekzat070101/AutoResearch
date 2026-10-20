@@ -372,6 +372,7 @@ function stale(seq) {
 }
 
 async function render() {
+  stopPaperSpy?.(); stopPaperSpy = null;
   const seq = S.renderSeq = (S.renderSeq || 0) + 1;
   if (S.view === "home") { renderHome(); return; }
   if (!S.uid && S.view !== "login") { renderLogin(); return; }
@@ -5294,7 +5295,10 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
   return box;
 }
 
+let stopPaperSpy = null;
+
 async function renderCard() {
+  stopPaperSpy?.(); stopPaperSpy = null;
   const seq = S.renderSeq;
   const kitId = S.cardKit || "";
   const aid = S.cardId;
@@ -5457,6 +5461,11 @@ async function renderCard() {
   tools.append(tutorQuote, cardQuote);
   const quoteFields = (cards.fields || []).filter((f) => f.quote);
   const pane = el("div", "paper-text");
+  const inside = () => pane.scrollHeight > pane.clientHeight + 1;
+  const edge = () => Math.max(0, ...[...document.querySelectorAll(".side-nav,.app-top")].filter((n) => /^(sticky|fixed)$/.test(getComputedStyle(n).position)).map((n) => n.getBoundingClientRect().bottom));
+  const jumpTo = (n) => (inside()
+    ? pane.scrollTo({ top: n.offsetTop - 8, behavior: "smooth" })
+    : window.scrollTo({ top: Math.max(0, window.scrollY + n.getBoundingClientRect().top - edge() - 8), behavior: "smooth" }));
   const jump = el("div", "sec-jump", "<span>跳到</span>");
   const starts = new Map((paper.sections || []).map((sec) => [sec.at, sec]));
   const jumped = new Set(["参考文献", "附录", "致谢"]);
@@ -5522,7 +5531,7 @@ async function renderCard() {
       if (currentJump) currentJump.classList.remove("on");
       b.classList.add("on");
       currentJump = b;
-      pane.scrollTo({ top: node.offsetTop - 8, behavior: "smooth" });
+      jumpTo(node);
     };
     jump.appendChild(b);
     jumpTargets.push({ node, btn: b });
@@ -5546,7 +5555,7 @@ async function renderCard() {
   // 「跳到」滚动联动：读到哪一节，对应按钮就亮哪一节。
   // 判定标准是「最后一个已经滚过视口上沿的标题」；还在最前面的作者区时都不亮。
   const spy = () => {
-    const base = pane.getBoundingClientRect().top;
+    const base = inside() ? pane.getBoundingClientRect().top : edge();
     let hit = null;
     for (const t of jumpTargets) {
       if (t.node.getBoundingClientRect().top - base <= 28) hit = t;
@@ -5559,11 +5568,11 @@ async function renderCard() {
     currentJump = next;
   };
   let spyTick = false;
-  pane.addEventListener("scroll", () => {
+  const schedule = () => {
     if (spyTick) return;
     spyTick = true;
-    window.requestAnimationFrame(() => { spyTick = false; spy(); });
-  }, { passive: true });
+    window.requestAnimationFrame(() => { spyTick = false; if (bench.isConnected && !stale(seq)) spy(); });
+  };
   // 初次判定要等面板挂进页面之后再做：挂载前坐标全是 0，会把最后一节误判成当前节
   window.requestAnimationFrame(() => window.requestAnimationFrame(spy));
 
@@ -5573,6 +5582,9 @@ async function renderCard() {
   toolBar.appendChild(el("summary", "", "原文工具（选句、跳转）"));
   toolBar.append(tools, jump);
   left.append(toolBar, pane);
+  const hooks = [[pane, "scroll"], [window, "scroll"], [window, "resize"], [toolBar, "toggle"]];
+  hooks.forEach(([n, e]) => n.addEventListener(e, schedule, { passive: true }));
+  stopPaperSpy = () => hooks.forEach(([n, e]) => n.removeEventListener(e, schedule));
 
   // 右：卡
   const right = el("section", "bench-card");
@@ -5585,7 +5597,7 @@ async function renderCard() {
     if (!hit && start != null) hit = lineIndex.find((x) => x.start <= start && start < x.end);
     if (hit) {
       hit.node.classList.add("tutor-hit");
-      pane.scrollTo({ top: hit.node.offsetTop - 8, behavior: "smooth" });
+      jumpTo(hit.node);
     }
   };
   const readSelection = () => {
