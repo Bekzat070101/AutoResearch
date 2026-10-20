@@ -48,8 +48,17 @@ def ephemeral() -> bool:
 
 
 def db_blocked() -> str | None:
-    """函数计算上设了 QIYAN_DB、那个目录却没挂盘：不建空库，返回原因；否则 None。"""
-    if os.environ.get("FC_FUNCTION_NAME") and os.environ.get("QIYAN_DB") and not _own_mount(DB_PATH):
+    """函数计算上库不在持久盘就不建库、不开业，返回原因：没设 QIYAN_DB（库会落在代码包里，每次发版清空）、
+    QIYAN_DB 在 /tmp（实例回收清空）、目录没挂盘。本机不管；测试函数或试运行设 QIYAN_ALLOW_EPHEMERAL=1 放行
+    （deploy_fc.py 给 qiyan-test 和 --allow-ephemeral 自动带上，发生产时去掉）。宁可不开业，也不默默跑在会被清掉的库上。"""
+    if not os.environ.get("FC_FUNCTION_NAME") or os.environ.get("QIYAN_ALLOW_EPHEMERAL") == "1":
+        return None
+    if not os.environ.get("QIYAN_DB"):
+        return "no_qiyan_db"
+    path = str(DB_PATH).replace("\\", "/")
+    if path.startswith(("/tmp/", "/private/tmp/", "/var/tmp/")):
+        return "db_in_tmp"
+    if not _own_mount(DB_PATH):
         return "nas_not_mounted"
     return None
 

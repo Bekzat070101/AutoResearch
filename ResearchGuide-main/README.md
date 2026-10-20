@@ -57,7 +57,7 @@ uv run --no-project --with fastapi --with uvicorn --with pydantic python server/
 
 **现网 2026-10-20 的 `/api/health` 仍是 `db.ephemeral: true`、`account_store.enabled: false`：库在临时盘上，每次发版或实例回收都会清掉所有账号和记录。这不是代码 bug，是函数上没配持久盘。** 下面四条是硬规矩，缺一条就会再丢一次人。
 
-1. **生产库必须在 NAS**：函数 `qiyan` 配 VPC + NAS 挂到 `/mnt/nas`，环境变量 `QIYAN_DB=/mnt/nas/qiyan.db`。不设 `QIYAN_DB`（库落在代码包里）或设成 `/tmp/...` 都等于「每个新版本从零开始」。
+1. **生产库必须在 NAS**：函数 `qiyan` 配 VPC + NAS 挂到 `/mnt/nas`，环境变量 `QIYAN_DB=/mnt/nas/qiyan.db`。不设 `QIYAN_DB`（库落在代码包里）或设成 `/tmp/...` 都等于「每个新版本从零开始」。从本版起服务端会守门：函数计算上库不在持久盘就不建库、`/api/*` 回 503 `db_not_ready`，`/api/health` 的 `db.blocked` 写明原因；放行只靠 `QIYAN_ALLOW_EPHEMERAL=1`，只给 `qiyan-test` 用。
 2. **只用 `tools/deploy/deploy_fc.py` 发版**（命令见 [docs/DEPLOY.md](docs/DEPLOY.md)「发版」）。它会保留函数上已有的环境变量，库不在持久盘时会拒绝发生产；不要在控制台「部署代码」，不要给生产加 `--allow-ephemeral`。
 3. **换库路径必须迁移**：`deploy_fc.py --db <新路径> --migrate-from-backup <本地备份文件>`，脚本会备份 → 发版 → 恢复 → 核对用户数；远端有用户而不带这个参数时脚本拒绝。10-18 那次丢人就是换了路径没迁移。
 4. **从 `main` 发版**，发完对照 `/api/health` 的 `checks.build` 和 `git log -1 origin/main`；现网 `4db39dd w102` 不在 `main` 上，所以 `main` 里已合并的登录可靠性修复（#21）现网并没有跑。
@@ -82,6 +82,7 @@ curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" $URL/api/admin/stats     # 用户数�
 | `METRICS_TOKEN` | 可选 | 本机 Prometheus 抓生产 `/metrics`（#23 合并后） |
 | `AGENT_TOKENS`、`QIYAN_SELF_URL`、`LLM_DAILY_AGENT` | 可选 | 让别人的 AI agent 当学生跑统计（#24 合并后；不设 = 关闭） |
 | `WECHAT_*` | 可选 | 公众号登录，见 DEPLOY.md |
+| `QIYAN_ALLOW_EPHEMERAL=1` | 只给 `qiyan-test` / 试运行 | 放行服务端守门；`deploy_fc.py` 给测试函数和 `--allow-ephemeral` 自动带上，正常发生产时自动去掉，生产函数上不该有 |
 
 前端：`python tools/deploy/publish_gh_pages.py`，和接口一起发（旧前端打新接口会 401）。回滚、恢复、事故手册都在 [docs/DEPLOY.md](docs/DEPLOY.md)。
 

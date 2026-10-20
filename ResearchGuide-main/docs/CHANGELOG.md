@@ -6,6 +6,15 @@
 
 ---
 
+
+## [2026-10-20] [FIX] 服务端守门：函数计算上库不在持久盘就不开业；部署规矩进 README 与仓库根 AGENTS.md
+
+- 变更内容：现网 `/api/health` 仍 `db.ephemeral: true`，每次发版清空账号。`store.db_blocked()` 在函数计算上遇到没设 `QIYAN_DB`（`no_qiyan_db`）、`QIYAN_DB` 在 `/tmp`（`db_in_tmp`）、目录没挂盘（`nas_not_mounted`）时都不建库，`/api/*` 回 503 `db_not_ready`（body 带 `reason` 与按原因写的 `detail`），`/api/health` 的 `db.blocked` 写原因；放行开关 `QIYAN_ALLOW_EPHEMERAL=1`，`deploy_fc.py` 给 `qiyan-test` 和 `--allow-ephemeral` 自动带上、正常发生产时去掉（`fc_safety.apply_ephemeral_flag`）。README 新增「部署（发版前必读）」四条硬规矩 + 验收命令 + 环境变量表；仓库根新增 `AGENTS.md` 给 Codex/Grok 这类 agent 先读。
+- 影响文档：README.md、docs/DEPLOY.md、AGENTS.md（仓库根）、docs/CHANGELOG.md
+- 影响模块：server/store.py、server/main.py、tools/deploy/fc_safety.py、server/tests/test_db_mount_gate.py、server/tests/test_deploy_fc.py
+- 决策来源：陈浩文（现网每个新版本清空数据；让 agent 也能照规矩发版）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 登录可靠性：Codex 第九轮三条速修（换库备份 oss 判定、DB_READY 等副本灌回后再开、显式未认领不替人认领）
 
 - 变更内容：Codex 第九轮对 4d5e09a 逐项验收后给 14 条令（R9-01…14，见 docs/tasks/25 文末与 PR #21 评论），先修三条最小的：`deploy_fc.backup_remote` 只把 admin 返回的 `oss == "ok"` 当上传成功（原来 `"local"` 字符串也算真，换库后新实例 restore 404）；`store.init_db` 把 `DB_READY = True` 挪到本地副本灌回之后（挂盘重试窗口里先进来一个注册会把唯一旧副本覆盖成只剩他一人）；`account_store` 灌回保留显式 `claimed_at = NULL`（旧的仅 uid 账号还能走 `/api/auth/legacy` 认领）。其余 11 条（会话吊销墓碑、OSS 迟到结果作废、认证 deadline 覆盖正文、启动资料 15 秒、公告绑定 event_id、enter 触发副本、`_conn` 遵守挂载门、隐式旧默认库路径也核数、在途失败名额、窗口 TTL、OSS 非 404 进 last_error）下一批。

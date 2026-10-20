@@ -344,3 +344,28 @@ def test_changing_db_path_requires_migration(monkeypatch, tmp_path):
         deploy_fc.main(["qiyan", "--db", "/mnt/nas/qiyan.db", "--migrate-from-backup", str(backup)])
     assert "BACKUP_DIR" in str(exc.value)
     assert "backup" in calls and "deploy" not in calls
+
+
+def test_ephemeral_flag_follows_function_name_and_switch():
+    env = {"QIYAN_ALLOW_EPHEMERAL": "1"}  # 函数上残留的放行开关：正常发生产要清掉
+    fc_safety.apply_ephemeral_flag(env, "qiyan", False)
+    assert "QIYAN_ALLOW_EPHEMERAL" not in env
+    fc_safety.apply_ephemeral_flag(env, "qiyan", True)
+    assert env["QIYAN_ALLOW_EPHEMERAL"] == "1"
+    env = {}
+    fc_safety.apply_ephemeral_flag(env, "qiyan-test", False)
+    assert env["QIYAN_ALLOW_EPHEMERAL"] == "1"
+
+
+def test_release_checks_set_or_clear_the_flag_before_deploy():
+    seen = {}
+    env = {**GOOD_ENV, "QIYAN_DB": "/mnt/nas/qiyan.db", "QIYAN_ALLOW_EPHEMERAL": "1"}
+    fc_safety.production_release_checks(env, "qiyan", False, _cfg("/mnt/nas"),
+                                        deploy=lambda: seen.update(env) or "https://x",
+                                        check_health=lambda u: GOOD_HEALTH, record=lambda u: None)
+    assert "QIYAN_ALLOW_EPHEMERAL" not in seen
+    env = {"QIYAN_DB": "/tmp/qiyan-test.db"}
+    fc_safety.production_release_checks(env, "qiyan-test", False, None,
+                                        deploy=lambda: seen.update(env) or "https://t",
+                                        check_health=lambda u: {}, record=lambda u: None)
+    assert seen["QIYAN_ALLOW_EPHEMERAL"] == "1"
