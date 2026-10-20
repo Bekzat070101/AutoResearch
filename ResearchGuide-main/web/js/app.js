@@ -5296,10 +5296,13 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
 }
 
 let stopPaperSpy = null;
+let paperRenderEpoch = 0;
 
 async function renderCard() {
   stopPaperSpy?.(); stopPaperSpy = null;
+  const epoch = ++paperRenderEpoch;
   const seq = S.renderSeq;
+  const isCurrent = () => epoch === paperRenderEpoch && !stale(seq);
   const kitId = S.cardKit || "";
   const aid = S.cardId;
   if (!aid) { setView("read"); return; }
@@ -5316,15 +5319,15 @@ async function renderCard() {
     const jobs = [api("GET", `/api/papers/${encodeURIComponent(aid)}`)];
     if (!isLocal && kitId) jobs.unshift(api("GET", `/api/kits/${kitId}`));
     const got = await Promise.all(jobs);
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
     if (!isLocal && kitId) { kit = got[0]; paper = got[1]; }
     else paper = got[0];
     const inKit = !!(kit.papers || []).some((p) => p.arxiv_id === aid);
     const showCards = !isLocal && inKit;
     if (S.uid && showCards) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
   } catch (e) {
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
     if (await recoverUser(e)) return;
     const why = e.message || "";
     if (/503|排队|忙/.test(why)) {
@@ -5334,7 +5337,7 @@ async function renderCard() {
     }
     return;
   }
-  if (stale(seq)) return;
+  if (!isCurrent()) return;
   loading.remove();
   const showCard = !isLocal && !!(kit.papers || []).some((p) => p.arxiv_id === aid);
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
@@ -5413,7 +5416,7 @@ async function renderCard() {
   if (S.uid) {
     try { tutorMeta = await api("GET", `/api/tutor/${encodeURIComponent(aid)}?uid=${S.uid}&kit=${kitId}`); }
     catch (_) { /* 没有会话就当没开始 */ }
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
   }
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
@@ -5461,7 +5464,7 @@ async function renderCard() {
   tools.append(tutorQuote, cardQuote);
   const quoteFields = (cards.fields || []).filter((f) => f.quote);
   const pane = el("div", "paper-text");
-  const inside = () => pane.scrollHeight > pane.clientHeight + 1;
+  const inside = () => getComputedStyle(left).position === "sticky" || pane.scrollHeight > pane.clientHeight + 1;
   const edge = () => Math.max(0, ...[...document.querySelectorAll(".side-nav,.app-top")].filter((n) => /^(sticky|fixed)$/.test(getComputedStyle(n).position)).map((n) => n.getBoundingClientRect().bottom));
   const jumpTo = (n) => (inside()
     ? pane.scrollTo({ top: n.offsetTop - 8, behavior: "smooth" })
@@ -5571,10 +5574,10 @@ async function renderCard() {
   const schedule = () => {
     if (spyTick) return;
     spyTick = true;
-    window.requestAnimationFrame(() => { spyTick = false; if (bench.isConnected && !stale(seq)) spy(); });
+    window.requestAnimationFrame(() => { spyTick = false; if (bench.isConnected && isCurrent()) spy(); });
   };
   // 初次判定要等面板挂进页面之后再做：挂载前坐标全是 0，会把最后一节误判成当前节
-  window.requestAnimationFrame(() => window.requestAnimationFrame(spy));
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => { if (bench.isConnected && isCurrent()) spy(); }));
 
   // 「选中原文」和「跳到章节」的按钮收进同一个工具栏，放不下就换行，不再横向滚动
   const toolBar = el("details", "paper-tools");

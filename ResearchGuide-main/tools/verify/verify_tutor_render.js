@@ -154,7 +154,7 @@ const q = byClass(box2, "tutor-q")[0];
 check(q && q.textContent === "<b>leak</b>", "题面走 textContent");
 check(q && q.innerHTML === "", "题面不进 innerHTML");
 
-async function testPaperScrollTargets() {
+function paperHarness(cfg = {}) {
   const made = [];
   const raf = [];
   const flush = () => { for (let k = 0; raf.length && k < 100; k++) raf.shift()(); };
@@ -163,17 +163,21 @@ async function testPaperScrollTargets() {
     addEventListener(n, fn) { (this._ls[n] = this._ls[n] || []).push(fn); },
     removeEventListener(n, fn) { const a = this._ls[n] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
   };
+  const scrolls = { win: [], pane: [] };
+  const nav = { sticky: false, leftSticky: false };
   const window = {
     scrollY: 0, innerWidth: 390, _ls: {}, ...listen,
-    scrollTo(o) { this.scrollY = Math.max(0, o.top); },
+    scrollTo(o) { scrolls.win.push(o.top); this.scrollY = Math.max(0, o.top); },
     requestAnimationFrame(cb) { raf.push(cb); return raf.length; },
     matchMedia(q) { const m = /min-width:\s*(\d+)px/.exec(q); return { matches: m ? this.innerWidth >= Number(m[1]) : false }; },
     getSelection() { return ""; },
   };
   const isPane = (n) => (n.className || "").split(/\s+/).includes("paper-text");
   let appTop = null;
+  let sideNav = null;
   const rectOf = (n) => {
     if (n === appTop) return { top: 0, bottom: 64 };
+    if (n === sideNav) return { top: 0, bottom: 800 };
     if (isPane(n)) return { top: 240 - window.scrollY, bottom: 240 - window.scrollY + n.clientHeight };
     let p = n.parent;
     while (p && !isPane(p)) p = p.parent;
@@ -214,7 +218,7 @@ async function testPaperScrollTargets() {
         return n === $app;
       },
       getBoundingClientRect() { return rectOf(this); },
-      scrollTo(o) { this.scrollTop = Math.max(0, Math.min(o.top, this.scrollHeight - this.clientHeight)); },
+      scrollTo(o) { if (isPane(this)) scrolls.pane.push(o.top); this.scrollTop = Math.max(0, Math.min(o.top, this.scrollHeight - this.clientHeight)); },
       scrollIntoView() {},
     };
     made.push(e);
@@ -228,35 +232,37 @@ async function testPaperScrollTargets() {
   };
   $app = mk("main");
   appTop = el("header", "app-top");
+  sideNav = el("nav", "side-nav");
   const document = {
-    querySelectorAll(q) { return q.split(",").includes(".app-top") ? [appTop] : []; },
+    querySelectorAll(q) { const qs = q.split(","); return [...(qs.includes(".side-nav") ? [sideNav] : []), ...(qs.includes(".app-top") ? [appTop] : [])]; },
     createTextNode(t) { const n = mk("#text"); n._text = String(t); return n; },
   };
-  const getComputedStyle = (n) => ({ position: n === appTop ? "sticky" : "static" });
+  const getComputedStyle = (n) => ({ position: (n === appTop || (n === sideNav && nav.sticky) || (nav.leftSticky && sel(n, ".bench-paper"))) ? "sticky" : "static" });
   const store = {};
   const localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: (k) => { delete store[k]; } };
   const setView = () => {};
   const S = { uid: "u1", view: "card", cardId: "2009.03300", cardKit: "", cardFrom: "", renderSeq: 1 };
-  const lines = ["Alice Bob", "Introduction", "intro body", "Method", "method body", "Experiments", "exp body", "Conclusion", "end body"];
-  const labels = { Introduction: "引言", Method: "方法", Experiments: "实验", Conclusion: "结论" };
-  const layout = { Introduction: 100, Method: 480, Experiments: 800, Conclusion: 1300 };
+  const lines = cfg.lines || ["Alice Bob", "Introduction", "intro body", "Method", "method body", "Experiments", "exp body", "Conclusion", "end body"];
+  const labels = cfg.labels || { Introduction: "引言", Method: "方法", Experiments: "实验", Conclusion: "结论" };
   const sections = [];
   let at = 0;
   lines.forEach((ln) => { if (labels[ln]) sections.push({ at, label: labels[ln] }); at += ln.length + 1; });
   const methodAt = sections.find((x) => x.label === "方法").at;
-  const paper = { title: "T", title_zh: "", text: lines.join("\n"), sections, tables: [], source: "html", url: "https://arxiv.org/abs/2009.03300", keywords: [] };
+  const paper = { title: "T", title_zh: "", text: lines.join("\n"), sections, tables: [], source: cfg.source || "html", url: "https://arxiv.org/abs/2009.03300", keywords: [] };
   const sess = {
     status: "active", rev: 1, voice: "rules", notice: "", cur: 0, total: 1,
     slots: [{ qid: "q1", station: "method", type: "own", question: "q", hint: "", attempts: 0, status: "open", answer: "", last: "", note: "" }],
     stations: [{ key: "method", label: "方法", heading: "Method", start: methodAt }],
   };
+  const tutorReply = { session: sess, can_grade: true, in_kit: true };
   const api = (method, url) => {
     if (url.startsWith("/api/papers/")) return Promise.resolve(paper);
-    if (url.startsWith("/api/tutor/")) return Promise.resolve({ session: sess, can_grade: true, in_kit: true });
+    if (url.startsWith("/api/tutor/")) return cfg.tutor ? cfg.tutor() : Promise.resolve(tutorReply);
     return Promise.resolve({});
   };
   const renderToday = async () => { $app.innerHTML = ""; };
   let stopPaperSpy = null;
+  let paperRenderEpoch = 0;
   eval(extract("stale"));
   eval(extract("tutorPanel"));
   eval(extract("render"));
@@ -271,6 +277,12 @@ async function testPaperScrollTargets() {
     const stationBtn = walk($app).find((c) => c.tagName === "BUTTON" && c.textContent === "跳到本节");
     return { pane, toolBar, chips, node, stationBtn };
   };
+  return { made, raf, flush, fire, window, sel, $app, S, render, renderCard, live, scrolls, nav, tutorReply, getStopPaperSpy: () => stopPaperSpy };
+}
+
+async function testPaperScrollTargets() {
+  const { made, flush, fire, window, S, render, renderCard, live } = paperHarness();
+  const layout = { Introduction: 100, Method: 480, Experiments: 800, Conclusion: 1300 };
   const mount = async () => {
     await renderCard();
     const v = live();
@@ -335,7 +347,99 @@ async function testPaperScrollTargets() {
   check(sum("resize") === 0, "元素上没有 resize 监听", String(sum("resize")));
 }
 
-testPaperScrollTargets().then(() => {
+async function testPaperSpyRetryRace() {
+  const tick = () => new Promise((r) => setImmediate(r));
+  const pending = [];
+  const h = paperHarness({ source: "abstract", tutor: () => new Promise((r) => pending.push(r)) });
+  const { raf, window, $app, S, render, renderCard, live } = h;
+  const count = (n, ev) => ((n && n._ls[ev]) || []).length;
+  for (const order of ["旧先", "新先"]) {
+    S.view = "card";
+    pending.length = 0;
+    raf.length = 0;
+    const first = renderCard();
+    await tick();
+    const retry = walk($app).find((c) => c.tagName === "BUTTON" && c.textContent === "重新取正文");
+    check(!!retry && retry.isConnected && pending.length === 1, `${order} 第一次带读未返回时「重新取正文」在页上`);
+    const second = retry.onclick();
+    await tick();
+    check(pending.length === 2, `${order} 重取发出第二次带读请求`, String(pending.length));
+    for (const i of (order === "旧先" ? [0, 1] : [1, 0])) { pending[i](h.tutorReply); await tick(); }
+    await Promise.all([first, second]);
+    const v = live();
+    const benches = walk($app).filter((c) => h.sel(c, ".bench"));
+    check(benches.length === 1, `${order} 页上只有 1 个 bench`, String(benches.length));
+    check(count(window, "scroll") === 1, `${order} window scroll 监听 1 个`, String(count(window, "scroll")));
+    check(count(window, "resize") === 1, `${order} window resize 监听 1 个`, String(count(window, "resize")));
+    check(count(v.pane, "scroll") === 1, `${order} 原文框 scroll 监听 1 个`, String(count(v.pane, "scroll")));
+    check(count(v.toolBar, "toggle") === 1, `${order} 工具栏 toggle 监听 1 个`, String(count(v.toolBar, "toggle")));
+    S.view = "today";
+    await render();
+    check(count(window, "scroll") === 0, `${order} 离页后 window scroll 监听 0 个`, String(count(window, "scroll")));
+    check(count(window, "resize") === 0, `${order} 离页后 window resize 监听 0 个`, String(count(window, "resize")));
+    check(count(v.pane, "scroll") === 0, `${order} 离页后原文框 scroll 监听 0 个`, String(count(v.pane, "scroll")));
+    check(count(v.toolBar, "toggle") === 0, `${order} 离页后工具栏 toggle 监听 0 个`, String(count(v.toolBar, "toggle")));
+    check(h.getStopPaperSpy() === null, `${order} 离页后 stopPaperSpy 为 null`);
+  }
+
+  S.view = "card";
+  pending.length = 0;
+  raf.length = 0;
+  const p = renderCard();
+  await tick();
+  pending.forEach((r) => r(h.tutorReply));
+  await p;
+  const v = live();
+  let spyRuns = 0;
+  v.pane.children.filter((c) => c.tagName === "H4").forEach((n) => {
+    const g = n.getBoundingClientRect;
+    n.getBoundingClientRect = () => { spyRuns += 1; return g.call(n); };
+  });
+  check(raf.length === 1, "初次判定排了第一帧", String(raf.length));
+  raf.shift()();
+  S.view = "today";
+  await render();
+  let err = null;
+  try { if (raf.length) raf.shift()(); } catch (e) { err = e; }
+  check(spyRuns === 0, "离页后第二帧不再跑旧 spy", String(spyRuns));
+  check(err === null, "第二帧不抛错", String(err));
+}
+
+async function testShortDesktopPaperSpy() {
+  const lines = ["Abstract", "abs body", "Method", "method body", "Conclusion", "end body"];
+  const labels = { Abstract: "摘要", Method: "方法", Conclusion: "结论" };
+  const layout = { Abstract: 0, Method: 84, Conclusion: 168 };
+  const { window, S, renderCard, live, flush, scrolls, nav } = paperHarness({ lines, labels });
+  nav.leftSticky = true;
+  for (const w of [921, 1440]) {
+    for (const expanded of [true, false]) {
+      const tag = `${w}px ${expanded ? "侧栏展开" : "侧栏收起"}`;
+      window.innerWidth = w;
+      window.scrollY = 0;
+      nav.sticky = expanded;
+      S.view = "card";
+      await renderCard();
+      const v = live();
+      v.pane.clientHeight = 252;
+      v.pane.scrollHeight = 252;
+      Object.keys(layout).forEach((t) => { v.node(t).offsetTop = layout[t]; });
+      scrolls.win.length = 0;
+      scrolls.pane.length = 0;
+      flush();
+      const tops = Object.keys(layout).map((t) => v.node(t).getBoundingClientRect().top);
+      check(tops.join(",") === "240,324,408", `${tag} 章节坐标`, tops.join(","));
+      const lit = v.chips.filter((c) => c.classList.contains("on"));
+      check(lit.length === 1 && lit[0].textContent === "摘要", `${tag} 初次只亮「摘要」`, lit.map((c) => c.textContent).join(","));
+      check(!!v.stationBtn, `${tag} 带读有「跳到本节」`);
+      v.chips.find((c) => c.textContent === "方法").onclick();
+      if (v.stationBtn) v.stationBtn.onclick();
+      check(scrolls.pane.length === 2 && scrolls.pane.every((t) => t === 76), `${tag} 两处跳转都按原文框滚到 76`, JSON.stringify(scrolls.pane));
+      check(scrolls.win.length === 0, `${tag} 从不滚整页`, JSON.stringify(scrolls.win));
+    }
+  }
+}
+
+testPaperScrollTargets().then(testPaperSpyRetryRace).then(testShortDesktopPaperSpy).then(() => {
   if (fails) {
     console.log("失败 " + fails + " 项");
     process.exit(1);
