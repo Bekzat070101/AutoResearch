@@ -30,3 +30,4 @@
 | `tutorial-distill/` | 离线：检索公开大纲/教材，蒸馏成 `knowledge/tutorials/{id}.json` | 主干 + 有据才分叉；每个节点带学什么/做什么/原链接；不够 2 个独立来源就标 insufficient，不编 |
 | `paper-tutor/` | `server/tutor.py` | 按节出考察题：模型写题面、提示和判卷标准，不判对错、不写答案 |
 | `paper-quiz-grade/` | `server/tutor.py` | 硬判通过后按 criteria 判学生作答；形状不对或超时记 pending |
+| `paper-lab/` | 不进本站 prompt；学生自己的 agent（Codex / Claude Code / DSH）加载 | 把一篇论文做成一个 lab：`scripts/fetch_paper.py` 取带句号的原文，按 `templates/` 生成该论文的 README.md（流程、开场讲解稿）与 AGENTS.md（题位、anchor、判卷标准），再由学生的 agent 照着带读；`examples/` 是生成样例 |
