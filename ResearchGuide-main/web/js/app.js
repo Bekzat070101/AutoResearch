@@ -375,6 +375,7 @@ function stale(seq) {
 }
 
 async function render() {
+  stopPaperSpy?.(); stopPaperSpy = null;
   const seq = S.renderSeq = (S.renderSeq || 0) + 1;
   if (S.view === "home") { renderHome(); return; }
   if (!S.uid && S.view !== "login") { renderLogin(); return; }
@@ -2182,11 +2183,13 @@ function applyNavCollapsed() {
 function paintChrome() {
   const nick = document.getElementById("userNickname");
   if (nick) nick.textContent = S.nickname || "";
+  const dot = document.querySelector("#userMenuBtn .dot");
+  if (dot) dot.textContent = (S.nickname || "")[0] || "我";
   applyNavCollapsed();
   const chip = document.getElementById("dirChip");
   if (!chip) return;
   const name = portraitChipLabel();
-  chip.textContent = name || "还没有方向";
+  chip.textContent = name || "选个方向 ▾";
   chip.classList.toggle("empty", !name);
 }
 
@@ -4627,7 +4630,7 @@ async function renderToday() {
   const wrap = el("div", "stagger");
   wrap.appendChild(workspaceHead("今日", "打开就看这一件。"));
   const status = el("div", "status-chips");
-  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没有方向"));
+  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没选方向"));
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
   if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
   wrap.appendChild(status);
@@ -4760,7 +4763,7 @@ async function renderRead() {
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
   const q = el("input");
-  q.placeholder = "英文关键词，例如 evaluation benchmark";
+  q.placeholder = "搜论文（arXiv 只认英文关键词）";
   q.name = "q";
   const goSearch = el("button", "btn small", "搜索");
   goSearch.type = "submit";
@@ -4818,7 +4821,7 @@ async function renderRead() {
   const leftPane = el("section", "read-pane");
   const leftHead = el("div", "read-pane-head");
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
-  leftHead.appendChild(el("small", "", `过线 ${passed} 张`));
+  if (passed > 0) leftHead.appendChild(el("small", "", `已完成 ${passed} 张阅读卡`));
   const leftBody = el("div", "read-pane-body");
   const recPapers = catalog.length ? catalog.map((p, i) => ({
     arxiv_id: p.paper_id || p.id,
@@ -4853,15 +4856,16 @@ async function renderRead() {
       const li = el("li", "kit-paper");
       const main = el("div", "kp-main");
       const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
-      const title = el("button", "linkish", esc(p.title));
+      const title = el("button", "linkish");
+      title.textContent = p.title_zh || p.title;
       title.type = "button";
       title.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       main.appendChild(el("span", "kp-n", String(p.order || i + 1)));
       main.appendChild(title);
       if (p.title_zh) {
-        const zh = el("p", "kp-zh");
-        zh.textContent = p.title_zh;
-        main.appendChild(zh);
+        const en = el("p", "kp-en");
+        en.textContent = p.title;
+        main.appendChild(en);
       }
       if ((p.keywords || []).length) {
         const kws = el("p", "kp-kw");
@@ -4878,11 +4882,11 @@ async function renderRead() {
       }
       if (c) {
         main.appendChild(el("span", c.status === "pass" ? "kp-state pass" : "kp-state revise",
-          c.status === "pass" ? `✓ 过线 v${c.version}` : `待改 v${c.version}`));
+          c.status === "pass" ? `✓ 已完成 v${c.version}` : `待改 v${c.version}`));
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
       li.appendChild(main);
-      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "写阅读卡" : "打开"));
+      const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "带读答题" : "打开"));
       const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
       go.type = "button";
       go.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
@@ -5311,8 +5315,14 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
   return box;
 }
 
+let stopPaperSpy = null;
+let paperRenderEpoch = 0;
+
 async function renderCard() {
+  stopPaperSpy?.(); stopPaperSpy = null;
+  const epoch = ++paperRenderEpoch;
   const seq = S.renderSeq;
+  const isCurrent = () => epoch === paperRenderEpoch && !stale(seq);
   const kitId = S.cardKit || "";
   const aid = S.cardId;
   if (!aid) { setView("read"); return; }
@@ -5329,15 +5339,15 @@ async function renderCard() {
     const jobs = [api("GET", `/api/papers/${encodeURIComponent(aid)}`)];
     if (!isLocal && kitId) jobs.unshift(api("GET", `/api/kits/${kitId}`));
     const got = await Promise.all(jobs);
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
     if (!isLocal && kitId) { kit = got[0]; paper = got[1]; }
     else paper = got[0];
     const inKit = !!(kit.papers || []).some((p) => p.arxiv_id === aid);
     const showCards = !isLocal && inKit;
     if (S.uid && showCards) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
   } catch (e) {
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
     if (await recoverUser(e)) return;
     const why = e.message || "";
     if (/503|排队|忙/.test(why)) {
@@ -5347,7 +5357,7 @@ async function renderCard() {
     }
     return;
   }
-  if (stale(seq)) return;
+  if (!isCurrent()) return;
   loading.remove();
   const showCard = !isLocal && !!(kit.papers || []).some((p) => p.arxiv_id === aid);
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
@@ -5362,9 +5372,26 @@ async function renderCard() {
 
   const head = el("div", "card-head");
   head.appendChild(back);
-  head.appendChild(el("h2", "", esc(paper.title)));
   const kitP = (kit.papers || []).find((p) => p.arxiv_id === aid);
   const titleZh = paper.title_zh || (kitP && kitP.title_zh) || "";
+  const zhNote = /（[^（）]*）\s*$/.exec(titleZh);
+  const zhTitle = zhNote ? titleZh.slice(0, zhNote.index).trim() : titleZh;
+  if (zhTitle) {
+    const h2 = el("h2");
+    h2.textContent = zhTitle;
+    head.appendChild(h2);
+    const en = el("p", "paper-en");
+    en.textContent = paper.title;
+    head.appendChild(en);
+  } else {
+    head.appendChild(el("h2", "", esc(paper.title)));
+  }
+  const ledeText = (kitP && kitP.why) || paper.why || "";
+  if (ledeText) {
+    const lede = el("p", "paper-lede");
+    lede.textContent = ledeText;
+    head.appendChild(lede);
+  }
   const kws = (paper.keywords && paper.keywords.length) ? paper.keywords : ((kitP && kitP.keywords) || []);
   let absNote = "正文已取到，引文可逐字核对";
   if (paper.source === "pdf") absNote = "你导入的 PDF · 只有你能看到";
@@ -5374,6 +5401,11 @@ async function renderCard() {
     status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a>`));
   }
   status.appendChild(el("span", "", absNote));
+  if (zhNote) {
+    const noteSpan = el("span");
+    noteSpan.textContent = zhNote[0].replace(/^（|）$/g, "");
+    status.appendChild(noteSpan);
+  }
   if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
   if (paper.source !== "html" && paper.source !== "pdf") {
     const retry = el("button", "linkish", "重新取正文");
@@ -5390,11 +5422,6 @@ async function renderCard() {
   }
   head.appendChild(status);
   $app.appendChild(head);
-  if (titleZh) {
-    const zh = el("p", "paper-zh");
-    zh.textContent = titleZh;
-    $app.appendChild(zh);
-  }
   if (kws.length) {
     const row = el("p", "paper-kw");
     kws.slice(0, 5).forEach((k) => {
@@ -5409,7 +5436,7 @@ async function renderCard() {
   if (S.uid) {
     try { tutorMeta = await api("GET", `/api/tutor/${encodeURIComponent(aid)}?uid=${S.uid}&kit=${kitId}`); }
     catch (_) { /* 没有会话就当没开始 */ }
-    if (stale(seq)) return;
+    if (!isCurrent()) return;
   }
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
@@ -5423,11 +5450,11 @@ async function renderCard() {
     passedCount, canGrade, inKit: showCard && inKit,
   });
 
-  const tabs = el("nav", "ws-tabs bench-modes");
-  const tabTutor = el("button", "ws-tab", "AI 带读");
+  const tabs = el("div", "bench-cta");
+  const tabTutor = el("button", "btn", "带读答题");
   tabTutor.type = "button";
   tabTutor.dataset.mode = "tutor";
-  const tabCard = el("button", "ws-tab", "写阅读卡");
+  const tabCard = el("button", "linkish", "或：写阅读卡");
   tabCard.type = "button";
   tabCard.dataset.mode = "card";
   if (!canGrade) {
@@ -5457,6 +5484,11 @@ async function renderCard() {
   tools.append(tutorQuote, cardQuote);
   const quoteFields = (cards.fields || []).filter((f) => f.quote);
   const pane = el("div", "paper-text");
+  const inside = () => getComputedStyle(left).position === "sticky" || pane.scrollHeight > pane.clientHeight + 1;
+  const edge = () => Math.max(0, ...[...document.querySelectorAll(".side-nav,.app-top")].filter((n) => /^(sticky|fixed)$/.test(getComputedStyle(n).position)).map((n) => n.getBoundingClientRect().bottom));
+  const jumpTo = (n) => (inside()
+    ? pane.scrollTo({ top: n.offsetTop - 8, behavior: "smooth" })
+    : window.scrollTo({ top: Math.max(0, window.scrollY + n.getBoundingClientRect().top - edge() - 8), behavior: "smooth" }));
   const jump = el("div", "sec-jump", "<span>跳到</span>");
   const starts = new Map((paper.sections || []).map((sec) => [sec.at, sec]));
   const jumped = new Set(["参考文献", "附录", "致谢"]);
@@ -5522,7 +5554,7 @@ async function renderCard() {
       if (currentJump) currentJump.classList.remove("on");
       b.classList.add("on");
       currentJump = b;
-      pane.scrollTo({ top: node.offsetTop - 8, behavior: "smooth" });
+      jumpTo(node);
     };
     jump.appendChild(b);
     jumpTargets.push({ node, btn: b });
@@ -5546,7 +5578,7 @@ async function renderCard() {
   // 「跳到」滚动联动：读到哪一节，对应按钮就亮哪一节。
   // 判定标准是「最后一个已经滚过视口上沿的标题」；还在最前面的作者区时都不亮。
   const spy = () => {
-    const base = pane.getBoundingClientRect().top;
+    const base = inside() ? pane.getBoundingClientRect().top : edge();
     let hit = null;
     for (const t of jumpTargets) {
       if (t.node.getBoundingClientRect().top - base <= 28) hit = t;
@@ -5559,18 +5591,23 @@ async function renderCard() {
     currentJump = next;
   };
   let spyTick = false;
-  pane.addEventListener("scroll", () => {
+  const schedule = () => {
     if (spyTick) return;
     spyTick = true;
-    window.requestAnimationFrame(() => { spyTick = false; spy(); });
-  }, { passive: true });
+    window.requestAnimationFrame(() => { spyTick = false; if (bench.isConnected && isCurrent()) spy(); });
+  };
   // 初次判定要等面板挂进页面之后再做：挂载前坐标全是 0，会把最后一节误判成当前节
-  window.requestAnimationFrame(() => window.requestAnimationFrame(spy));
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => { if (bench.isConnected && isCurrent()) spy(); }));
 
   // 「选中原文」和「跳到章节」的按钮收进同一个工具栏，放不下就换行，不再横向滚动
-  const toolBar = el("div", "paper-tools");
+  const toolBar = el("details", "paper-tools");
+  toolBar.open = !!(window.matchMedia && window.matchMedia("(min-width: 921px)").matches);
+  toolBar.appendChild(el("summary", "", "原文工具（选句、跳转）"));
   toolBar.append(tools, jump);
   left.append(toolBar, pane);
+  const hooks = [[pane, "scroll"], [window, "scroll"], [window, "resize"], [toolBar, "toggle"]];
+  hooks.forEach(([n, e]) => n.addEventListener(e, schedule, { passive: true }));
+  stopPaperSpy = () => hooks.forEach(([n, e]) => n.removeEventListener(e, schedule));
 
   // 右：卡
   const right = el("section", "bench-card");
@@ -5583,7 +5620,7 @@ async function renderCard() {
     if (!hit && start != null) hit = lineIndex.find((x) => x.start <= start && start < x.end);
     if (hit) {
       hit.node.classList.add("tutor-hit");
-      pane.scrollTo({ top: hit.node.offsetTop - 8, behavior: "smooth" });
+      jumpTo(hit.node);
     }
   };
   const readSelection = () => {
