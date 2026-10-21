@@ -228,11 +228,21 @@ async def record_metrics(request: Request, call_next):
             route = request.scope.get("route")
             path = getattr(route, "path", None) or "unknown"
             _metrics.observe_request(path, 500, time.time() - t0)
+            print(json.dumps({"event": "request", "path": path, "method": request.method, "code": 500,
+                              "ms": int((time.time() - t0) * 1000),
+                              "uid": getattr(request.state, "uid", "") or ""},
+                             ensure_ascii=False), flush=True)
         raise
     if watch:
         code = getattr(resp, "status_code", None)
         route = request.scope.get("route")
         path = getattr(route, "path", None) or "unknown"
+        # 每请求一行 JSON：SLS 里能看到「谁在什么时候调了哪个接口、成没成」。SSE 流按首个状态码记一次。
+        print(json.dumps({"event": "request", "path": path, "method": request.method,
+                          "code": 0 if code is None else int(code),
+                          "ms": int((time.time() - t0) * 1000),
+                          "uid": getattr(request.state, "uid", "") or ""},
+                         ensure_ascii=False), flush=True)
         media = (getattr(resp, "media_type", None) or resp.headers.get("content-type") or "")
         iterator = getattr(resp, "body_iterator", None)
         if iterator is not None and "text/event-stream" in media:

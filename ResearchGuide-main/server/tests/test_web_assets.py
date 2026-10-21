@@ -330,11 +330,15 @@ def test_new_class_names_all_have_rules():
 
 
 def test_sidebar_is_five_rooms_and_user_owns_portrait():
-    """侧栏是今日 / 对话 / 研读 / 定位 / 项目。作业不在栏目里。"""
+    """学生侧栏是今日 / 对话 / 研读 / 定位 / 项目五个房间；作业不在栏目里。
+    另外还有一个默认隐藏的「监测」（w104 起）：只对管理员显示，不占学生的栏目。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")
     nav = re.search(r'<nav class="side-links".*?</nav>', html, re.S).group(0)
     views = re.findall(r'data-view="([^"]+)"', nav)
-    assert views == ["today", "dialogue", "read", "position", "projects"], views
+    assert views[:5] == ["today", "dialogue", "read", "position", "projects"], views
+    assert views[5:] == ["monitor"], views
+    mbtn = re.search(r'<button[^>]*data-view="monitor"[^>]*>', nav)
+    assert mbtn and "hidden" in mbtn.group(0)  # 管理员入口默认隐藏
     assert "作业" not in nav
     assert "待开发" in nav
     assert 'id="dirChip"' in html
@@ -346,6 +350,14 @@ def test_sidebar_is_five_rooms_and_user_owns_portrait():
     assert "先聊五个问题" not in js
     assert "问答画像" not in js
     assert "此刻最值得做的一件事" not in (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+
+
+def test_monitor_panel_does_not_feed_elements_to_el():
+    """el() 的第三参数是 innerHTML 字符串：把元素传进去，页面上会渲染出
+    "[object HTMLDivElement]"（监测面板第一版真出过）。元素必须用 append/appendChild 塞。"""
+    code = _strip_js_comments((WEB / "js" / "app.js").read_text(encoding="utf-8"))
+    assert 'el("div", "monitor-grid",' not in code, "卡片元素不能当 el 的第三参数（innerHTML）传"
+    assert '", el(' not in code, "不要把 el(...) 调用当 el(...) 的参数，会被 innerHTML 变成 [object HTMLDivElement]"
 
 
 def test_read_does_not_blame_kit_when_user_is_gone():

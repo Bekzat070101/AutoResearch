@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
 import os
@@ -268,6 +269,7 @@ def account(uid: str) -> dict[str, Any]:
         "username": username,
         "wechat": bool(u.get("wechat_openid")),
         "guest": not bool(u.get("wechat_openid") or username),
+        "is_admin": bool(u.get("is_admin")),
         "consent_ok": u.get("consent_version") == PRIVACY_VERSION,
         "privacy_version": PRIVACY_VERSION,
         "llm_left": budget.left(uid) if u else 0,  # 今天还能让服务器的模型回答几次；用自己密钥的人不受这个数限制
@@ -305,6 +307,7 @@ class RegisterReq(BaseModel):
 class SigninReq(BaseModel):
     username: str
     password: str
+    invite_code: str = ""  # 选填：管理员登录时填密钥，普通用户留空
 
 
 class UpgradeReq(BaseModel):
@@ -360,16 +363,24 @@ def _username_ok(username: str) -> str:
     return store.normalize_username(username)
 
 
+def _admin_key_ok(code: str) -> bool:
+    """管理员密钥比对：ADMIN_TOKEN 配了（≥32 字节）且与输入完全一致才算对。
+    运行时读环境变量，不要模块级缓存：改了配置不用重启也能生效，测试 monkeypatch 也才能起效。"""
+    admin_token = os.environ.get("ADMIN_TOKEN") or ""
+    return len(admin_token) >= 32 and hmac.compare_digest((code or "").strip(), admin_token)
+
+
 @router.post("/api/auth/register")
 def register(req: RegisterReq, request: Request):
     if not req.consent:
         raise HTTPException(400, "请先看过并同意隐私说明")
     username = _username_ok(req.username)
     password = _password_ok(req.password)
-    if store.user_by_username(username):
-        raise HTTPException(409, "这个用户名已经有人用了")
     if not _ip_allows(request, "guest"):
         raise HTTPException(429, "开的号太多了，过一会儿再试")
+    if store.user_by_username(username):
+        raise HTTPException(409, "这个用户名已经有人用了")
+    # 普通用户注册不需要邀请码；管理员身份在登录时用密钥解锁（见 signin）
     row = store.register_user(username, password, req.nickname)
     store.record_consent(row["uid"], PRIVACY_VERSION)
     return {**account(row["uid"]), "token": store.create_session(row["uid"], SESSION_TTL)}
@@ -389,6 +400,13 @@ def signin(req: SigninReq, request: Request):
     if not user or not store.password_ok(req.password, user.get("password_salt"), user.get("password_hash")):
         _note(key, SIGNIN_USER_WINDOW)
         raise HTTPException(401, "用户名或密码不对")
+    # 邀请码选填：填了必须是管理员密钥，对则这个账号升级为管理员（之后不用再填）
+    got = (req.invite_code or "").strip()
+    if got and not _admin_key_ok(got):
+        _note(key, SIGNIN_USER_WINDOW)  # 猜管理员密钥也占同一个桶，防无限试
+        raise HTTPException(403, "邀请码不对")
+    if got:
+        store.set_user_admin(user["id"])
     _clear(key)
     return {**account(user["id"]), "token": store.create_session(user["id"], SESSION_TTL)}
 
