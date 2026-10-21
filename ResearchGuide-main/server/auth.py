@@ -68,6 +68,7 @@ PUBLIC = frozenset({
     "/api/explore/courses", "/api/explore/teachers", "/api/explore/majors", "/api/explore/major",
     "/api/explore/minor", "/api/explore/course", "/api/curriculum/match", "/api/curriculum/stats",
     "/mcp", "/api/projects/sources", "/api/paths", "/api/kits", "/api/kits/{kit_id}",
+    "/mcp/student", "/api/agent/personas", "/api/agent/register",  # 人工学生：用 AGENT_TOKENS 的 operator 令牌，不是会话
     "/api/brief",
     "/api/llm/connect",  # 自己核对管理员口令
     "/api/admin/backup", "/api/admin/restore", "/api/admin/stats",

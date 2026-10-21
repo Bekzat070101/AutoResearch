@@ -16,6 +16,7 @@ _PATH_CAP = 200
 _SCRAPE_ERRORS = 0
 _STREAM_ERRORS = 0
 _INFLIGHT = 0
+_REQ_AGENT: dict[tuple[str, str], int] = {}  # 人工学生（带 X-Qiyan-Agent 头）的请求另计，面板上能和真人分开
 # 按路由模板的延迟直方图（21-D34）：桶界固定，Grafana 用 histogram_quantile 算 p95；旧的全站 p95 保留为 legacy
 BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 45, 60, 120, 300)
 _HIST: dict[str, list[int]] = {}      # path -> 每个桶的非累计计数（渲染时再累计）
@@ -34,7 +35,7 @@ def observe_start() -> None:
         _INFLIGHT += 1
 
 
-def observe_request(path: str, status: int, seconds: float) -> None:
+def observe_request(path: str, status: int, seconds: float, synthetic: bool = False) -> None:
     global _INFLIGHT
     code = str(int(status) if status is not None else 0)
     raw = (path or "").split("?")[0][:80].replace("\\", "").replace('"', "") or "/"
@@ -46,6 +47,8 @@ def observe_request(path: str, status: int, seconds: float) -> None:
                 _PATHS.add(raw)
         key = (raw, code)
         _REQ[key] = _REQ.get(key, 0) + 1
+        if synthetic:
+            _REQ_AGENT[key] = _REQ_AGENT.get(key, 0) + 1
         _LAT.append(seconds)
         if len(_LAT) > 2000:
             del _LAT[:1000]
@@ -121,7 +124,7 @@ def render() -> str:
     import store
     cfg = llm.config()
     users = sessions = expired = papers = paper_bytes = dir_rows = dir_nodes = 0
-    users_reg = users_guest = 0
+    users_reg = users_guest = users_agent = agent_runs = agent_stuck = agent_done = 0
     paper_by_src: dict[str, int] = {}
     paper_pinned = 0
     scrape_ok = True
@@ -132,6 +135,13 @@ def render() -> str:
                 "SELECT COUNT(*) FROM users WHERE username IS NOT NULL AND username != ''"
             ).fetchone()[0]
             users_guest = max(0, users - users_reg)
+            try:
+                users_agent = c.execute("SELECT COUNT(*) FROM agent_accounts").fetchone()[0]
+                agent_runs = c.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0]
+                agent_stuck = c.execute("SELECT COALESCE(SUM(stuck),0) FROM agent_runs").fetchone()[0]
+                agent_done = c.execute("SELECT COUNT(*) FROM agent_events WHERE kind LIKE 'done:%'").fetchone()[0]
+            except Exception:
+                users_agent = agent_runs = agent_stuck = agent_done = 0
             sessions = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             expired = c.execute("SELECT COUNT(*) FROM sessions WHERE expires_at < ?", (time.time(),)).fetchone()[0]
             try:
@@ -166,6 +176,10 @@ def render() -> str:
             _line("qiyan_users", users, help_="用户总数"),
             _line("qiyan_users", users_reg, {"kind": "registered"}, help_="注册用户数"),
             _line("qiyan_users", users_guest, {"kind": "guest"}, help_="访客用户数"),
+            _line("qiyan_users", users_agent, {"kind": "synthetic"}, help_="人工学生（AI agent）账号数，已含在总数里"),
+            _line("qiyan_agent_runs_total", agent_runs, help_="人工学生上线次数", typ="counter"),
+            _line("qiyan_agent_stuck_total", agent_stuck, help_="人工学生说「不知道怎么办」的次数", typ="counter"),
+            _line("qiyan_agent_plan_done_total", agent_done, help_="人工学生完成的目标项次数", typ="counter"),
             _line("qiyan_sessions", sessions, help_="会话行数"),
             _line("qiyan_sessions_expired", expired, help_="已过期未清会话"),
             _line("qiyan_paper_text_rows", papers, help_="正文库条数"),
@@ -189,6 +203,13 @@ def render() -> str:
         _line("qiyan_http_latency_p95_seconds", p95, help_="legacy：进程内近 500 次全站 p95；按路径请看 qiyan_http_latency_seconds 直方图"),
     ]
     lines += _hist_lines()
+    with _LOCK:
+        agent_req = dict(_REQ_AGENT)
+    if agent_req:
+        lines.append("# HELP qiyan_agent_http_requests_total 人工学生发出的 HTTP 请求次数")
+        lines.append("# TYPE qiyan_agent_http_requests_total counter")
+        for (path, status), n in sorted(agent_req.items()):
+            lines.append(f'qiyan_agent_http_requests_total{{path="{path}",code="{status}"}} {n}')
     seen_help = set()
     for (path, status), n in sorted(_req_snapshot().items()):
         name = "qiyan_http_requests_total"

@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FEAT] 人工学生：任何 AI agent 通过 MCP 当学生用启研，按屏幕统计走通率与卡点
+
+- 变更内容：新增 `server/mcp_student.py`：十四个「学生能做的事」工具（上线、看屏幕、说一句、按按钮、打开第几篇、带读三步、选方向、项目搜/选/交、stuck、end_day），stdio 与 `/mcp/student`（streamable-http，Authorization: Bearer AGENT_TOKENS 令牌，服务端设 `QIYAN_SELF_URL` 才开远程）两种传输，工具层通过回环调公开接口，限频/预算/锁与真人一致；`server/personas.py` 五张人设卡 + 四项今日目标；`/api/agent/personas`、`/api/agent/register`（走真实注册 + 同意，账号记入 `agent_accounts`）、`/api/agent/event`、`/api/agent/run/end`、`/api/admin/agent-runs`（按 operator/模型/人设汇总、卡住最多的屏幕）；预算加 `LLM_DAILY_AGENT`（operator 合计，默认 200/天）；metrics 加 `qiyan_users{kind="synthetic"}`、`qiyan_agent_runs_total`、`qiyan_agent_stuck_total`、`qiyan_agent_plan_done_total`、`qiyan_agent_http_requests_total`；`tools/synthetic/run_student.py` 用 DeepSeek（OpenAI 兼容）当学生脑子跑一遍；`docs/agents/STUDENT_AGENT.md` 给运维与接入方。测试 `server/tests/test_mcp_student.py`（令牌、注册标记与预算、工具走完首日、事件归属、JSON-RPC 与远程门）。
+- 影响文档：docs/CHANGELOG.md、docs/agents/STUDENT_AGENT.md
+- 影响模块：server/mcp_student.py、server/personas.py、server/main.py、server/store.py、server/budget.py、server/auth.py、server/metrics.py、tools/synthetic/run_student.py、server/tests/test_mcp_student.py
+- 决策来源：陈浩文（人工用户：让别人的 Codex/agent 也能来，拿使用统计）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FEAT] 监控：本机 Prometheus + Grafana 看启研（tools/monitoring），按路径延迟直方图，告警规则
 
 - 变更内容：照 isse-labs lab4 的做法（不要 Docker，官方二进制放 `.tools/`，运行数据放 `.runtime/`），新建 `tools/monitoring/`：`prometheus.yml`（抓本机 8100）与 `prometheus-prod.yml`（再抓生产，Bearer 读 `.runtime/metrics-token`）、`alerts.yml` 九条规则（抓不到、库没就绪、生产库在临时盘、5xx 比例、注册用户骤降、账号副本过期、刮取错误、SSE 错误、对话 p95）与 `tests/alerts.test.yml`（promtool 单测）、`grafana.ini` + provisioning（数据源 uid `qiyan-prometheus`、仪表盘目录）、`start-prometheus.zsh` / `start-grafana.zsh` / `fetch-tools.zsh`（按 OS/架构下载并校验 sha256，或软链已有的一份）、`smoke_traffic.py`（造一点流量）、README。仪表盘从 `docs/grafana/qiyan-overview.json` 搬到 `tools/monitoring/grafana/dashboards/`，重做成 19 个面板（状态格：进程/持久盘/库就绪/模型/注册/访客/副本用户/副本年龄；请求速率按状态码、在途、5xx 与流错误、p50/p95、按路径 p95、用户数、会话、按路径速率、论文库、刮取错误）。`server/metrics.py`：新增按路由模板的延迟直方图 `qiyan_http_latency_seconds`（21-D34 的桶界）、`qiyan_http_inflight`、`qiyan_db_ready`，`qiyan_process_uptime_seconds` 改单调时钟（21-D38），health `checks.uptime_seconds` 同源；旧全站 p95 保留标 legacy。`server/tests/test_metrics_sync.py` 新增：直方图桶界与路径隔离、在途/就绪/单调寿命、面板与规则引用的指标族都在 `/metrics` 且数据源 uid 一致、有 promtool 就 `check rules` + `test rules`。合入时叠在 PR #22 的 main 上，CHANGELOG 两段都留。
