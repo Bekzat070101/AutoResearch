@@ -25,8 +25,10 @@ def nas(tmp_path, monkeypatch):
     monkeypatch.setenv("QIYAN_DB", str(db))
     monkeypatch.setattr(store, "DB_PATH", db)
     monkeypatch.setattr(store, "DB_READY", store.DB_READY)
+    monkeypatch.setattr(store, "_MOUNT_OK_PATH", None)
     monkeypatch.delenv("QIYAN_ACCOUNT_STORE", raising=False)
     monkeypatch.delenv("BACKUP_OSS_BUCKET", raising=False)
+    monkeypatch.delenv("QIYAN_ALLOW_EPHEMERAL", raising=False)
     auth._HITS.clear()
     yield db
     account_store.reset()
@@ -41,6 +43,7 @@ def test_unmounted_nas_blocks_then_recovers(nas, monkeypatch):
     r = client.post("/api/auth/register", json=body)
     assert r.status_code == 503
     assert r.json()["code"] == "db_not_ready"
+    assert r.json()["reason"] == "nas_not_mounted"
     h = client.get("/api/health")
     assert h.status_code == 200
     j = h.json()
@@ -73,7 +76,9 @@ def test_diagnostics_never_create_db_before_mount(nas, monkeypatch):
         assert client.get("/static/index.html").status_code == 200
         r = client.post("/api/auth/register", json=body)
         assert r.status_code == 503
-        assert r.json() == {"detail": "数据库所在的盘还没挂上，请稍后重试", "code": "db_not_ready"}
+        assert r.json()["code"] == "db_not_ready"
+        assert r.json()["reason"] == "nas_not_mounted"
+        assert r.json()["detail"] == "数据库所在的盘还没挂上，请稍后重试"
         assert not nas.exists()
         assert not nas.parent.exists()
 
@@ -83,3 +88,45 @@ def test_diagnostics_never_create_db_before_mount(nas, monkeypatch):
     assert nas.exists()
     r = client.post("/api/auth/register", json=body)
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("db_env, db_path, reason", [
+    (None, "/code/server/data/demo.db", "no_qiyan_db"),      # 没设 QIYAN_DB：库落在代码包里，每次发版清空
+    ("/tmp/qiyan.db", "/tmp/qiyan.db", "db_in_tmp"),          # 现网 2026-10-20 就是这种
+    ("/private/tmp/qiyan.db", "/private/tmp/qiyan.db", "db_in_tmp"),
+    ("/var/tmp/qiyan.db", "/var/tmp/qiyan.db", "db_in_tmp"),
+])
+def test_fc_without_persistent_db_is_blocked_unless_allowed(nas, monkeypatch, db_env, db_path, reason):
+    if db_env is None:
+        monkeypatch.delenv("QIYAN_DB")
+    else:
+        monkeypatch.setenv("QIYAN_DB", db_env)
+    monkeypatch.setattr(store, "DB_PATH", Path(db_path))
+    monkeypatch.delenv("QIYAN_ALLOW_EPHEMERAL", raising=False)
+    assert store.db_blocked() == reason
+    assert store.db_writable() is False
+    monkeypatch.setenv("QIYAN_ALLOW_EPHEMERAL", "1")  # 测试函数 / 试运行：deploy_fc.py 自动带上
+    assert store.db_blocked() is None
+    monkeypatch.setenv("QIYAN_ALLOW_EPHEMERAL", "0")
+    assert store.db_blocked() == reason
+
+
+def test_fc_without_qiyan_db_refuses_to_serve_and_says_why(nas, tmp_path, monkeypatch):
+    pkg_db = tmp_path / "code" / "server" / "data" / "demo.db"
+    monkeypatch.delenv("QIYAN_DB")
+    monkeypatch.delenv("QIYAN_ALLOW_EPHEMERAL", raising=False)
+    monkeypatch.setattr(store, "DB_PATH", pkg_db)
+    store.init_db()
+    assert not pkg_db.exists() and store.DB_READY is False
+    client = TestClient(main.app)
+    body = {"username": "pkg_user", "password": "secret-ok", "nickname": "p", "consent": True}
+    r = client.post("/api/auth/register", json=body)
+    assert r.status_code == 503
+    assert r.json()["code"] == "db_not_ready" and r.json()["reason"] == "no_qiyan_db"
+    assert "QIYAN_DB" in r.json()["detail"]
+    j = client.get("/api/health").json()
+    assert j["ok"] is False and j["db"]["blocked"] == "no_qiyan_db" and j["db"]["ephemeral"] is True
+    monkeypatch.setenv("QIYAN_ALLOW_EPHEMERAL", "1")
+    store.init_db()
+    assert store.DB_READY is True and pkg_db.exists()
+    assert client.post("/api/auth/register", json=body).status_code == 200

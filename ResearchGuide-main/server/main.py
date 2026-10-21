@@ -128,6 +128,12 @@ async def _hydrate_accounts_from_oss() -> None:
 
 
 DB_RETRY_SECONDS = 5.0
+# 库不在持久盘时不开业：给学生看的一句话按原因分开，运维按 README「部署」处理
+DB_BLOCKED_DETAIL = {
+    "nas_not_mounted": "数据库所在的盘还没挂上，请稍后重试",
+    "no_qiyan_db": "服务端没有配置持久库（QIYAN_DB），为了不让发版清空大家的数据，暂不开放；请运维按 README「部署」一节处理",
+    "db_in_tmp": "服务端的库在临时盘上，为了不让发版清空大家的数据，暂不开放；请运维把 QIYAN_DB 指到 NAS",
+}
 
 
 async def _retry_init_db() -> None:
@@ -183,7 +189,9 @@ async def maintenance_gate(request: Request, call_next):
 async def db_ready_gate(request: Request, call_next):
     path = request.url.path or ""
     if not store.DB_READY and path.startswith("/api/") and path != "/api/health":
-        return JSONResponse({"detail": "数据库所在的盘还没挂上，请稍后重试", "code": "db_not_ready"}, status_code=503)
+        reason = store.db_blocked() or "nas_not_mounted"
+        return JSONResponse({"detail": DB_BLOCKED_DETAIL.get(reason, DB_BLOCKED_DETAIL["nas_not_mounted"]),
+                             "code": "db_not_ready", "reason": reason}, status_code=503)
     return await call_next(request)
 
 

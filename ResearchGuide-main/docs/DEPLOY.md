@@ -9,9 +9,8 @@
 | 环境 | 给谁 | 怎么起 | 库 |
 | --- | --- | --- | --- |
 | 开发 | 写代码的人 | `docker compose up qiyan` → http://127.0.0.1:8100 ；或直接跑 `server/main.py` | 本机卷 `/data/qiyan.db`，或 `QIYAN_DB` 指到本机文件。模拟数据。 |
-| 测试 | 组内联调 | `docker compose up qiyan-test` → http://127.0.0.1:8101 ；云上是函数 `qiyan-test` | **另一份**库（测试卷或 `/tmp/qiyan-test.db`）。可用模拟或真实子集，不面向外网用户。 |
-| 生产 | 真实用户 | 页面 https://chengcanwu.github.io/AutoResearch/ ；接口函数 `qiyan`（杭州） | `QIYAN_DB` 必须指到会留的盘（NAS / 云盘 / ECS 数据卷）。现在若仍是 `/tmp/qiyan.db`，`/api/health` 的 `db.ephemeral` 为 true，实例回收会丢掉账号。 |
-
+| 测试 | 组内联调 | `docker compose up qiyan-test` → http://127.0.0.1:8101 ；云上是函数 `qiyan-test` | **另一份**库（测试卷或 `/tmp/qiyan-test.db`）。可用模拟或真实子集，不面向外网用户。 函数上要有 `QIYAN_ALLOW_EPHEMERAL=1`（`deploy_fc.py` 自动带），否则服务端不开业。 |
+| 生产 | 真实用户 | 页面 https://chengcanwu.github.io/AutoResearch/ ；接口函数 `qiyan`（杭州） | `QIYAN_DB` 必须指到会留的盘（NAS / 云盘 / ECS 数据卷）。现在若仍是 `/tmp/qiyan.db`，`/api/health` 的 `db.ephemeral` 为 true，实例回收会丢掉账号。 **服务端守门**：函数计算上 `QIYAN_DB` 没设、在 `/tmp`、或目录没挂盘时不建库，`/api/*` 回 503 `db_not_ready`，`/api/health` 的 `db.blocked` 写原因（`no_qiyan_db` / `db_in_tmp` / `nas_not_mounted`）；放行只靠 `QIYAN_ALLOW_EPHEMERAL=1`，生产上不要有。 |
 生产库不和服务代码、不和前端静态文件混在一起。用户名单、密码哈希、每人的 DeepSeek 密钥、作业草稿和阅读记录都在这一份库里，按 `user_id` 隔离；**不要**给每个用户建一个 sqlite 文件，也不要把密钥写进镜像。
 
 没有备案域名，生产首页不用 `fcapp.run`（会下载 htm）。没有开 ECS：帐号按量付费额度不够，不充值。挂上持久盘之后只改环境变量，不用改表结构。

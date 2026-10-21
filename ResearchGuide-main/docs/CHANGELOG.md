@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-20] [FIX] 服务端守门：函数计算上库不在持久盘就不开业；部署规矩进 README 与仓库根 AGENTS.md
+
+- 变更内容：现网 `/api/health` 仍 `db.ephemeral: true`，每次发版清空账号。`store.db_blocked()` 在函数计算上遇到没设 `QIYAN_DB`（`no_qiyan_db`）、`QIYAN_DB` 在 `/tmp`（`db_in_tmp`）、目录没挂盘（`nas_not_mounted`）时都不建库，`/api/*` 回 503 `db_not_ready`（body 带 `reason` 与按原因写的 `detail`），`/api/health` 的 `db.blocked` 写原因；放行开关 `QIYAN_ALLOW_EPHEMERAL=1`，`deploy_fc.py` 给 `qiyan-test` 和 `--allow-ephemeral` 自动带上、正常发生产时去掉（`fc_safety.apply_ephemeral_flag`）。README 新增「部署（发版前必读）」四条硬规矩 + 验收命令 + 环境变量表；仓库根新增 `AGENTS.md` 给 Codex/Grok 这类 agent 先读。合入时叠在 PR #23–#26 之上，CHANGELOG 各段都留。
+- 影响文档：README.md、docs/DEPLOY.md、AGENTS.md（仓库根）、docs/CHANGELOG.md
+- 影响模块：server/store.py、server/main.py、tools/deploy/fc_safety.py、server/tests/test_db_mount_gate.py、server/tests/test_deploy_fc.py
+- 决策来源：陈浩文（现网每个新版本清空数据；让 agent 也能照规矩发版）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FEAT] 人工学生：任何 AI agent 通过 MCP 当学生用启研，按屏幕统计走通率与卡点
 
 - 变更内容：新增 `server/mcp_student.py`：十四个「学生能做的事」工具（上线、看屏幕、说一句、按按钮、打开第几篇、带读三步、选方向、项目搜/选/交、stuck、end_day），stdio 与 `/mcp/student`（streamable-http，Authorization: Bearer AGENT_TOKENS 令牌，服务端设 `QIYAN_SELF_URL` 才开远程）两种传输，工具层通过回环调公开接口，限频/预算/锁与真人一致；`server/personas.py` 五张人设卡 + 四项今日目标；`/api/agent/personas`、`/api/agent/register`（走真实注册 + 同意，账号记入 `agent_accounts`）、`/api/agent/event`、`/api/agent/run/end`、`/api/admin/agent-runs`（按 operator/模型/人设汇总、卡住最多的屏幕）；预算加 `LLM_DAILY_AGENT`（operator 合计，默认 200/天）；metrics 加 `qiyan_users{kind="synthetic"}`、`qiyan_agent_runs_total`、`qiyan_agent_stuck_total`、`qiyan_agent_plan_done_total`、`qiyan_agent_http_requests_total`；`tools/synthetic/run_student.py` 用 DeepSeek（OpenAI 兼容）当学生脑子跑一遍；`docs/agents/STUDENT_AGENT.md` 给运维与接入方。测试 `server/tests/test_mcp_student.py`（令牌、注册标记与预算、工具走完首日、事件归属、JSON-RPC 与远程门）。

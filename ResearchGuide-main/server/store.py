@@ -51,16 +51,22 @@ _MOUNT_OK_PATH: str | None = None  # 这条路径已经确认挂上了：之后�
 
 
 def db_blocked() -> str | None:
-    """函数计算上设了 QIYAN_DB、那个目录却没挂盘：不建空库，返回原因；否则 None。"""
+    """函数计算上库不在持久盘就不建库、不开业。没设 QIYAN_DB、库在 /tmp、目录没挂盘都拦。
+    本机不管；QIYAN_ALLOW_EPHEMERAL=1 放行（测试函数 / --allow-ephemeral）。挂上后记住路径，不再每次 stat。"""
     global _MOUNT_OK_PATH
-    if not (os.environ.get("FC_FUNCTION_NAME") and os.environ.get("QIYAN_DB")):
+    if not os.environ.get("FC_FUNCTION_NAME") or os.environ.get("QIYAN_ALLOW_EPHEMERAL") == "1":
         return None
-    path = str(DB_PATH)
-    if _MOUNT_OK_PATH == path:
+    if not os.environ.get("QIYAN_DB"):
+        return "no_qiyan_db"
+    raw = str(DB_PATH)
+    path = raw.replace("\\", "/")
+    if path.startswith(("/tmp/", "/private/tmp/", "/var/tmp/")):
+        return "db_in_tmp"
+    if _MOUNT_OK_PATH == raw:
         return None
     if not _own_mount(DB_PATH):
         return "nas_not_mounted"
-    _MOUNT_OK_PATH = path
+    _MOUNT_OK_PATH = raw
     return None
 
 

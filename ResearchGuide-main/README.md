@@ -53,6 +53,39 @@ uv run --no-project --with fastapi --with uvicorn --with pydantic python server/
 # 打开 http://127.0.0.1:8100/
 ```
 
+## 部署（发版前必读；给人，也给 Codex / Grok 这类 agent）
+
+**现网 2026-10-20 的 `/api/health` 仍是 `db.ephemeral: true`、`account_store.enabled: false`：库在临时盘上，每次发版或实例回收都会清掉所有账号和记录。这不是代码 bug，是函数上没配持久盘。** 下面四条是硬规矩，缺一条就会再丢一次人。
+
+1. **生产库必须在 NAS**：函数 `qiyan` 配 VPC + NAS 挂到 `/mnt/nas`，环境变量 `QIYAN_DB=/mnt/nas/qiyan.db`。不设 `QIYAN_DB`（库落在代码包里）或设成 `/tmp/...` 都等于「每个新版本从零开始」。从本版起服务端会守门：函数计算上库不在持久盘就不建库、`/api/*` 回 503 `db_not_ready`，`/api/health` 的 `db.blocked` 写明原因；放行只靠 `QIYAN_ALLOW_EPHEMERAL=1`，只给 `qiyan-test` 用。
+2. **只用 `tools/deploy/deploy_fc.py` 发版**（命令见 [docs/DEPLOY.md](docs/DEPLOY.md)「发版」）。它会保留函数上已有的环境变量，库不在持久盘时会拒绝发生产；不要在控制台「部署代码」，不要给生产加 `--allow-ephemeral`。
+3. **换库路径必须迁移**：`deploy_fc.py --db <新路径> --migrate-from-backup <本地备份文件>`，脚本会备份 → 发版 → 恢复 → 核对用户数；远端有用户而不带这个参数时脚本拒绝。10-18 那次丢人就是换了路径没迁移。
+4. **从 `main` 发版**，发完对照 `/api/health` 的 `checks.build` 和 `git log -1 origin/main`；现网 `4db39dd w102` 不在 `main` 上，所以 `main` 里已合并的登录可靠性修复（#21）现网并没有跑。
+
+发版后的验收（两条都要过，第二条发两次版再看）：
+
+```bash
+curl -fsS $URL/api/health | python3 -c "import json,sys; d=json.load(sys.stdin)['db']; assert d['ephemeral'] is False and d['writable'] is True, d"
+curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" $URL/api/admin/stats     # 用户数不少于发版前
+```
+
+函数上的环境变量（发版脚本不会删已有的，只覆盖自己管的几项）：
+
+| 变量 | 必须？ | 作用 |
+| --- | --- | --- |
+| `QIYAN_DB` | 必须 | SQLite 路径，必须在 NAS |
+| `QIYAN_SECRET` | 必须 | 封装学生各自的 DeepSeek 密钥；换它要先 `POST /api/admin/rewrap` |
+| `ADMIN_TOKEN` | 必须（≥32 字节） | `/api/admin/*`、发版后预热论文 |
+| `LLM_API_KEY`（`LLM_MODEL`、`LLM_BASE_URL`） | 必须 | 站点兜底模型 |
+| `QIYAN_ACCOUNT_STORE` 或 `BACKUP_OSS_BUCKET`+`BACKUP_KEY` | 强烈建议 | 账号副本：库被清空时灌回用户名和密码哈希（只是兜底，不是迁移） |
+| `TRUST_PROXY=1` | 建议 | 在网关后面才能按来源限频 |
+| `METRICS_TOKEN` | 可选 | 本机 Prometheus 抓生产 `/metrics`（#23 合并后） |
+| `AGENT_TOKENS`、`QIYAN_SELF_URL`、`LLM_DAILY_AGENT` | 可选 | 让别人的 AI agent 当学生跑统计（#24 合并后；不设 = 关闭） |
+| `WECHAT_*` | 可选 | 公众号登录，见 DEPLOY.md |
+| `QIYAN_ALLOW_EPHEMERAL=1` | 只给 `qiyan-test` / 试运行 | 放行服务端守门；`deploy_fc.py` 给测试函数和 `--allow-ephemeral` 自动带上，正常发生产时自动去掉，生产函数上不该有 |
+
+前端：`python tools/deploy/publish_gh_pages.py`，和接口一起发（旧前端打新接口会 401）。回滚、恢复、事故手册都在 [docs/DEPLOY.md](docs/DEPLOY.md)。
+
 ## 边学边练（任务 3）
 
 侧栏「项目」：选方向和「走到哪」，从公开来源实时检索可以做的练手项目（每条带来源链接和检索时间，查不到就空着）；选一个，按要求打成 `.zip` 交上来，按五条标准逐条评阅并写回画像。说明见 [docs/TASK3_PROJECTS.md](docs/TASK3_PROJECTS.md)；离线测试：`uv run --no-project --with pytest --with fastapi --with pydantic --with httpx pytest server/tests`（不联网、不调模型；PR 上由 GitHub Actions 自动跑，见仓库根目录 `.github/workflows/tests.yml`）。
