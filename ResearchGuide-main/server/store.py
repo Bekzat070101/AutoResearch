@@ -526,6 +526,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("portraits", "name", "ALTER TABLE portraits ADD COLUMN name TEXT NOT NULL DEFAULT ''"),
     # 草稿版本：排序只认服务端单调 rev，客户端时钟不参与
     ("drafts", "rev", "ALTER TABLE drafts ADD COLUMN rev INTEGER NOT NULL DEFAULT 0"),
+    # 管理员：用 ADMIN_TOKEN 当邀请码注册出来的账号（页面多「监测」入口）
+    ("users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # 依赖补出来的列，必须在补列之后建
@@ -706,16 +708,16 @@ def user_by_username(username: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def register_user(username: str, password: str, nickname: str) -> dict[str, Any]:
+def register_user(username: str, password: str, nickname: str, is_admin: bool = False) -> dict[str, Any]:
     name = normalize_username(username)
     nick = (nickname or username).strip()[:24] or name
     salt, hashed = hash_password(password)
     uid, token, now = new_id(), new_id(), now_iso()
     with _LOCK, _conn() as c:
         c.execute(
-            "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at, username, password_salt, password_hash)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (uid, nick, token, "{}", now, now, name, salt, hashed),
+            "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at, username, password_salt, password_hash, is_admin)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (uid, nick, token, "{}", now, now, name, salt, hashed, 1 if is_admin else 0),
         )
     _accounts_changed()
     return {"uid": uid, "token": token, "nickname": nick, "username": name}
@@ -745,6 +747,13 @@ def upgrade_user(uid: str, username: str, password: str) -> dict[str, Any]:
         raise KeyError("user")
     _accounts_changed()
     return out
+
+
+def set_user_admin(uid: str) -> bool:
+    """登录时用管理员密钥验证通过后调用：把这个账号标成管理员，之后登录都带出。"""
+    with _LOCK, _conn() as c:
+        cur = c.execute("UPDATE users SET is_admin=1 WHERE id=?", (uid,))
+    return bool(cur.rowcount)
 
 
 def _wrap_key(secret: str | None = None) -> bytes:

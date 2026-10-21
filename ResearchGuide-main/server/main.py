@@ -227,6 +227,16 @@ async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
     return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
+def _log_request(request: Request, path: str, code: int, t0: float) -> None:
+    """逐请求一行 JSON，给函数计算 / SLS。pytest 多线程测登录时 print+flush 会和捕获器互相锁死，单测里不打。"""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    print(json.dumps({"event": "request", "path": path, "method": request.method, "code": code,
+                      "ms": int((time.time() - t0) * 1000),
+                      "uid": getattr(request.state, "uid", "") or ""},
+                     ensure_ascii=False), flush=True)
+
+
 @app.middleware("http")
 async def record_metrics(request: Request, call_next):
     import metrics as _metrics
@@ -243,11 +253,14 @@ async def record_metrics(request: Request, call_next):
             route = request.scope.get("route")
             path = getattr(route, "path", None) or "unknown"
             _metrics.observe_request(path, 500, time.time() - t0, synthetic=syn)
+            _log_request(request, path, 500, t0)
         raise
     if watch:
         code = getattr(resp, "status_code", None)
         route = request.scope.get("route")
         path = getattr(route, "path", None) or "unknown"
+        # 每请求一行 JSON：SLS 里能看到「谁在什么时候调了哪个接口、成没成」。SSE 流按首个状态码记一次。
+        _log_request(request, path, 0 if code is None else int(code), t0)
         media = (getattr(resp, "media_type", None) or resp.headers.get("content-type") or "")
         iterator = getattr(resp, "body_iterator", None)
         if iterator is not None and "text/event-stream" in media:

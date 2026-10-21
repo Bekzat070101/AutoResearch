@@ -1167,7 +1167,7 @@ async function loginResetHint() {
     const btn = env.signinBtn();
     check(!!(btn && btn.onclick), "找到登录按钮");
     const form = btn.parent;
-    const [u, p] = form.children;
+    const [u, inv, p] = form.children;  // 用户名、邀请码（选填）、密码
     u.value = "xiaobei"; p.value = "pw123456";
     env.reply = l03Unauth();
     await btn.onclick();
@@ -1187,7 +1187,7 @@ async function loginResetHint() {
     const env = l03Env(false);
     env.renderLogin();
     const btn = env.signinBtn();
-    const [u, p] = btn.parent.children;
+    const [u, inv, p] = btn.parent.children;  // 用户名、邀请码（选填）、密码
     u.value = "xiaobei"; p.value = "pw123456";
     env.reply = l03Unauth();
     await btn.onclick();
@@ -1379,7 +1379,7 @@ async function l06AfterEnterTimeout() {
   const env = l06LoginEnv({ afterEnter: () => new Promise(() => {}) });
   env.renderLogin();
   const btn = env.btn("登录");
-  const [u, p] = btn.parent.children;
+  const [u, inv, p] = btn.parent.children;  // 用户名、邀请码（选填）、密码
   u.value = "xiaobei"; p.value = "pw123456";
   let done = false;
   btn.onclick().then(() => { done = true; });

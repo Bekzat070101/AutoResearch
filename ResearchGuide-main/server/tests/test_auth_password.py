@@ -43,6 +43,7 @@ def test_old_guest_row_survives_new_columns(tmp_path, monkeypatch):
     u = store.get_user(guest["uid"])
     assert u["nickname"] == "旧访客"
     assert not u.get("username")
+    assert not u.get("is_admin")  # 老库补列后默认 0
     with sqlite3.connect(db) as c:
         names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"user_secrets", "user_prefs", "drafts", "trails"} <= names
@@ -333,3 +334,48 @@ def test_configured_failure_window_controls_sweep(client, monkeypatch):
                                capture_output=True, text=True, timeout=60)
             assert r.returncode != 0
             assert "AUTH_* 配置必须是正整数" in r.stderr
+
+
+# ---------- 邀请码（本周新增） ----------
+
+def test_register_needs_no_invite_code(client, monkeypatch):
+    """普通用户注册不需要任何邀请码，即使配置了 ADMIN_TOKEN。"""
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token-for-tests-00000000000000")
+    r = client.post("/api/auth/register", json={
+        "username": "plain_user", "password": "secret-ok", "nickname": "普通人", "consent": True,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["is_admin"] is False
+
+
+def test_signin_with_admin_key_upgrades_account(client, monkeypatch):
+    """登录时填对管理员密钥：账号升级为管理员，之后不填密钥登录也还是管理员。"""
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token-for-tests-00000000000000")
+    client.post("/api/auth/register", json={
+        "username": "the_boss", "password": "secret-ok", "nickname": "负责人", "consent": True,
+    })
+    up = client.post("/api/auth/signin", json={
+        "username": "the_boss", "password": "secret-ok",
+        "invite_code": "admin-token-for-tests-00000000000000",
+    })
+    assert up.status_code == 200, up.text
+    assert up.json()["is_admin"] is True
+    again = client.post("/api/auth/signin", json={"username": "the_boss", "password": "secret-ok"})
+    assert again.status_code == 200
+    assert again.json()["is_admin"] is True
+
+
+def test_signin_with_wrong_code_is_403_and_stays_normal(client, monkeypatch):
+    """密码对但邀请码错：403 不让登录；留空重登仍是普通账号。"""
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token-for-tests-00000000000000")
+    client.post("/api/auth/register", json={
+        "username": "someone", "password": "secret-ok", "nickname": "某人", "consent": True,
+    })
+    bad = client.post("/api/auth/signin", json={
+        "username": "someone", "password": "secret-ok", "invite_code": "wrong-code",
+    })
+    assert bad.status_code == 403
+    assert bad.json()["detail"] == "邀请码不对"
+    ok = client.post("/api/auth/signin", json={"username": "someone", "password": "secret-ok"})
+    assert ok.status_code == 200
+    assert ok.json()["is_admin"] is False

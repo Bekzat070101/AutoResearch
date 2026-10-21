@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-21] [FEAT] 登录邀请码解锁管理员、运营监测面板、逐请求日志
+
+- 变更内容：登录选填邀请码，填对 `ADMIN_TOKEN`（≥32 字节）则该账号升为管理员，之后不用再填；普通注册不需要邀请码。管理员会话可看 `/api/admin/stats` 与侧栏「监测」面板（默认隐藏）。每条 `/api` 请求打一行 JSON（path/method/code/ms/uid）方便 SLS（pytest 多线程场景不打，避免与捕获器锁死）。合入时叠在 PR #23–#27 之上：侧栏文案与「定位/项目」隐藏仍按 PR #26，监测按钮另加一栏；异常路径的 metrics 仍带 `synthetic=`（PR #24 人工学生）。
+- 影响文档：docs/CHANGELOG.md、.env.example
+- 影响模块：server/auth.py、server/admin.py、server/store.py、server/account_store.py、server/main.py、web/index.html、web/js/app.js、web/css/styles.css、server/tests/test_auth_password.py、server/tests/test_admin.py、server/tests/test_web_assets.py
+- 决策来源：段晓（PR #28）
+- 登记人：段晓
+
 ## [2026-10-20] [FIX] 服务端守门：函数计算上库不在持久盘就不开业；部署规矩进 README 与仓库根 AGENTS.md
 
 - 变更内容：现网 `/api/health` 仍 `db.ephemeral: true`，每次发版清空账号。`store.db_blocked()` 在函数计算上遇到没设 `QIYAN_DB`（`no_qiyan_db`）、`QIYAN_DB` 在 `/tmp`（`db_in_tmp`）、目录没挂盘（`nas_not_mounted`）时都不建库，`/api/*` 回 503 `db_not_ready`（body 带 `reason` 与按原因写的 `detail`），`/api/health` 的 `db.blocked` 写原因；放行开关 `QIYAN_ALLOW_EPHEMERAL=1`，`deploy_fc.py` 给 `qiyan-test` 和 `--allow-ephemeral` 自动带上、正常发生产时去掉（`fc_safety.apply_ephemeral_flag`）。README 新增「部署（发版前必读）」四条硬规矩 + 验收命令 + 环境变量表；仓库根新增 `AGENTS.md` 给 Codex/Grok 这类 agent 先读。合入时叠在 PR #23–#26 之上，CHANGELOG 各段都留。

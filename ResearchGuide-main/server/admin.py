@@ -26,6 +26,15 @@ SNAP = Path(os.environ.get("QIYAN_SNAP") or "/tmp/qiyan-snap.db")
 
 def _admin(request: Request) -> None:
     token = os.environ.get("ADMIN_TOKEN") or ""
+    if len(token) >= 32 and hmac.compare_digest(request.headers.get("X-Admin-Token", ""), token):
+        return
+    # 第二通道：登录着的管理员（注册时用 ADMIN_TOKEN 当邀请码的账号）凭自己的会话就能看，
+    # 页面不用存管理员口令。放 503 之前：万一环境变量被误删，已入库的管理员账号还能用。
+    bearer = auth._bearer(request)
+    if bearer:
+        uid, _ = store.session_lookup(bearer)
+        if uid and store.get_user(uid).get("is_admin"):
+            return
     if len(token) < 32:
         raise HTTPException(503, "ADMIN_TOKEN 未设或短于 32 字节")
     got = request.headers.get("X-Admin-Token", "")

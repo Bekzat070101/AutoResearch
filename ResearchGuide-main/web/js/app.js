@@ -12,6 +12,7 @@ const S = {
   wechat: false,
   guest: true,
   username: "",
+  isAdmin: false,  // 只存内存：启动/登录时服务端 account() 带出，不写 localStorage（服务端读库复核，改这个只会多出个入口按钮）
   hasLlmKey: false,
   llmKeyTail: "",
   llmKeyInvalid: false,
@@ -269,6 +270,7 @@ const WORKSPACE = {
   card: "read",
   me: "me",
   feedback: "feedback",
+  monitor: "monitor",
 };
 
 /* ---------- 视图切换 ---------- */
@@ -276,7 +278,7 @@ const WORKSPACE = {
 /* 刷新停在原来那一栏：记在这个标签页的 sessionStorage（新开标签页照样从首页进）。
    原来已登录的学生一刷新就回到粒子首页（Codex 复现）。要 id 的详情页回到它所在的栏目。 */
 const RESUMABLE = { today: "today", workbench: "workbench", projects: "projects", project: "projects", read: "read",
-  card: "read", position: "position", dialogue: "dialogue", confirm: "me", me: "me", cards: "cards" };
+  card: "read", position: "position", dialogue: "dialogue", confirm: "me", me: "me", cards: "cards", monitor: "monitor" };
 
 function firstView() {
   return S.entered ? "today" : "dialogue";
@@ -359,6 +361,9 @@ function setView(name) {
   });
   const dlgBtn = document.querySelector('.nav-btn[data-view="dialogue"]');
   if (dlgBtn) dlgBtn.hidden = !S.entered;
+  const mbtn = document.querySelector('.nav-btn[data-view="monitor"]');
+  if (mbtn) mbtn.hidden = !S.isAdmin;  // 运营监测只有管理员看得见
+  if (name !== "monitor" && S.monitorTimer) { clearInterval(S.monitorTimer); S.monitorTimer = null; }
   const dirChip = document.getElementById("dirChip");
   if (dirChip) dirChip.hidden = !S.entered;
   $nav.hidden = !inApp || !S.entered;
@@ -392,6 +397,7 @@ async function render() {
       case "read": await renderRead(); break;
       case "card": await renderCard(); break;
       case "feedback": await renderFeedback(); break;
+      case "monitor": await renderMonitor(); break;
       case "me": await renderMe(); break;
       case "today":
       default: await renderToday(); break;
@@ -1486,6 +1492,7 @@ function setSession(r, nextView, msg) {
   S.wechat = !!r.wechat;
   S.guest = !!r.guest;
   S.username = r.username || "";
+  S.isAdmin = !!r.is_admin;
   S.hasLlmKey = !!r.has_llm_key;
   S.llmKeyTail = r.llm_key_tail || "";
   S.llmKeyInvalid = !!r.llm_key_invalid;  // 换过 QIYAN_SECRET 后解不开的个人密钥：提示重存（16-F03）
@@ -1524,8 +1531,10 @@ function clearLocalDrafts(keep, owners) {
 function clearSession(purge) {
   ++directionEpoch;
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
-  S.username = ""; S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
+  S.username = ""; S.isAdmin = false;
+  S.hasLlmKey = false; S.llmKeyTail = ""; S.llmKeyInvalid = false;
   S.entered = false;
+  if (S.monitorTimer) { clearInterval(S.monitorTimer); S.monitorTimer = null; }
   S.myDir = undefined; S.portraitId = ""; S.portraitName = ""; S.mePortrait = "";
   S.kitId = "";
   try { localStorage.removeItem("rg_kit"); } catch (_) { /* 无痕模式等 */ }
@@ -1748,6 +1757,8 @@ function renderLogin() {
   suser.setAttribute("aria-label", "用户名");
   const spass = el("input"); spass.type = "password"; spass.placeholder = "密码"; spass.autocomplete = "current-password";
   spass.setAttribute("aria-label", "密码");
+  const sinv = el("input"); sinv.type = "password"; sinv.placeholder = "邀请码（选填，管理员填）"; sinv.maxLength = 128;
+  sinv.setAttribute("aria-label", "邀请码");
   const sbtn = el("button", "btn", "登录");
   sbtn.type = "button";
   sbtn.onclick = async () => {
@@ -1755,7 +1766,7 @@ function renderLogin() {
     sbtn.disabled = true; sbtn.textContent = "登录中…";
     stopWxPoll();  // 走密码就作废正在等的微信登录，免得它的结果回来盖掉这次会话
     try {
-      const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value }, { timeoutMs: 20000 });
+      const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value, invite_code: sinv.value.trim() }, { timeoutMs: 20000 });
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
       try {
         if (S.auth && S.auth.recovery) localStorage.setItem("rg_seen_event", S.auth.recovery.event_id);
@@ -1784,7 +1795,8 @@ function renderLogin() {
     }
   };
   spass.addEventListener("keydown", onEnter(sbtn));
-  signinStep.append(suser, spass, sbtn);
+  sinv.addEventListener("keydown", onEnter(sbtn));
+  signinStep.append(suser, sinv, spass, sbtn);
 
   const registerStep = el("div", "login-step login-body");
   const ruser = el("input"); ruser.placeholder = "用户名，例如 xiaobei（2–24 个字母、数字、下划线）"; ruser.autocomplete = "username"; ruser.maxLength = 24;
@@ -2208,6 +2220,84 @@ function accountKind() {
   return "访客";
 }
 
+/* ---------- 运营监测（管理员） ----------
+   数据复用 /api/admin/stats 与 /api/health：管理员登录会话本身就是凭证（服务端 _admin 第二通道），
+   页面不存管理员口令。30 秒自动刷新，切走视图就停。 */
+
+function monitorCard(label, value, sub, warn) {
+  const card = el("div", "monitor-card" + (warn ? " monitor-warn" : ""));
+  card.appendChild(el("p", "monitor-label", label));
+  card.appendChild(el("p", "monitor-value", String(value)));
+  if (sub) card.appendChild(el("p", "monitor-sub", sub));
+  return card;
+}
+
+async function renderMonitor() {
+  const seq = S.renderSeq;
+  const wrap = el("div", "monitor panel");
+  $app.replaceChildren(wrap);
+  const paint = async () => {
+    let s = null, h = null;
+    try {
+      [s, h] = await Promise.all([
+        api("GET", "/api/admin/stats"),
+        api("GET", "/api/health").catch(() => null),
+      ]);
+    } catch (e) {
+      if (stale(seq)) return;
+      wrap.replaceChildren(emptyPanel(`运营数据没取到：${esc((e && e.message) || e)}`, "再试一次", "monitor"));
+      return;
+    }
+    if (stale(seq)) return;
+    const mb = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+      : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : (n || 0) + " B");
+    const pool = (h && h.model_pool) || {};
+    const acc = (h && h.db && h.db.account_store) || {};
+    const head = el("div", "ws-head");
+    head.appendChild(el("h2", "", "运营监测"));
+    head.appendChild(el("p", "", "30 秒自动刷新一次。数据来自 /api/admin/stats 与 /api/health。"));
+    // 注意：el() 第三参数是 innerHTML 字符串，卡片是元素，只能用 append 塞进去
+    const grid1 = el("div", "monitor-grid");
+    grid1.append(
+      monitorCard("注册用户", s.users, `会话 ${s.sessions} · 已过期 ${s.expired_sessions}`),
+      monitorCard("今日模型调用", s.today_star, `研究 ${s.today_star} · 访客 ${s.today_guest} · 翻译 ${s.xlate_today}`),
+      monitorCard("库大小", mb(s.db_bytes), `WAL ${mb(s.wal_bytes)} · 空闲页 ${s.freelist_count}`),
+      monitorCard("临时盘", s.ephemeral ? "是（危险）" : "否", `剩余 ${mb(s.tmp_free)}`, !!s.ephemeral),
+      monitorCard("论文缓存", mb(s.arxiv_bytes), `正文 ${s.arxiv_files} 篇 · 用户收藏 ${s.user_papers}`),
+      monitorCard("方向目录", s.paper_dir_rows, `${s.paper_dir_nodes} 个节点 · 缺口 ${(s.paper_dir_gaps || []).length} 个`),
+      monitorCard("构建", esc(s.build || "—"), `线程池 ${s.pools && s.pools.threads}`),
+      monitorCard("账号副本", acc.enabled ? "开" : "关",
+        acc.enabled ? `${acc.users || 0} 人 · ${esc(String(acc.via || ""))}` : "没配 QIYAN_ACCOUNT_STORE / BACKUP_OSS_BUCKET", !acc.enabled),
+    );
+    const grid2 = el("div", "monitor-grid");
+    grid2.append(
+      monitorCard("模型池", pool.workers, `排队 ${pool.queued} / 运行 ${pool.running} · 借用线程 ${pool.threads_borrowed}`),
+      monitorCard("库可写", h && h.db ? (h.db.writable ? "是" : "否") : "—",
+        h && h.db && h.db.blocked ? `blocked: ${h.db.blocked}` : "", h && h.db && !h.db.writable),
+      monitorCard("个人密钥数", s.user_secrets, "user_secrets 行数"),
+    );
+    wrap.replaceChildren(head, grid1, grid2);
+    if (s.ephemeral) {
+      wrap.appendChild(el("p", "monitor-banner", "⚠️ 数据库还在临时盘：实例回收或发版会清掉所有账号。挂 NAS 前先别推广。"));
+    }
+    if ((s.top_uids || []).length) {
+      const tbl = el("table", "monitor-table");
+      const hdr = el("tr");
+      hdr.append(el("th", "", "用户"), el("th", "", "今日调用"));
+      tbl.appendChild(hdr);
+      for (const r of s.top_uids.slice(0, 10)) {
+        const row = el("tr");
+        row.append(el("td", "", esc(String(r.user_id || ""))), el("td", "", String(r.calls)));
+        tbl.appendChild(row);
+      }
+      wrap.appendChild(el("h3", "section-label", "今日调用 Top"));
+      wrap.appendChild(tbl);
+    }
+  };
+  await paint();
+  S.monitorTimer = setInterval(paint, 30000);
+}
+
 async function openUserMenu() {
   const wrap = document.querySelector(".user-menu-wrap");
   const btn = document.getElementById("userMenuBtn");
@@ -2227,6 +2317,7 @@ async function openUserMenu() {
     return b;
   };
   menu.appendChild(go("我的", () => setView("me")));
+  if (S.isAdmin) menu.appendChild(go("运营监测", () => setView("monitor")));
   if (!S.guest) menu.appendChild(go("我的 DeepSeek", () => openMineKey()));
   menu.appendChild(go("退出", () => { if (confirmLeave()) logout("home"); }));
   menu.appendChild(go("换账号", () => { if (confirmLeave()) logout("login"); }));

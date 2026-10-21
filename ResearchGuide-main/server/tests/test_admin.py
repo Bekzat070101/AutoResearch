@@ -423,3 +423,37 @@ def test_restore_waiting_reader_does_not_invert_writer_lock(client, tmp_path, mo
     assert body["ok"] is True and body["object"] == out["object"]
     assert store.get_user(res["c"]["uid"])["nickname"] == "排队写入"
     assert not list(Path(store.DB_PATH).parent.glob("*.incoming-*"))
+
+
+# ---------- 管理员会话第二通道（本周新增） ----------
+
+def test_admin_stats_accepts_admin_session(client, monkeypatch):
+    """登录时用管理员密钥解锁的账号，只带自己的登录会话就能看 stats，不用再输口令。"""
+    admin_token = "admin-token-for-stats-0000000000000000"
+    monkeypatch.setenv("ADMIN_TOKEN", admin_token)
+    r = client.post("/api/auth/register", json={
+        "username": "ops_admin", "password": "secret-ok", "nickname": "运营", "consent": True,
+    })
+    assert r.status_code == 200, r.text
+    up = client.post("/api/auth/signin", json={
+        "username": "ops_admin", "password": "secret-ok", "invite_code": admin_token,
+    })
+    assert up.status_code == 200, up.text
+    token = up.json()["token"]
+    got = client.get("/api/admin/stats", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 200, got.text
+    assert "users" in got.json() and "paper_dir_gaps" in got.json()
+
+
+def test_plain_registered_session_still_needs_token(client, monkeypatch):
+    """没解锁过管理员密钥的账号不算管理员：只带会话仍被拦。"""
+    r = client.post("/api/auth/register", json={
+        "username": "plain_user", "password": "secret-ok", "nickname": "普通", "consent": True,
+    })
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    got = client.get("/api/admin/stats", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 403
+    # 带对的口令仍然可以
+    got2 = client.get("/api/admin/stats", headers={"X-Admin-Token": TOKEN})
+    assert got2.status_code == 200

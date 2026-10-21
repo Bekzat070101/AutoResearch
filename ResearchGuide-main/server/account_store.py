@@ -30,7 +30,7 @@ OSS_OBJECT = "accounts.json.enc"
 _COLS = (
     "id", "nickname", "username", "password_salt", "password_hash",
     "created_at", "claimed_at", "consent_at", "consent_version",
-    "wechat_openid", "onboard_state",
+    "wechat_openid", "onboard_state", "is_admin",
 )
 _SESSION_COLS = ("token_hash", "user_id", "created_at", "expires_at", "last_seen")
 COALESCE_SECONDS = 2.0
@@ -432,8 +432,8 @@ def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bo
     try:
         c.execute(
             "INSERT INTO users(id, nickname, token, onboard_state, created_at, claimed_at, "
-            "username, password_salt, password_hash, consent_at, consent_version, wechat_openid) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "username, password_salt, password_hash, consent_at, consent_version, wechat_openid, is_admin) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 uid, nick, secrets.token_hex(16),
                 row.get("onboard_state") or "{}",
@@ -443,6 +443,7 @@ def _insert_user_if_missing(c, row: dict[str, Any], collisions: list[str]) -> bo
                 row.get("consent_at"),
                 row.get("consent_version") or "",
                 row.get("wechat_openid") or None,
+                1 if row.get("is_admin") else 0,  # 旧快照没有这一列，当 0
             ),
         )
     except sqlite3.IntegrityError:

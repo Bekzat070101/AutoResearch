@@ -1986,3 +1986,29 @@ body.is-home .site-footer { display: none; }
   .me-aside, .me-page .cov-grid { grid-template-columns: minmax(0, 1fr); }
   .me-page .mem-card { padding: 12px 0; gap: 6px; }
 }
+
+/* ---------- 运营监测（管理员） ---------- */
+.monitor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap-3); margin-bottom: var(--gap-4); }
+.monitor-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--gap-3) var(--gap-4);
+}
+.monitor-label { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; color: var(--ink-3); }
+.monitor-value { margin: 6px 0 0; font-family: var(--serif); font-size: 24px; font-weight: 700; }
+.monitor-sub { margin: 4px 0 0; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.monitor-warn { border-color: var(--coral); background: var(--coral-soft); }
+.monitor-warn .monitor-value { color: var(--coral); }
+.monitor-banner {
+  margin: 0 0 var(--gap-4); padding: var(--gap-3) var(--gap-4);
+  background: var(--coral-soft); border: 1px solid var(--coral); border-radius: var(--r-lg);
+  font-size: 14px; color: var(--coral);
+}
+.monitor-table { width: 100%; margin-top: var(--gap-2); border-collapse: collapse; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.monitor-table th, .monitor-table td { padding: 8px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid var(--line); }
+.monitor-table th { color: var(--ink-3); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; }
+.monitor-table tr:last-child td { border-bottom: 0; }
+@media (max-width: 1000px) { .monitor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .monitor-grid { grid-template-columns: minmax(0, 1fr); } }
