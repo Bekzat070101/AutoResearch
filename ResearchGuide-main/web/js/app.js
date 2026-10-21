@@ -198,32 +198,35 @@ async function apiFetch(path, opt = {}) {
 async function api(method, path, body, opt = {}) {
   const req = { method, headers: { "Content-Type": "application/json" } };
   if (body !== undefined) req.body = JSON.stringify(body);
-  let res;
-  if (opt.timeoutMs) {
-    const slowMsg = "服务器响应慢（可能在冷启动），请 10 秒后再试";
-    const ctrl = new AbortController();
-    req.signal = ctrl.signal;
-    let timer;
-    const slow = new Promise((_, reject) => {
-      timer = setTimeout(() => { ctrl.abort(); reject(new Error(slowMsg)); }, opt.timeoutMs);
-    });
-    try {
-      res = await Promise.race([apiFetch(path, req), slow]);
-    } catch (e) {
-      if (e && e.name === "AbortError") throw new Error(slowMsg);
-      throw e;
-    } finally { clearTimeout(timer); }
-  } else res = await apiFetch(path, req);
-  let data = null;
-  try { data = await res.json(); } catch (_) { /* no body */ }
-  if (!res.ok) {
-    const msg = errText(data, res.status);
-    if (res.status === 404 && /user not found/i.test(msg)) await recoverUser(new Error(msg));
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+  async function request() {
+    const res = await apiFetch(path, req);
+    let data = null;
+    try { data = await res.json(); } catch (e) { if (e && e.name === "AbortError") throw e; /* no body */ }
+    if (!res.ok) {
+      const msg = errText(data, res.status);
+      if (res.status === 404 && /user not found/i.test(msg)) await recoverUser(new Error(msg));
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
   }
-  return data;
+  if (!opt.timeoutMs) return request();
+  const slowMsg = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+  const ctrl = new AbortController();
+  req.signal = ctrl.signal;
+  let timer;
+  const slow = new Promise((_, reject) => {
+    timer = setTimeout(() => { ctrl.abort(); reject(new Error(slowMsg)); }, opt.timeoutMs);
+  });
+  const pending = request();
+  try {
+    return await Promise.race([pending, slow]);
+  } catch (e) {
+    pending.catch(() => {});  // 超时后被 abort 的那次请求自己会再拒绝一次：别让它变成控制台里的未处理 rejection
+    if (e && e.name === "AbortError") throw new Error(slowMsg);
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 /* ---------- 工具 ---------- */
@@ -1705,7 +1708,11 @@ function renderLogin() {
   const wxOn = !S.auth || S.auth.wechat_login;
   const hero = el("section", "hero stagger");
   let recovery = "";
-  try { recovery = localStorage.getItem("rg_recovery_state") || ""; } catch (_) { /* 无痕模式等 */ }
+  try {
+    const raw = localStorage.getItem("rg_recovery_state");
+    const saved = raw ? JSON.parse(raw) : null;
+    recovery = saved && typeof saved === "object" && typeof saved.state === "string" ? saved.state : "normal";
+  } catch (_) { recovery = "normal"; /* 旧的纯字符串值、无痕模式等 */ }
   const RECOVERY_NOTE = {
     lost: "服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。",
     accounts_restored: "用户名账号已恢复，请用原用户名和密码登录；原访客、仅微信账号无法找回。",
@@ -1749,7 +1756,10 @@ function renderLogin() {
     try {
       const r = await api("POST", "/api/auth/signin", { username: suser.value.trim(), password: spass.value }, { timeoutMs: 20000 });
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
-      try { localStorage.removeItem("rg_recovery_state"); } catch (_) { /* 无痕模式等 */ }
+      try {
+        if (S.auth && S.auth.recovery) localStorage.setItem("rg_seen_event", S.auth.recovery.event_id);
+        localStorage.removeItem("rg_recovery_state");
+      } catch (_) { /* 无痕模式等 */ }
       const previous = S.token;  // 访客登进自己的账号：采用新令牌之后再吊销访客的
       if (previous && previous !== r.token) revokeToken(previous);
       if (setSession(r, "today")) return;
@@ -1795,7 +1805,10 @@ function renderLogin() {
         nickname: rnick.value.trim() || ruser.value.trim(), consent: true,
       }, { timeoutMs: 20000 });
       try { localStorage.removeItem("rg_reset_hint"); localStorage.removeItem("rg_last_uid"); } catch (_) { /* 无痕模式等 */ }
-      try { localStorage.removeItem("rg_recovery_state"); } catch (_) { /* 无痕模式等 */ }
+      try {
+        if (S.auth && S.auth.recovery) localStorage.setItem("rg_seen_event", S.auth.recovery.event_id);
+        localStorage.removeItem("rg_recovery_state");
+      } catch (_) { /* 无痕模式等 */ }
       if (setSession(r, "dialogue")) return;
       let slowTimer;
       const slow = new Promise((_, rej) => { slowTimer = setTimeout(() => rej(new Error("after_enter_timeout")), 15000); });
@@ -2217,15 +2230,17 @@ async function openUserMenu() {
   wrap.appendChild(menu);  // 画像切换不再放菜单里（11 号：在「我的」页）
 }
 
-async function loadPrefs(c) {
+async function loadPrefs(c, ctx) {
   try {
     const run = () => api("GET", "/api/me/prefs");
     const p = await (c ? dirAwait(c, run) : run());
+    if (ctx && !ctx.live()) return;
     S.myDirs = Array.isArray(p.directions) ? p.directions : [];
     if (p.kit_id) useKit(p.kit_id);
     return true;
   } catch (e) {
     if (e === STALE_DIR) throw e;
+    if (ctx && !ctx.live()) return;
     S.myDirs = undefined;  // 渲染缓存不是写入授权：读失败就当不知道
     return false;
   }
@@ -3055,25 +3070,29 @@ async function portraitOp(run, nextView, wasActive = false, after = null) {
   }
 }
 
-async function ensurePortrait() {
+async function ensurePortrait(ctx) {
   if (S.portraitId) return S.portraitId;
   try {
     const r = await api("GET", `/api/portraits?uid=${S.uid}`);
+    if (ctx && !ctx.live()) return;
     const active = (r.portraits || []).find((p) => p.active);
     S.portraitId = active ? active.id : "";
     S.portraitName = (active && active.name) || "";
   } catch (_) {
+    if (ctx && !ctx.live()) return;
     S.portraitId = "";
     S.portraitName = "";
   }
   if (S.portraitId) adoptLegacyTrail(S.portraitId);
-  const state = await pullTrail();
+  const state = await pullTrail(ctx);
+  if (ctx && !ctx.live()) return;
   // 老数据迁移：方向原来存在全局 prefs 里，第一次进画像时收进这份画像的 trail
   // 只有成功读到、且远端同时缺 dirs/sel 的旧 schema 才迁移；读失败是未知，空数组是明确选择
   const t = trail();
   if (state.loaded && !state.modern && !t.dirs.length && Array.isArray(S.myDirs) && S.myDirs.length) {
     const dirs = S.myDirs.filter((id) => !window.RG_DIR || RG_DIR.byId[id]);
     if (dirs.length) await saveTrail({ ...t, dirs, sel: dirs });
+    if (ctx && !ctx.live()) return;
   }
   if (state.loaded) ensureSelKey();
   return S.portraitId;
@@ -3152,11 +3171,12 @@ function saveTrail(t, force, c) {
   return Promise.resolve();
 }
 
-async function pullTrail() {
+async function pullTrail(ctx) {
   if (!S.token) return { loaded: true, modern: false };
   const pid = S.portraitId || "default";
   try {
     const remote = await api("GET", `/api/projects/${pid}/trail`);
+    if (ctx && !ctx.live()) return { loaded: false, modern: false };
     const modern = Array.isArray(remote?.dirs) || Array.isArray(remote?.sel);
     if (modern || remote?.code) {
       localStorage.setItem(trailStorageKey(), JSON.stringify(remote));
@@ -7381,6 +7401,19 @@ document.addEventListener("keydown", (e) => {
     S.llmInfo = h.llm || null;  // 服务器那把兜底密钥的状态，登录、退出时重画侧栏的模型钮要用
     applyLlmPill(h.llm);
     S.auth = h.auth || null;
+    const current = S.auth && S.auth.recovery;
+    if (current) {
+      try {
+        if (current.state === "normal") localStorage.removeItem("rg_recovery_state");
+        else {
+          let saved = null;
+          try { saved = JSON.parse(localStorage.getItem("rg_recovery_state") || "null"); } catch (_) { /* 旧的纯字符串值 */ }
+          if (saved && typeof saved === "object" && saved.event_id !== current.event_id) {
+            localStorage.setItem("rg_recovery_state", JSON.stringify({ event_id: current.event_id, state: current.state }));
+          }
+        }
+      } catch (_) { /* 无痕模式等 */ }
+    }
     if (paths) applyPaths(paths.paths);
   } catch (_) { /* 健康检查失败不挡页面 */ }
   buildTutorials();
@@ -7393,21 +7426,23 @@ document.addEventListener("keydown", (e) => {
       if (e.status === 401) clearSession();  // 认领过或不存在；网络错误时 uid 是这个人唯一的凭证，不能扔
     }
   }
+  let me = null;
   if (S.token) {
     try {
-      const me = await api("GET", "/api/auth/me", undefined, { timeoutMs: 20000 });
-      setSession(me);
-      needConsent = !me.consent_ok;
-      await loadPrefs();  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
-      await ensurePortrait();
+      me = await api("GET", "/api/auth/me", undefined, { timeoutMs: 20000 });
     } catch (e) {
       if ([401, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动），落到登录页并说清为什么；404 是发版瞬间路由缺失，不算
         // 提示文案写死了 10-18 换库这件事：12 月起会话自然过期就不再挂这个提示
         if (Date.now() < Date.parse("2026-12-01T00:00:00+08:00")) {
           try { localStorage.setItem("rg_last_uid", S.uid); localStorage.setItem("rg_reset_hint", "1"); } catch (_) { /* 无痕模式等 */ }
         }
-        if (S.auth && S.auth.recovery && S.auth.recovery.state !== "normal") {
-          try { localStorage.setItem("rg_recovery_state", S.auth.recovery.state); } catch (_) { /* 无痕模式等 */ }
+        const current = S.auth && S.auth.recovery;
+        if (current && current.state !== "normal") {
+          try {
+            if (localStorage.getItem("rg_seen_event") !== current.event_id) {
+              localStorage.setItem("rg_recovery_state", JSON.stringify({ event_id: current.event_id, state: current.state }));
+            }
+          } catch (_) { /* 无痕模式等 */ }
         }
         clearSession();
         reloadInto("login", sessionGoneMsg());
@@ -7420,6 +7455,10 @@ document.addEventListener("keydown", (e) => {
   } else if (S.uid) {
     // 只有 uid、认领没成（网络错误）：先去登录页，但 uid 留着，下次打开再认领——它是这个人唯一的凭证
     setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
+  }
+  if (me) {
+    setSession(me);
+    needConsent = !me.consent_ok;
   }
   let next = "home", note = "";
   try {
@@ -7435,6 +7474,17 @@ document.addEventListener("keydown", (e) => {
   if (needConsent) openPrivacy(true);
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒
   setTimeout(removeSplash, Math.max(0, 700 - (performance.now() - t0)));
+  if (!me) return;
+  // 页面先画出来，资料（工具包、收藏方向、画像）最多再等 15 秒；超时后迟到的结果作废
+  const uid = S.uid, token = S.token;
+  let expired = false;
+  const ctx = { uid, token, live: () => S.uid === uid && S.token === token && !expired };
+  let initTimer;
+  const deadline = new Promise((r) => { initTimer = setTimeout(() => { expired = true; r(); }, 15000); });
+  await Promise.race([loadPrefs(undefined, ctx), deadline]);  // 工具包与收藏方向一起恢复；读不到就用本地的工具包、方向留空
+  if (ctx.live()) await Promise.race([ensurePortrait(ctx), deadline]);
+  clearTimeout(initTimer);
+  if (expired) toast("页面资料暂未加载，请刷新重试");  // 身份和草稿都留着
 })();
 
 function transcriptImportPanel() {

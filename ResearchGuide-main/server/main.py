@@ -111,7 +111,7 @@ _BACKGROUND: set = set()
 
 async def _hydrate_accounts_from_oss() -> None:
     """OSS 上的账号副本在线程池里拉，最多等 ACCOUNT_OSS_TIMEOUT 秒；超时 / 失败只记日志与 health，不挡启动。"""
-    job = asyncio.ensure_future(run_in_threadpool(account_store.hydrate_oss))
+    job = asyncio.ensure_future(run_in_threadpool(account_store.fetch_oss_payload))
     done, _ = await asyncio.wait({job}, timeout=ACCOUNT_OSS_TIMEOUT)
     if not done:
         account_store.note_error("timeout")
@@ -121,6 +121,10 @@ async def _hydrate_accounts_from_oss() -> None:
     if exc is not None:
         account_store.note_error(type(exc).__name__)
         print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__}, ensure_ascii=False))
+        return
+    payload = job.result()
+    if payload is not None:
+        await run_in_threadpool(account_store.apply_oss_payload, payload)
 
 
 DB_RETRY_SECONDS = 5.0
@@ -553,9 +557,12 @@ def onboard_enter(req: NBAReq):
         "entered_phase": phase,
         "entered_early": not dialogue.onboard_done(req.uid),
     }
-    if not store.get_prefs(req.uid).get("entered_at"):
+    first = not store.get_prefs(req.uid).get("entered_at")
+    if first:
         extra["entered_at"] = now_iso()
     store.set_prefs(req.uid, extra=extra)
+    if first:
+        store._accounts_changed()
     return auth.account(req.uid)
 
 

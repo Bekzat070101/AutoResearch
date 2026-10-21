@@ -248,10 +248,10 @@ async function prefs() {
 async function boot() {
   console.log("=== R03 boot 恢复方向 ===");
   const bootSrc = extract(appSrc, "boot");
-  const start = bootSrc.indexOf("needConsent = !me.consent_ok;");
-  const end = bootSrc.indexOf("await ensurePortrait();", start);
+  const start = bootSrc.indexOf("if (!me) return;");
+  const end = bootSrc.indexOf("if (ctx.live()) await Promise.race([ensurePortrait(ctx), deadline]);", start);
   if (start < 0 || end < 0) throw new Error("找不到 boot 里的 prefs 段");
-  const block = bootSrc.slice(start + "needConsent = !me.consent_ok;".length, end);
+  const block = bootSrc.slice(start + "if (!me) return;".length, end);
   const S = { myDirs: undefined, uid: "u1", token: "t" };
   const kits = [];
   const api = async (m, url) => {
@@ -409,6 +409,9 @@ async function retry() {
   if (which === "boot-health-timeout" || which === "all") await l06BootHealthTimeout();
   if (which === "after-enter-timeout" || which === "all") await l06AfterEnterTimeout();
   if (which === "recovery-notice" || which === "all") await l06RecoveryNotice();
+  if (which === "api-body-timeout" || which === "all") await r9ApiBodyTimeout();
+  if (which === "boot-profile-deadline" || which === "all") await r9BootProfileDeadline();
+  if (which === "recovery-notice-event" || which === "all") await r9RecoveryNoticeEvent();
   console.log("\n" + (fails ? `失败 ${fails} 项` : "全部通过"));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -529,11 +532,11 @@ async function r4Dirs() {
 async function r4Boot() {
   console.log("=== R4-02 boot 不覆盖明确的 trail 状态 ===");
   const bootSrc = extract(appSrc, "boot");
-  const start = bootSrc.indexOf("needConsent = !me.consent_ok;");
-  const endMark = "await ensurePortrait();";
+  const start = bootSrc.indexOf("if (!me) return;");
+  const endMark = "if (ctx.live()) await Promise.race([ensurePortrait(ctx), deadline]);";
   const end = bootSrc.indexOf(endMark, start);
   if (start < 0 || end < 0) throw new Error("找不到 boot 里的 prefs/画像段");
-  const block = bootSrc.slice(start + "needConsent = !me.consent_ok;".length, end + endMark.length);
+  const block = bootSrc.slice(start + "if (!me) return;".length, end + endMark.length);
   const J = JSON.stringify;
   const cases = [
     { name: "远端 dirs 有、sel 显式空", remote: { code: "", dirs: ["190.20", "110.67"], sel: [] }, puts: 0, dirs: ["190.20", "110.67"], sel: [] },
@@ -1394,7 +1397,7 @@ async function l06RecoveryNotice() {
   console.log("=== L06 登录页的全局恢复状态公告 ===");
   const LOST = "服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。";
   {
-    const env = l06LoginEnv({ recovery: "lost" });
+    const env = l06LoginEnv({ recovery: '{"event_id":"2026-10-18","state":"lost"}' });
     env.renderLogin();
     const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-recovery"));
     check(notes.length === 1 && notes[0].innerHTML === LOST && notes[0].className === "login-note login-recovery", "lost：逐字文案", notes[0] && notes[0].innerHTML);
@@ -1408,5 +1411,290 @@ async function l06RecoveryNotice() {
     env.renderLogin();
     const notes = r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-recovery"));
     check(notes.length === 0, `${st || "缺省"}：没有 .login-recovery`, String(notes.length));
+  }
+}
+
+/* ===================== R9-04 / R9-05 / R9-06 认证 deadline 盖住正文、启动资料 15 秒上限、恢复公告绑定 event_id（独立区块） ===================== */
+function r9HangRes(opt) {
+  const json = () => new Promise((_, rej) => {
+    if (opt && opt.signal) opt.signal.addEventListener("abort", () => { const e = new Error("aborted"); e.name = "AbortError"; rej(e); });
+  });
+  return { ok: true, status: 200, json };
+}
+
+function r9BootEnv(o) {
+  const clock = l06Clock();
+  const S = Object.assign({ uid: "", token: "" }, o.S || {});
+  const ls = o.ls || r6Storage();
+  const env = { clock, S, ls, views: [], toasts: [], reloads: [], sets: [], done: false };
+  const src = ["boot", "clearSession", "clearLocalDrafts", "sessionGoneMsg"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "sessionStorage", "applyLlmPill", "applyPaths", "buildTutorials",
+    "setSession", "loadPrefs", "ensurePortrait", "toast", "reloadInto", "setView", "openPrivacy", "document", "setTimeout", "clearTimeout",
+    "let directionEpoch = 0;\n" + src + "; return { boot };");
+  const noop = () => {};
+  const setSession = (r) => { env.sets.push(r); S.uid = r.uid; if (r.token) S.token = r.token; S.entered = !!r.entered; return false; };
+  env.boot = f(S, o.api, ls, r6Storage(), noop, noop, noop, setSession, o.loadPrefs || (async () => {}), o.ensurePortrait || (async () => {}),
+    (t) => env.toasts.push(t), (v, m) => env.reloads.push([v, m]), (v) => env.views.push(v), noop,
+    { getElementById: () => null }, clock.setTimeout, clock.clearTimeout).boot;
+  env.start = () => env.boot().then(() => { env.done = true; });
+  return env;
+}
+
+function r9LoginEnv(fetch) {
+  const document = r6Dom();
+  const mk = document.createElement;
+  document.createElement = (tag) => { const n = mk(tag); n.addEventListener = () => {}; return n; };
+  document.createTextNode = (t) => { const n = mk("#text"); n.textContent = t; return n; };
+  const clock = l06Clock();
+  const env = { document, localStorage: r6Storage(), clock, toasts: [], S: { uid: "", token: "", auth: { wechat_login: false } } };
+  const api = l06Api(env.S, fetch, clock);
+  const noop = () => {};
+  const src = ["el", "consentRow", "renderLogin"].map((n) => extract(appSrc, n)).join("\n");
+  const f = new Function("S", "api", "localStorage", "document", "toast", "$nav", "$header", "$app",
+    "stopWxPoll", "startWechat", "openPrivacy", "revokeToken", "setSession", "afterEnter", "openConnect", "setView", "setTimeout",
+    src + "; return { renderLogin };");
+  const $app = document.createElement("main");
+  document.body.appendChild($app);
+  const setSession = (r) => { env.S.uid = r.uid; if (r.token) env.S.token = r.token; return false; };
+  Object.assign(env, { $app }, f(env.S, api, env.localStorage, document, (t) => env.toasts.push(t), {}, {}, $app,
+    noop, noop, noop, noop, setSession, async () => {}, noop, noop, clock.setTimeout));
+  env.btn = (label) => r6Walk($app).find((n) => n.tag === "button" && n.innerHTML === label);
+  return env;
+}
+
+async function r9ApiBodyTimeout() {
+  console.log("=== R9-04 认证 deadline 盖住响应正文 ===");
+  const SLOW = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+  const ends = [["POST", "/api/auth/signin", 20000], ["POST", "/api/auth/register", 20000], ["GET", "/api/auth/me", 20000],
+    ["POST", "/api/auth/consent", 20000], ["GET", "/api/health", 5000], ["GET", "/api/paths", 5000]];
+  for (const [m, url, ms] of ends) {
+    const clock = l06Clock();
+    const signals = [];
+    const fetch = (u, opt) => { signals.push(opt.signal); return Promise.resolve(r9HangRes(opt)); };
+    const api = l06Api({ token: "t1" }, fetch, clock);
+    let out = "pending";
+    api(m, url, m === "POST" ? {} : undefined, { timeoutMs: ms }).then(() => { out = "resolved"; }, (e) => { out = e; });
+    await clock.advance(ms - 1);
+    check(out === "pending" && signals[0] && signals[0].aborted === false, `${url}: 第 ${ms - 1}ms 仍在等正文`, String(out));
+    await clock.advance(1);
+    check(out instanceof Error && out.message === SLOW, `${url}: 第 ${ms}ms 以固定文案 reject`, String(out && out.message || out));
+    check(signals[0].aborted === true, `${url}: 超时后 abort`);
+    check(signals.length === 1, `${url}: 只请求一次`, String(signals.length));
+  }
+  // 正文不理会 abort 也照样按时 reject
+  {
+    const clock = l06Clock();
+    const fetch = () => Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => {}) });
+    const api = l06Api({ token: "" }, fetch, clock);
+    let out = "pending";
+    api("POST", "/api/auth/signin", {}, { timeoutMs: 20000 }).then(() => { out = "resolved"; }, (e) => { out = e; });
+    await clock.advance(20000);
+    check(out instanceof Error && out.message === SLOW, "正文永挂且不响应 abort：第 20000ms reject", String(out && out.message || out));
+  }
+  // 不带 timeoutMs 的长请求继续等
+  {
+    const clock = l06Clock();
+    const signals = [];
+    const fetch = (u, opt) => { signals.push(opt.signal); return Promise.resolve(r9HangRes(opt)); };
+    const api = l06Api({ token: "t1" }, fetch, clock);
+    let out = "pending";
+    api("POST", "/api/chat", { text: "x" }).then(() => { out = "resolved"; }, (e) => { out = e; });
+    await clock.advance(60000);
+    check(out === "pending" && signals.length === 1 && !signals[0], "不带 timeoutMs 的 chat 60 秒后仍在等、没有 signal", String(out));
+  }
+  // 登录按钮：headers 到了、正文挂起 → 20 秒复位，toast 逐字，signin 只发一次
+  {
+    const fetches = [];
+    const env = r9LoginEnv((url, opt) => { fetches.push(url); return Promise.resolve(r9HangRes(opt)); });
+    env.renderLogin();
+    const btn = env.btn("登录");
+    const [u, p] = btn.parent.children;
+    u.value = "xiaobei"; p.value = "pw123456";
+    let done = false;
+    btn.onclick().then(() => { done = true; });
+    await env.clock.advance(19999);
+    check(!done && btn.disabled === true && btn.textContent === "登录中…", "登录：第 19999ms 仍在等");
+    await env.clock.advance(1);
+    check(done && btn.disabled === false && btn.textContent === "登录", "登录：第 20000ms 按钮复位", String(btn.textContent));
+    check(env.toasts.length === 1 && env.toasts[0] === SLOW, "登录：toast 逐字", JSON.stringify(env.toasts));
+    check(fetches.filter((x) => x === "/api/auth/signin").length === 1, "登录：signin 只请求一次", JSON.stringify(fetches));
+    check(env.S.token === "", "登录：没有会话", env.S.token);
+  }
+  // 启动：health、me 正文都挂起 → 5 秒 + 20 秒后落页，身份保留
+  {
+    const fetches = [];
+    const fetch = (url, opt) => {
+      fetches.push(url);
+      if (url === "/api/paths") return Promise.resolve(l06Res(200, { paths: [] }));
+      return Promise.resolve(r9HangRes(opt));
+    };
+    let api = null;
+    const env2 = r9BootEnv({ S: { uid: "u1", token: "t1", entered: true }, api: (...a) => api(...a) });
+    api = l06Api(env2.S, fetch, env2.clock);
+    env2.start();
+    await env2.clock.advance(24999);
+    check(!env2.done && env2.views.length === 0, "启动：第 24999ms 还在等 me 正文", JSON.stringify(fetches));
+    await env2.clock.advance(1000);
+    check(env2.done && env2.views.length === 1, "启动：health 5 秒、me 20 秒后落页", JSON.stringify(env2.views));
+    check(env2.S.uid === "u1" && env2.S.token === "t1" && env2.reloads.length === 0, "启动：身份保留", JSON.stringify(env2.S));
+    check(fetches.filter((x) => x === "/api/auth/me").length === 1, "启动：me 只请求一次", JSON.stringify(fetches));
+  }
+}
+
+function r9ProfileFns(S, api, ls, kits) {
+  const names = ["loadPrefs", "trailStorageKey", "trail", "saveTrail", "pullTrail", "ensureSelKey", "adoptLegacyTrail", "ensurePortrait"];
+  const RG_DIR = r4LoadDir();
+  return new Function("S", "api", "useKit", "window", "RG_DIR", "FIELD_TREES", "localStorage",
+    dirCtxSrc() + "\n" + r4Pick(names) + "; return {loadPrefs, ensurePortrait};")(
+    S, api, (k) => { kits.push(k); S.kitId = k; }, { RG_DIR }, RG_DIR, {}, ls);
+}
+
+async function r9BootProfileDeadline() {
+  console.log("=== R9-05 启动后资料加载 15 秒上限、迟到结果作废 ===");
+  const MSG = "页面资料暂未加载，请刷新重试";
+  const J = JSON.stringify;
+  const late = {
+    prefs: ["GET", "/api/me/prefs", { kit_id: "k-late", directions: ["190.20"] }],
+    portrait: ["GET", "/api/portraits?uid=u1", { portraits: [{ id: "p1", active: true, name: "迟到画像" }] }],
+    trail: ["GET", "/api/projects/p1/trail", { code: "", dirs: ["190.20"], sel: ["190.20"] }],
+  };
+  for (const which of ["prefs", "portrait", "trail"]) {
+    const S = { uid: "u1", token: "t1", entered: true, myDirs: undefined, portraitId: "", portraitName: "" };
+    const ls = r6Storage();
+    ls.setItem("rg_uid", "u1"); ls.setItem("rg_token", "t1"); ls.setItem("rg_draft_u1_t1", "没写完的草稿");
+    const kits = [];
+    let release = null;
+    const api = async (m, url) => {
+      if (url === "/api/health") return {};
+      if (url === "/api/paths") return null;
+      if (url === "/api/auth/me") return { uid: "u1", consent_ok: true, entered: true };
+      const [lm, lu, body] = late[which];
+      if (m === lm && url === lu) return new Promise((r) => { release = () => r(JSON.parse(J(body))); });
+      if (url === "/api/me/prefs") return { directions: [] };
+      if (url === "/api/portraits?uid=u1") return { portraits: [{ id: "p1", active: true, name: "" }] };
+      if (url === "/api/projects/p1/trail") return { code: "", dirs: [], sel: [] };
+      throw new Error("未预期的请求 " + m + " " + url);
+    };
+    const fns = r9ProfileFns(S, api, ls, kits);
+    const env = r9BootEnv({ S, ls, api, loadPrefs: fns.loadPrefs, ensurePortrait: fns.ensurePortrait });
+    env.start();
+    await env.clock.advance(1000);
+    check(env.views.length === 1 && !!release, `${which} 挂起：me 200 后首个页面已绘制`, J(env.views));
+    check(!env.done && env.toasts.length === 0, `${which} 挂起：15 秒内不提示`, J(env.toasts));
+    await env.clock.advance(14000);
+    check(env.done, `${which} 挂起：15 秒后启动结束`);
+    check(env.toasts.length === 1 && env.toasts[0] === MSG, `${which} 挂起：逐字提示`, J(env.toasts));
+    check(S.uid === "u1" && S.token === "t1" && env.reloads.length === 0, `${which} 挂起：身份保留`, J(S));
+    check(ls.getItem("rg_draft_u1_t1") === "没写完的草稿" && ls.getItem("rg_token") === "t1", `${which} 挂起：草稿保留`);
+    const before = J({ mem: ls.mem, myDirs: S.myDirs, portraitId: S.portraitId, portraitName: S.portraitName, kitId: S.kitId, kits });
+    const views = env.views.length, toasts = env.toasts.length;
+    release();
+    await env.clock.advance(1000);
+    const after = J({ mem: ls.mem, myDirs: S.myDirs, portraitId: S.portraitId, portraitName: S.portraitName, kitId: S.kitId, kits });
+    check(after === before, `${which} 迟到响应：缓存与状态不变`, after);
+    check(env.views.length === views && env.toasts.length === toasts, `${which} 迟到响应：无导航、无提示`, J(env.views));
+  }
+  // 资料接口 404/503：不清身份
+  for (const st of [404, 503]) {
+    const S = { uid: "u1", token: "t1", entered: true, myDirs: undefined, portraitId: "", portraitName: "" };
+    const ls = r6Storage();
+    ls.setItem("rg_uid", "u1"); ls.setItem("rg_token", "t1");
+    const api = async (m, url) => {
+      if (url === "/api/health") return {};
+      if (url === "/api/paths") return null;
+      if (url === "/api/auth/me") return { uid: "u1", consent_ok: true, entered: true };
+      const e = new Error("x"); e.status = st; throw e;
+    };
+    const fns = r9ProfileFns(S, api, ls, []);
+    const env = r9BootEnv({ S, ls, api, loadPrefs: fns.loadPrefs, ensurePortrait: fns.ensurePortrait });
+    env.start();
+    await env.clock.advance(16000);
+    check(env.done && env.views.length === 1, `资料 ${st}：落页`, J(env.views));
+    check(S.uid === "u1" && S.token === "t1" && ls.getItem("rg_token") === "t1" && env.reloads.length === 0, `资料 ${st}：不清身份`, J(S));
+  }
+}
+
+async function r9RecoveryNoticeEvent() {
+  console.log("=== R9-06 恢复公告绑定 event_id 与会话已见事件 ===");
+  const LOST = "服务器确认原账号数据无法恢复，请重新注册；旧记录不会自动找回。";
+  const RECOVERING = "账号正在恢复，请稍后重试。";
+  const J = JSON.stringify;
+  const notes = (env) => r6Walk(env.$app).filter((n) => String(n.className).split(/\s+/).includes("login-recovery"));
+  const gone = (st) => { const e = new Error("x"); e.status = st; return e; };
+  const runBoot = async (ls, recovery, me) => {
+    const S = me ? { uid: "u1", token: "t1" } : { uid: "", token: "" };
+    const api = async (m, url) => {
+      if (url === "/api/health") return { auth: { wechat_login: false, recovery } };
+      if (url === "/api/paths") return null;
+      if (url === "/api/auth/me") throw gone(me);
+      throw new Error("未预期的请求 " + url);
+    };
+    const env = r9BootEnv({ S, ls, api });
+    env.start();
+    await env.clock.advance(16000);
+    return env;
+  };
+  const login = (ls) => {
+    const v = ls.getItem("rg_recovery_state");
+    const env = l06LoginEnv(v === null ? {} : { recovery: v });
+    env.renderLogin();
+    return env;
+  };
+  // 旧 lost / 旧 recovering 遇新 normal：公告清掉，注册可点
+  for (const old of ["lost", "recovering"]) {
+    const ls = r6Storage();
+    ls.setItem("rg_recovery_state", J({ event_id: "E1", state: old }));
+    await runBoot(ls, { event_id: "", state: "normal" }, 0);
+    check(ls.getItem("rg_recovery_state") === null, `旧 ${old} 遇新 normal：删键`, String(ls.getItem("rg_recovery_state")));
+    const env = login(ls);
+    const rbtn = env.btn("注册并进入");
+    check(notes(env).length === 0 && !!rbtn && rbtn.disabled !== true, `旧 ${old} 遇新 normal：无公告、注册可点`);
+  }
+  // 事件变了：覆盖成新事件并逐字渲染
+  {
+    const ls = r6Storage();
+    ls.setItem("rg_recovery_state", J({ event_id: "E1", state: "lost" }));
+    await runBoot(ls, { event_id: "E2", state: "recovering" }, 0);
+    check(ls.getItem("rg_recovery_state") === J({ event_id: "E2", state: "recovering" }), "不同 event：覆盖", String(ls.getItem("rg_recovery_state")));
+    const env = login(ls);
+    const n = notes(env);
+    check(n.length === 1 && n[0].innerHTML === RECOVERING && env.btn("注册并进入").disabled === true, "不同 event：recovering 逐字、禁注册", n[0] && n[0].innerHTML);
+  }
+  // 旧会话尚未见过本次事故：me 401/410 展示事故公告
+  for (const st of [401, 410]) {
+    const ls = r6Storage();
+    const env0 = await runBoot(ls, { event_id: "E1", state: "lost" }, st);
+    check(env0.reloads.length === 1 && env0.reloads[0][0] === "login", `未见事故 me ${st}：回登录页`, J(env0.reloads));
+    check(ls.getItem("rg_recovery_state") === J({ event_id: "E1", state: "lost" }), `未见事故 me ${st}：写公告`, String(ls.getItem("rg_recovery_state")));
+    const env = login(ls);
+    const n = notes(env);
+    check(n.length === 1 && n[0].innerHTML === LOST && env.btn("注册并进入").parent.hidden === false, `未见事故 me ${st}：lost 逐字、默认注册`, n[0] && n[0].innerHTML);
+  }
+  // 同一事故下新登录：记下已见事件、删公告；之后普通到期不再重挂
+  for (const which of ["登录", "注册并进入"]) {
+    const env = l06LoginEnv({ recovery: J({ event_id: "E1", state: "lost" }) });
+    env.S.auth = { wechat_login: false, recovery: { event_id: "E1", state: "lost" } };
+    env.renderLogin();
+    const btn = env.btn(which);
+    const inputs = btn.parent.children.filter((n) => n.tag === "input");
+    inputs.forEach((n) => { n.value = "xiaobei123"; });
+    if (which === "注册并进入") r6Walk(env.$app).filter((n) => n.type === "checkbox").forEach((n) => { n.checked = true; });
+    await btn.onclick();
+    check(env.localStorage.getItem("rg_seen_event") === "E1", `${which}成功：rg_seen_event=E1`, String(env.localStorage.getItem("rg_seen_event")));
+    check(env.localStorage.getItem("rg_recovery_state") === null, `${which}成功：删 rg_recovery_state`);
+    for (const st of [401, 410]) {
+      const ls = r6Storage();
+      ls.setItem("rg_seen_event", env.localStorage.getItem("rg_seen_event"));
+      await runBoot(ls, { event_id: "E1", state: "lost" }, st);
+      check(ls.getItem("rg_recovery_state") === null, `${which}后新会话 me ${st}：不重挂公告`, String(ls.getItem("rg_recovery_state")));
+      const lenv = login(ls);
+      check(notes(lenv).length === 0, `${which}后新会话 me ${st}：登录页无事故公告`);
+    }
+  }
+  // 旧的纯字符串值当 normal
+  {
+    const env = l06LoginEnv({ recovery: "lost" });
+    env.renderLogin();
+    check(notes(env).length === 0 && env.btn("注册并进入").disabled !== true, "旧纯字符串 lost：当 normal");
   }
 }

@@ -60,3 +60,26 @@ def test_unmounted_nas_blocks_then_recovers(nas, monkeypatch):
 def test_local_dev_without_fc_is_not_blocked(nas, monkeypatch):
     monkeypatch.delenv("FC_FUNCTION_NAME")
     assert store.db_blocked() is None
+
+
+def test_diagnostics_never_create_db_before_mount(nas, monkeypatch):
+    store.init_db()
+    client = TestClient(main.app)
+    body = {"username": "diag_user", "password": "secret-ok", "nickname": "d", "consent": True}
+    for _ in range(2):
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/metrics").status_code == 200
+        assert client.get("/").status_code == 200
+        assert client.get("/static/index.html").status_code == 200
+        r = client.post("/api/auth/register", json=body)
+        assert r.status_code == 503
+        assert r.json() == {"detail": "数据库所在的盘还没挂上，请稍后重试", "code": "db_not_ready"}
+        assert not nas.exists()
+        assert not nas.parent.exists()
+
+    monkeypatch.setattr(store, "_own_mount", lambda path: True)
+    store.init_db()
+    assert store.DB_READY is True
+    assert nas.exists()
+    r = client.post("/api/auth/register", json=body)
+    assert r.status_code == 200, r.text
