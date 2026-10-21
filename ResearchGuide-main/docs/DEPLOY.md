@@ -107,6 +107,7 @@ curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" $PUBLIC_URL/api/admin/stats
 5. 钉钉/企微群机器人：GitHub `secrets.ALERT_WEBHOOK` + `secrets.QIYAN_URL`。工作时间 1 小时内响应。未建群前探活失败只在 Actions 里红。
 6. RAM 子账号：只给张效端 FC/OSS/BSS 只读发布权。未开子账号前不要用主账号 AK 当长期方案。
 7. OSS 备份桶：私有、SSE-OSS、`daily/` 前缀 7 天删除。设 `BACKUP_OSS_BUCKET` 后备份才上云；没设时只写 `BACKUP_DIR`。
+8. 监控：函数上设 `METRICS_TOKEN`（≥ 32 随机字节），本机 `tools/monitoring/` 的 Prometheus + Grafana 用它抓生产 `/metrics`（`start-prometheus.zsh --prod`），告警规则与面板见 `tools/monitoring/README.md`。不设 token 时 `/metrics` 只放行本机。
 8. `/code` 是否只读：登录后 `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $TEST_URL/api/papers/2405.00001`。若 500，设 `ARXIV_CACHE_DIR=/tmp/papers`。论文正文现在进 SQLite `paper_text`（不再依赖随包 JSON）；`ARXIV_CACHE_DIR` 只作本机旧缓存导入。`/tmp` 期间 `ARXIV_CACHE_MAX_BYTES=100MB`。发版后若环境有 `ADMIN_TOKEN`，`deploy_fc.py` 会循环 `POST /api/admin/papers/warm` 直到 `remaining==0` 或 5 次；没有口令则打印「请手动预热」。没有 A5 时每次发版/回收都清库，预热必须幂等。**本轮 NAS 未挂上，不准把生产发版写成已完成。**
 
 ## 恢复（B5）

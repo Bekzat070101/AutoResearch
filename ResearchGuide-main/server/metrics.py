@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 _START = time.time()
+_START_MONO = time.monotonic()
 _LOCK = threading.Lock()
 _REQ: dict[tuple[str, str], int] = {}
 _PATHS: set[str] = set()
@@ -14,9 +15,27 @@ _LAT: list[float] = []
 _PATH_CAP = 200
 _SCRAPE_ERRORS = 0
 _STREAM_ERRORS = 0
+_INFLIGHT = 0
+# 按路由模板的延迟直方图（21-D34）：桶界固定，Grafana 用 histogram_quantile 算 p95；旧的全站 p95 保留为 legacy
+BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 45, 60, 120, 300)
+_HIST: dict[str, list[int]] = {}      # path -> 每个桶的非累计计数（渲染时再累计）
+_HSUM: dict[str, float] = {}
+_HCOUNT: dict[str, int] = {}
+
+
+def process_uptime_seconds() -> float:
+    """进程寿命（单调时钟，墙钟回拨不影响）。health 与 /metrics 共用。"""
+    return max(0.0, time.monotonic() - _START_MONO)
+
+
+def observe_start() -> None:
+    global _INFLIGHT
+    with _LOCK:
+        _INFLIGHT += 1
 
 
 def observe_request(path: str, status: int, seconds: float) -> None:
+    global _INFLIGHT
     code = str(int(status) if status is not None else 0)
     raw = (path or "").split("?")[0][:80].replace("\\", "").replace('"', "") or "/"
     with _LOCK:
@@ -30,6 +49,33 @@ def observe_request(path: str, status: int, seconds: float) -> None:
         _LAT.append(seconds)
         if len(_LAT) > 2000:
             del _LAT[:1000]
+        counts = _HIST.setdefault(raw, [0] * (len(BUCKETS) + 1))
+        i = 0
+        while i < len(BUCKETS) and seconds > BUCKETS[i]:
+            i += 1
+        counts[i] += 1
+        _HSUM[raw] = _HSUM.get(raw, 0.0) + max(0.0, float(seconds))
+        _HCOUNT[raw] = _HCOUNT.get(raw, 0) + 1
+        if _INFLIGHT > 0:
+            _INFLIGHT -= 1
+
+
+def _hist_lines() -> list[str]:
+    with _LOCK:
+        items = [(p, list(c), _HSUM.get(p, 0.0), _HCOUNT.get(p, 0)) for p, c in _HIST.items()]
+    if not items:
+        return []
+    out = ["# HELP qiyan_http_latency_seconds 按路由模板的请求耗时直方图（秒）", "# TYPE qiyan_http_latency_seconds histogram"]
+    for path, counts, total, n in sorted(items):
+        acc = 0
+        for le, c in zip(BUCKETS, counts):
+            acc += c
+            out.append(f'qiyan_http_latency_seconds_bucket{{path="{path}",le="{le}"}} {acc}')
+        acc += counts[-1]
+        out.append(f'qiyan_http_latency_seconds_bucket{{path="{path}",le="+Inf"}} {acc}')
+        out.append(f'qiyan_http_latency_seconds_sum{{path="{path}"}} {total}')
+        out.append(f'qiyan_http_latency_seconds_count{{path="{path}"}} {n}')
+    return out
 
 
 def _req_snapshot() -> dict[tuple[str, str], int]:
@@ -109,9 +155,11 @@ def render() -> str:
     p95 = lats[int(len(lats) * 0.95)] if lats else 0
     lines = [
         _line("qiyan_up", 1, help_="服务进程存活", typ="gauge"),
-        _line("qiyan_process_uptime_seconds", time.time() - _START, help_="进程启动秒数"),
+        _line("qiyan_process_uptime_seconds", process_uptime_seconds(), help_="进程寿命秒数（单调时钟；不等于函数计算实例寿命）"),
         _line("qiyan_db_ephemeral", 1 if store.ephemeral() else 0, help_="1=库在临时盘，实例回收会丢账号"),
+        _line("qiyan_db_ready", 1 if getattr(store, "DB_READY", True) else 0, help_="1=库已初始化可用；0=盘没挂上、接口在回 503"),
         _line("qiyan_llm_enabled", 1 if cfg.get("enabled") else 0, help_="兜底模型是否可用"),
+        _line("qiyan_http_inflight", _INFLIGHT, help_="正在处理的 HTTP 请求数（含还在推的 SSE 流）"),
     ]
     if scrape_ok:
         lines += [
@@ -138,8 +186,9 @@ def render() -> str:
         _line("qiyan_scrape_errors_total", _SCRAPE_ERRORS, help_="刮取失败次数", typ="counter"),
         _line("qiyan_stream_errors_total", _STREAM_ERRORS, help_="SSE 流内 error 次数", typ="counter"),
         _line("qiyan_http_errors_5xx_total", _err_total(), help_="进程内 5xx 累计（等于分路 code>=500 之和）", typ="counter"),
-        _line("qiyan_http_latency_p95_seconds", p95, help_="进程内近 500 次 p95 延迟"),
+        _line("qiyan_http_latency_p95_seconds", p95, help_="legacy：进程内近 500 次全站 p95；按路径请看 qiyan_http_latency_seconds 直方图"),
     ]
+    lines += _hist_lines()
     seen_help = set()
     for (path, status), n in sorted(_req_snapshot().items()):
         name = "qiyan_http_requests_total"

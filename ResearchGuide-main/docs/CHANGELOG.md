@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-19] [FEAT] 监控：本机 Prometheus + Grafana 看启研（tools/monitoring），按路径延迟直方图，告警规则
+
+- 变更内容：照 isse-labs lab4 的做法（不要 Docker，官方二进制放 `.tools/`，运行数据放 `.runtime/`），新建 `tools/monitoring/`：`prometheus.yml`（抓本机 8100）与 `prometheus-prod.yml`（再抓生产，Bearer 读 `.runtime/metrics-token`）、`alerts.yml` 九条规则（抓不到、库没就绪、生产库在临时盘、5xx 比例、注册用户骤降、账号副本过期、刮取错误、SSE 错误、对话 p95）与 `tests/alerts.test.yml`（promtool 单测）、`grafana.ini` + provisioning（数据源 uid `qiyan-prometheus`、仪表盘目录）、`start-prometheus.zsh` / `start-grafana.zsh` / `fetch-tools.zsh`（按 OS/架构下载并校验 sha256，或软链已有的一份）、`smoke_traffic.py`（造一点流量）、README。仪表盘从 `docs/grafana/qiyan-overview.json` 搬到 `tools/monitoring/grafana/dashboards/`，重做成 19 个面板（状态格：进程/持久盘/库就绪/模型/注册/访客/副本用户/副本年龄；请求速率按状态码、在途、5xx 与流错误、p50/p95、按路径 p95、用户数、会话、按路径速率、论文库、刮取错误）。`server/metrics.py`：新增按路由模板的延迟直方图 `qiyan_http_latency_seconds`（21-D34 的桶界）、`qiyan_http_inflight`、`qiyan_db_ready`，`qiyan_process_uptime_seconds` 改单调时钟（21-D38），health `checks.uptime_seconds` 同源；旧全站 p95 保留标 legacy。`server/tests/test_metrics_sync.py` 新增：直方图桶界与路径隔离、在途/就绪/单调寿命、面板与规则引用的指标族都在 `/metrics` 且数据源 uid 一致、有 promtool 就 `check rules` + `test rules`。合入时叠在 PR #22 的 main 上，CHANGELOG 两段都留。
+- 影响文档：docs/CHANGELOG.md、docs/DEPLOY.md、tools/monitoring/README.md、.env.example
+- 影响模块：server/metrics.py、server/main.py、server/tests/test_metrics_sync.py、tools/monitoring/*
+- 决策来源：陈浩文（把 lab4 的监控搬过来）
+- 登记人：陈浩文
+
 ## [2026-10-19] [FIX] 登录可靠性第三批（PR #22）：Codex 第九轮剩余 11 条边界
 
 - 变更内容：接 PR #21。副本与库：登出写 `revoked_sessions` 墓碑（45 天后清），快照带会话吊销与删号墓碑，灌回先合并墓碑再插人/会话，已登出的令牌不会被旧副本灌回来（R9-03）；本地文件写成功即更新新鲜度标记，OSS 旧副本不再越过最新本地提交；OSS 取副本拆成「只取+解密」与「比较+灌回」，10 秒超时后迟到的结果作废（R9-11）；OSS 只有 404 算没有副本，其它错误进 health `last_error`（R9-14）；第一次「进入启研」写 `entered_at` 后触发副本更新（R9-07）；`_conn()` 在盘没挂上时抛 `OSError("db_not_ready")`，`/metrics` 不会在根盘建空库（R9-08），挂载确认后按路径记住、不再每次 stat NAS。登录限频：同用户名失败名额在验密码前原子预约（在途数只记活请求，归零即删），并发 11 个错密码只验 10 个（R9-12）；失败桶 TTL 用实际 `AUTH_SIGNIN_USER_WINDOW`，`AUTH_*` 非正整数启动即拒（R9-13）。发布脚本：远端没显式 `QIYAN_DB` 而本次带 `--db` 时按旧默认库 `server/data/demo.db` 核数、要求 `--migrate-from-backup`（R9-10）。前端：登录/注册/me/同意的 20 秒上限盖住响应正文（R9-04）；启动时 `me` 成功先画页面，prefs/画像/trail 加载 15 秒上限，超时提示「页面资料暂未加载，请刷新重试」，迟到响应不落缓存不导航，资料接口 404/503 不清身份（R9-05）；恢复公告存 `{event_id,state}`，health 回到 normal 即清，登录成功记下已见事件，之后普通到期只显示「登录已失效，请重新登录」（R9-06）。

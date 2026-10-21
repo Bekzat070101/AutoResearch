@@ -1,0 +1,78 @@
+# 告警规则（21-D37 的落地版，按 /metrics 现有指标写）。promtool check rules / test rules 见 tests/alerts.test.yml。
+# 通知通道（钉钉/企微 webhook）由 Alertmanager 接；本仓库先只管「什么情况算坏」。
+groups:
+  - name: qiyan
+    rules:
+      - alert: QiyanDown
+        expr: up{job=~"qiyan.*"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "抓不到 /metrics 已 2 分钟（进程没起来、网络不通或 METRICS_TOKEN 不对）"
+
+      - alert: QiyanDbNotReady
+        expr: qiyan_db_ready == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "库没就绪（NAS 没挂上）：所有 /api/* 在回 503 db_not_ready"
+
+      - alert: QiyanDbEphemeral
+        expr: qiyan_db_ephemeral{env="prod"} == 1
+        labels:
+          severity: page
+        annotations:
+          summary: "生产库在临时盘：实例回收会丢掉全部账号，立刻按 docs/DEPLOY.md 换到 NAS"
+
+      - alert: QiyanHigh5xxRatio
+        expr: >
+          (sum by (job) (rate(qiyan_http_requests_total{code=~"5.."}[10m]))
+            / clamp_min(sum by (job) (rate(qiyan_http_requests_total[10m])), 1e-9) > 0.05)
+          and (sum by (job) (increase(qiyan_http_requests_total[10m])) >= 20)
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "10 分钟内 5xx 比例超过 5%（且请求数 ≥ 20）"
+
+      - alert: QiyanRegisteredUsersDrop
+        expr: >
+          qiyan_users{kind="registered"} < 0.8 * max_over_time(qiyan_users{kind="registered"}[15m])
+          and max_over_time(qiyan_users{kind="registered"}[15m]) >= 10
+        labels:
+          severity: page
+        annotations:
+          summary: "注册用户数比 15 分钟内的峰值少了 20% 以上：像是换了库或库被覆盖（10-18 那种）"
+
+      - alert: QiyanAccountSnapshotStale
+        expr: qiyan_account_snapshot_age_seconds > 259200
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "账号副本 3 天没写过：要么没人登录注册，要么 dump 一直失败（看 health.db.account_store.last_error）"
+
+      - alert: QiyanScrapeErrors
+        expr: increase(qiyan_scrape_errors_total[15m]) > 0
+        labels:
+          severity: warn
+        annotations:
+          summary: "/metrics 读库失败过：库被锁或路径不可用，指标里的用户数等会缺失"
+
+      - alert: QiyanStreamErrors
+        expr: increase(qiyan_stream_errors_total[15m]) > 3
+        labels:
+          severity: warn
+        annotations:
+          summary: "15 分钟内 SSE 流里 error 事件超过 3 次：模型侧在报错"
+
+      - alert: QiyanDialogueSlow
+        expr: >
+          histogram_quantile(0.95, sum by (le) (rate(qiyan_http_latency_seconds_bucket{path=~"/api/dialogue.*"}[30m]))) > 60
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "对话接口 p95 超过 60 秒已 10 分钟"
