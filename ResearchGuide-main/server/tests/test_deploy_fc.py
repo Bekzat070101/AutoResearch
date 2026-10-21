@@ -496,3 +496,18 @@ def test_release_checks_set_or_clear_the_flag_before_deploy():
                                         deploy=lambda: seen.update(env) or "https://t",
                                         check_health=lambda u: {}, record=lambda u: None)
     assert seen["QIYAN_ALLOW_EPHEMERAL"] == "1"
+
+
+def test_allow_ephemeral_production_skips_nas_and_still_records():
+    seen = {}
+    env = {"QIYAN_DB": "/tmp/qiyan.db"}
+    url = fc_safety.production_release_checks(
+        env, "qiyan", True, None,
+        deploy=lambda: seen.update(env) or "https://x",
+        check_health=lambda u: {"db": {"ephemeral": True, "writable": True}},
+        record=lambda u: seen.__setitem__("url", u),
+    )
+    assert url == "https://x"
+    assert seen["QIYAN_ALLOW_EPHEMERAL"] == "1"
+    assert seen["url"] == "https://x"
+    assert seen["QIYAN_DB"] == "/tmp/qiyan.db"

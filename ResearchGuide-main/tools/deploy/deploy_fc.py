@@ -14,7 +14,7 @@ from alibabacloud_tea_openapi.models import Config
 from alibabacloud_tea_util.models import RuntimeOptions
 
 from aliyun_rpc import load_env, rpc
-from fc_safety import (DEFAULT_NAME, DEFAULT_PACKAGE_DB, assert_db_under_nas, assert_health_persistent, is_function_missing, merge_env,
+from fc_safety import (DEFAULT_NAME, DEFAULT_PACKAGE_DB, assert_db_under_nas, is_function_missing, merge_env,
                        nas_mount_dirs, production_release_checks, require_migration)
 from pack_fc import OUT, main as pack
 
@@ -257,13 +257,14 @@ def _deploy(cli: Client, name: str, remote, env_vars: dict[str, str], code) -> s
 
 
 def check_deployed_health(url: str) -> dict:
-    """生产发完必须看到 health.db.ephemeral=false。本函数只读探活，不发版。"""
+    """只读探活。是否要求持久盘由 production_release_checks 按 --allow-ephemeral 决定。"""
     import urllib.request
     req = urllib.request.Request(f"{str(url).rstrip('/')}/api/health")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=45) as resp:
         body = json.loads(resp.read().decode() or "{}")
-    assert_health_persistent(body)
-    print("HEALTH persistent")
+    db = body.get("db") if isinstance(body, dict) else {}
+    print("HEALTH ephemeral", (db or {}).get("ephemeral"), "writable", (db or {}).get("writable"),
+          "blocked", (db or {}).get("blocked"), "build", (body.get("checks") or {}).get("build"))
     return body
 
 

@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-21] [FIX] --allow-ephemeral 发生产不再被 NAS 门挡住
+
+- 变更内容：现网仍是 `/tmp` + 速度优先。`production_release_checks` 在 `--allow-ephemeral` 时不再要求函数已挂 NAS、也不再要求 `health.db.ephemeral=false`，但仍带 `QIYAN_ALLOW_EPHEMERAL=1`，否则 PR #27 守门会让 `/api/*` 全 503。正常发生产（不带开关）规矩不变。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：tools/deploy/fc_safety.py、tools/deploy/deploy_fc.py、server/tests/test_deploy_fc.py
+- 决策来源：上线刚合入的 PR #23–#28，沿用下午的 /tmp 加速
+- 登记人：邬程灿
+
 ## [2026-10-21] [FEAT] 登录邀请码解锁管理员、运营监测面板、逐请求日志
 
 - 变更内容：登录选填邀请码，填对 `ADMIN_TOKEN`（≥32 字节）则该账号升为管理员，之后不用再填；普通注册不需要邀请码。管理员会话可看 `/api/admin/stats` 与侧栏「监测」面板（默认隐藏）。每条 `/api` 请求打一行 JSON（path/method/code/ms/uid）方便 SLS（pytest 多线程场景不打，避免与捕获器锁死）。合入时叠在 PR #23–#27 之上：侧栏文案与「定位/项目」隐藏仍按 PR #26，监测按钮另加一栏；异常路径的 metrics 仍带 `synthetic=`（PR #24 人工学生）。

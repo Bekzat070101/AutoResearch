@@ -120,7 +120,7 @@ def production_release_checks(env_vars: dict[str, str], name: str, allow_ephemer
                               *, deploy, check_health, record):
     """发布门顺序：先定守门开关，生产再核函数 NAS 挂载，再 refuse_unsafe，发完必须有 URL 且 health 持久可写才 record。"""
     apply_ephemeral_flag(env_vars, name, allow_ephemeral)
-    if name == DEFAULT_NAME:
+    if name == DEFAULT_NAME and not allow_ephemeral:
         env_vars["QIYAN_DB"] = assert_db_under_nas(env_vars.get("QIYAN_DB") or "", nas_mount_dirs(cfg))
     refuse_unsafe(env_vars, name, allow_ephemeral)
     url = deploy()
@@ -131,9 +131,10 @@ def production_release_checks(env_vars: dict[str, str], name: str, allow_ephemer
     if not url:
         raise SystemExit("发布未完成：未取得探活地址")
     health = check_health(url)
-    db = health.get("db") if isinstance(health, dict) else None
-    if not isinstance(db, dict) or db.get("ephemeral") is not False or db.get("writable") is not True:
-        raise SystemExit("发布未完成：health.db 不是 ephemeral=false 且 writable=true")
+    if not allow_ephemeral:
+        db = health.get("db") if isinstance(health, dict) else None
+        if not isinstance(db, dict) or db.get("ephemeral") is not False or db.get("writable") is not True:
+            raise SystemExit("发布未完成：health.db 不是 ephemeral=false 且 writable=true")
     record(url)
     return url
 
