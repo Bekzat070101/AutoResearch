@@ -383,15 +383,15 @@ def judge(slot: dict[str, Any], answer: str, paper: dict[str, Any], station: dic
         if loc["found"] and _is_paper_title(ans, paper, loc):
             ok, note = False, "这是标题，不是主张原句"
         else:
-            ok, note = loc["found"], ("已定位" if loc["found"] else (loc.get("reason") or f"这句不在「{station['label']}」"))
+            ok, note = loc["found"], ("引文和原文对上了" if loc["found"] else (loc.get("reason") or f"这句不在「{station['label']}」"))
     elif typ == "number":
         if not NUM_RE.search(ans):
             return {"pass": False, "note": "表格里的字核对不了，选正文句子", "where": station["label"], "at": None}
         loc = quotes.locate(ans, paper, within=within)
-        ok, note = loc["found"], ("已定位" if loc["found"] else (loc.get("reason") or "选正文里带数字的句子"))
+        ok, note = loc["found"], ("引文和原文对上了" if loc["found"] else (loc.get("reason") or "选正文里带数字的句子"))
     elif typ == "limitation":
         loc = reading.check_limitation(ans, paper)
-        ok, note = loc.get("pass"), ("已定位" if loc.get("pass") else loc.get("reason", "局限要从局限 / 讨论段引"))
+        ok, note = loc.get("pass"), ("引文和原文对上了" if loc.get("pass") else loc.get("reason", "局限要从局限 / 讨论段引"))
     else:
         ok, note = reading._check_own(ans, paper, slot.get("field") or "理解")
         body = paper.get("text") or ""
@@ -493,7 +493,7 @@ def grade(uid: str, slot: dict[str, Any], ans: str, paper: dict[str, Any], stati
     return _valid_grade(data, len(crit), anchor_text, station)
 
 
-def public(state: dict[str, Any]) -> dict[str, Any]:
+def public(state: dict[str, Any], ready: bool | None = None) -> dict[str, Any]:
     voices = {s.get("voice") for s in state.get("slots") or []}
     voice = "mixed" if voices == {"llm", "rules"} else ("llm" if voices == {"llm"} else "rules")
     hide = {"anchor", "criteria"}
@@ -512,10 +512,14 @@ def public(state: dict[str, Any]) -> dict[str, Any]:
         notice.append("只拿到摘要")
     if state.get("status") == "stale":
         notice.append("原文变了，请重开")
-    if state.get("rules_fallback"):
-        notice.append("模型额度用完，后面是规则题")
-    if any(s.get("status") == "pending" for s in state.get("slots") or []):
-        notice.append("模型暂时用不了：作答先存着，稍后可重判")
+    if state.get("rules_fallback") and ready is not True:
+        if state.get("rules_fallback_reason") == "quota":
+            notice.append("今天的模型额度用完了，后面的题由固定题库出")
+        else:
+            notice.append("模型刚才没响应，后面的题由固定题库出")
+    n = sum(1 for s in state.get("slots") or [] if s.get("status") == "pending")
+    if n:
+        notice.append(f"有 {n} 题已保存，等模型恢复后判分")
     return {
         "status": state.get("status"), "rev": state.get("rev", 0),
         "voice": voice, "notice": "；".join(notice),
@@ -555,8 +559,10 @@ def _fill_station(uid: str, paper: dict[str, Any], state: dict[str, Any], st_key
         state["model_calls"] = state.get("model_calls", 0) + 1
         if not any(i.get("voice") == "llm" for i in items):
             state["rules_fallback"] = True
+            state["rules_fallback_reason"] = "model" if llm.ready(uid) else "quota"
     elif not llm.ready(uid) and state.get("model_calls", 0):
         state["rules_fallback"] = True
+        state["rules_fallback_reason"] = "model" if llm.ready(uid) else "quota"
     state.setdefault("slots", []).extend(items)
 
 
@@ -582,9 +588,9 @@ def start(uid: str, kit_id: str, aid: str, restart: bool = False) -> dict[str, A
         if st.get("paper_sha") and st.get("paper_sha") != paper_sha(paper):
             st["status"] = "stale"
             store.save_tutor(uid, kit_id, aid, "stale", st, None)
-            return public(st)
+            return public(st, ready=llm.ready(uid))
         if row.get("status") in ("active", "read", "stale", "done"):
-            return public(st)
+            return public(st, ready=llm.ready(uid))
     if not row and not llm.ready(uid):
         raise TutorError("现在用不了模型（没配 / 没同意隐私说明 / 今天额度用完），先写阅读卡")
     inherit = row["state"] if row else {}
@@ -594,12 +600,12 @@ def start(uid: str, kit_id: str, aid: str, restart: bool = False) -> dict[str, A
     if restart and inherit:
         state["rev"] = int(inherit.get("rev") or 1) + 1
     store.save_tutor(uid, kit_id, aid, state["status"], state, None)
-    return public(state)
+    return public(state, ready=llm.ready(uid))
 
 
 def get(uid: str, kit_id: str, aid: str) -> dict[str, Any] | None:
     row = store.get_tutor(uid, kit_id, aid)
-    return public(row["state"]) if row else None
+    return public(row["state"], ready=llm.ready(uid)) if row else None
 
 
 def _verdict_of(sl: dict[str, Any], st: dict[str, Any], *, hard: bool = False) -> dict[str, Any]:
@@ -623,7 +629,7 @@ def turn(uid: str, kit_id: str, aid: str, qid: str, answer: str = "", skip: bool
         state["status"] = "stale"
         store.save_tutor(uid, kit_id, aid, "stale", state, None)
         return {"verdict": {"pass": False, "state": "fail", "hard": False, "note": "原文变了，请重开",
-                            "where": "", "missing": [], "feedback": ""}, "session": public(state)}
+                            "where": "", "missing": [], "feedback": ""}, "session": public(state, ready=llm.ready(uid))}
     if state.get("rev") != rev:
         raise TutorConflict("这题已经答过了，刷新")
     slots = state["slots"]
@@ -681,7 +687,7 @@ def turn(uid: str, kit_id: str, aid: str, qid: str, answer: str = "", skip: bool
         if not store.save_tutor(uid, kit_id, aid, state["status"], state, rev):
             raise TutorConflict("这题已经答过了，刷新")
         return {"verdict": {**_verdict_of(sl, st, hard=True), "pass": False, "state": "fail",
-                            "note": verd["note"]}, "session": public(state)}
+                            "note": verd["note"]}, "session": public(state, ready=llm.ready(uid))}
     if verd.get("hard_pass"):
         sl["status"] = "pass"
         sl["answer"] = ans
@@ -722,7 +728,7 @@ def turn(uid: str, kit_id: str, aid: str, qid: str, answer: str = "", skip: bool
     state["rev"] = state.get("rev", 1) + 1
     if not store.save_tutor(uid, kit_id, aid, state["status"], state, rev):
         raise TutorConflict("这题已经答过了，刷新")
-    return {"verdict": _verdict_of(sl, st, hard=False), "session": public(state)}
+    return {"verdict": _verdict_of(sl, st, hard=False), "session": public(state, ready=llm.ready(uid))}
 
 
 def _advance(uid: str, kit_id: str, aid: str, paper: dict[str, Any], state: dict[str, Any],
@@ -739,7 +745,7 @@ def _advance(uid: str, kit_id: str, aid: str, paper: dict[str, Any], state: dict
     state["rev"] = state.get("rev", 1) + 1
     if not store.save_tutor(uid, kit_id, aid, state["status"], state, rev):
         raise TutorConflict("这题已经答过了，刷新")
-    return {"verdict": _verdict_of(sl, st, hard=hard), "session": public(state)}
+    return {"verdict": _verdict_of(sl, st, hard=hard), "session": public(state, ready=llm.ready(uid))}
 
 
 def finish(uid: str, kit_id: str, aid: str) -> dict[str, Any]:
@@ -765,4 +771,4 @@ def finish(uid: str, kit_id: str, aid: str) -> dict[str, Any]:
     state["status"] = "done"
     state["rev"] = state.get("rev", 1) + 1
     store.save_tutor(uid, kit_id, aid, "done", state, None)
-    return {"prefill": prefill, "from": source, "review": review, "missing": missing, "session": public(state)}
+    return {"prefill": prefill, "from": source, "review": review, "missing": missing, "session": public(state, ready=llm.ready(uid))}

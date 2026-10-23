@@ -266,6 +266,7 @@ function paperHarness(cfg = {}) {
   let stopPaperSpy = null;
   let paperRenderEpoch = 0;
   eval(extract("stale"));
+  eval(extract("splitZhTitle"));
   eval(extract("tutorPanel"));
   eval(extract("render"));
   const at0 = src.search(/async\s+function\s+renderCard\s*\(/);
@@ -276,7 +277,7 @@ function paperHarness(cfg = {}) {
     const toolBar = walk($app).find((c) => sel(c, ".paper-tools"));
     const chips = walk($app).filter((c) => sel(c, ".sec-chip"));
     const node = (t) => pane.children.find((c) => c.tagName === "H4" && c.textContent.trim() === t);
-    const stationBtn = walk($app).find((c) => c.tagName === "BUTTON" && c.textContent === "跳到本节");
+    const stationBtn = walk($app).find((c) => c.tagName === "BUTTON" && c.textContent === "看原文这一节");
     return { pane, toolBar, chips, node, stationBtn };
   };
   return { made, raf, flush, fire, window, sel, $app, S, render, renderCard, live, scrolls, nav, tutorReply, getStopPaperSpy: () => stopPaperSpy };
@@ -296,7 +297,7 @@ async function testPaperScrollTargets() {
   };
   const entries = (v) => [
     ["章节「方法」", () => v.chips.find((c) => c.textContent === "方法").onclick()],
-    ["带读「跳到本节」", () => v.stationBtn.onclick()],
+    ["带读「看原文这一节」", () => v.stationBtn.onclick()],
   ];
 
   let v = null;
@@ -304,7 +305,7 @@ async function testPaperScrollTargets() {
     window.innerWidth = w;
     window.scrollY = 0;
     v = await mount();
-    check(!!v.stationBtn, `${w}px 带读有「跳到本节」`);
+    check(!!v.stationBtn, `${w}px 带读有「看原文这一节」`);
     for (const [name, act] of entries(v)) {
       window.scrollY = 0;
       v.pane.scrollTop = 0;
@@ -432,7 +433,7 @@ async function testShortDesktopPaperSpy() {
       check(tops.join(",") === "240,324,408", `${tag} 章节坐标`, tops.join(","));
       const lit = v.chips.filter((c) => c.classList.contains("on"));
       check(lit.length === 1 && lit[0].textContent === "摘要", `${tag} 初次只亮「摘要」`, lit.map((c) => c.textContent).join(","));
-      check(!!v.stationBtn, `${tag} 带读有「跳到本节」`);
+      check(!!v.stationBtn, `${tag} 带读有「看原文这一节」`);
       v.chips.find((c) => c.textContent === "方法").onclick();
       if (v.stationBtn) v.stationBtn.onclick();
       check(scrolls.pane.length === 2 && scrolls.pane.every((t) => t === 76), `${tag} 两处跳转都按原文框滚到 76`, JSON.stringify(scrolls.pane));
@@ -507,10 +508,11 @@ async function testResumeTutorWithoutModel() {
   check(!!v.btn && v.btn.disabled === false, "有会话没模型：「带读答题」可点");
   check(!!v.bench && v.bench.dataset.mode === "tutor", "有会话没模型：进带读", v.bench && v.bench.dataset.mode);
   const prog = v.panel && walk(v.panel).find((c) => (c.className || "").split(/\s+/).includes("tutor-prog"));
-  check(!!prog && prog.textContent === "4/8", "有会话没模型：进度 4/8", prog && prog.textContent);
+  check(!!prog && prog.textContent === "第 5 题 / 共 8 题", "有会话没模型：进度 第 5 题 / 共 8 题", prog && prog.textContent);
   const notice = v.panel && walk(v.panel).find((c) => (c.className || "").split(/\s+/).includes("tutor-notice"));
   check(!!notice && notice.textContent === "模型暂时用不了：可以看题、改答案、存草稿；现在作答会先存着，模型恢复后点「重判」。", "有会话没模型：显示模型不可用提示", notice && notice.textContent);
-  check(!!v.panel && walk(v.panel).some((c) => c.tagName === "BUTTON" && c.textContent === "重判"), "有会话没模型：有「重判」");
+  check(!!v.panel && !walk(v.panel).some((c) => c.tagName === "BUTTON" && c.textContent === "现在重判"), "有会话没模型：不给「现在重判」");
+  check(!!v.panel && walk(v.panel).some((c) => (c.className || "").split(/\s+/).includes("tutor-pending") && /已保存，等模型恢复后判分/.test(c.textContent)), "有会话没模型：待判行写「已保存，等模型恢复后判分」");
 
   v = await run({ session: null, can_grade: false, in_kit: true });
   check(!!v.btn && v.btn.disabled === true, "没会话没模型：「带读答题」禁用");
@@ -521,7 +523,54 @@ async function testResumeTutorWithoutModel() {
   check(!!v.btn && v.btn.disabled === false, "没会话有模型：「带读答题」可点");
 }
 
-testPaperScrollTargets().then(testPaperSpyRetryRace).then(testShortDesktopPaperSpy).then(testTutorDraftPersistsAcrossRerender).then(testResumeTutorWithoutModel).then(() => {
+async function testLastVerdictStrip() {
+  const quoteSlot = { qid: "q_claim_quote", type: "find_quote", question: "引一句", status: "pass", last: "x" };
+  const baseSess = () => ({ status: "active", rev: 1, cur: 1, total: 8, stations: [], slots: [{ ...quoteSlot }, { qid: "q_problem", type: "own", question: "要解决什么问题", status: "open" }, { qid: "q_next", type: "own", question: "下一题", status: "open" }] });
+  const build = () => tutorPanel({
+    aid: "2009.03300", kitId: "k_last",
+    scrollTo() {}, selection() { return ""; },
+    onPrefill() { return []; },
+    session: baseSess(),
+  });
+  const realApi = api;
+  const answer = async (reply) => {
+    api = () => Promise.resolve(reply);
+    const b = build();
+    const ta = walk(b).find((c) => c.tagName === "TEXTAREA");
+    ta.value = "我的作答";
+    const sendBtn = walk(b).find((c) => c.tagName === "BUTTON" && c.textContent === "作答" && typeof c.onclick === "function");
+    await sendBtn.onclick();
+    api = realApi;
+    return b;
+  };
+  const stripOf = (b) => byClass(b, "tutor-last")[0];
+  const btnOf = (r, t) => r && walk(r).find((c) => c.tagName === "BUTTON" && c.textContent === t);
+
+  const passed = baseSess();
+  passed.cur = 2;
+  passed.slots[1] = { ...passed.slots[1], status: "pass", last: "我的作答", feedback: "引得准" };
+  const b1 = await answer({ verdict: { pass: true, state: "pass", feedback: "引得准" }, session: passed });
+  const strip = stripOf(b1);
+  const sp = strip && walk(strip).find((c) => c.tagName === "P");
+  check(!!sp && sp.textContent === "上一题 ✓ 通过：引得准", "交题后顶部显示「上一题 ✓ 通过：引得准」", sp && sp.textContent);
+  check(!!btnOf(strip, "看判语") && !!btnOf(strip, "知道了"), "上一题条有「看判语」「知道了」");
+  const prog = byClass(b1, "tutor-prog")[0];
+  check(!!prog && prog.textContent === "第 3 题 / 共 8 题", "通过后进度 第 3 题 / 共 8 题", prog && prog.textContent);
+  btnOf(strip, "看判语").onclick();
+  check(!stripOf(b1), "点「看判语」后上一题条消失");
+  const fb = byClass(b1, "tutor-verdict")[0];
+  check(!!fb && fb.textContent === "引得准", "点「看判语」后显示上一题判语", fb && fb.textContent);
+
+  const pend = baseSess();
+  pend.cur = 2;
+  pend.slots[1] = { ...pend.slots[1], status: "pending", last: "我的作答", note: "模型暂时用不了：作答先存着，稍后可重判" };
+  const b2 = await answer({ verdict: { pass: false, state: "pending", note: "模型暂时用不了：作答先存着，稍后可重判" }, session: pend });
+  const strip2 = stripOf(b2);
+  const sp2 = strip2 && walk(strip2).find((c) => c.tagName === "P");
+  check(!!sp2 && sp2.textContent === "上一题已保存，等模型恢复后判分", "待判时顶部显示「上一题已保存，等模型恢复后判分」", sp2 && sp2.textContent);
+}
+
+testPaperScrollTargets().then(testPaperSpyRetryRace).then(testShortDesktopPaperSpy).then(testTutorDraftPersistsAcrossRerender).then(testResumeTutorWithoutModel).then(testLastVerdictStrip).then(() => {
   if (fails) {
     console.log("失败 " + fails + " 项");
     process.exit(1);

@@ -128,7 +128,8 @@ const ChatView = (() => {
       go.type = "button";
       go.onclick = () => enterApp();
       bar.appendChild(go);
-      bar.appendChild(el("span", "form-note", "不必聊完才能使用；信息较少时会先提醒你。"));
+      const read = el("button", "btn ghost", "直接去读论文"); read.type = "button"; read.onclick = () => enterApp("read"); bar.appendChild(read);
+      bar.appendChild(el("span", "form-note", "不用聊完，随时可以进去。"));
       head.appendChild(bar);
     }
     return head;

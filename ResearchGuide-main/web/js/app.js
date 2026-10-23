@@ -368,6 +368,7 @@ function setView(name) {
   if (dirChip) dirChip.hidden = !S.entered;
   $nav.hidden = !inApp || !S.entered;
   $header.hidden = !inApp;
+  const foot = document.querySelector(".site-footer"); if (foot) foot.hidden = !inApp;  // 首页、登录页不放页脚（Haiku 面板 8/8 看不懂）
   paintChrome();
   render();
   window.scrollTo({ top: 0 });
@@ -1591,6 +1592,7 @@ function consentRow() {
   read.type = "button";
   read.onclick = (e) => { e.preventDefault(); openPrivacy(false); };
   row.append(box, document.createTextNode("我读过"), read, document.createTextNode("，同意按这个方式保存我的记录"));
+  row.appendChild(el("span", "consent-brief", "勾上后会保存你在这里写的答案和聊天，下次能接着来；不存手机号；随时可在「我的」删号。"));
   return { row, ok: () => box.checked };
 }
 
@@ -1712,6 +1714,7 @@ function parkCurrent(owner) {
 
 function renderLogin() {
   $nav.hidden = true; $header.hidden = true;
+  const foot = document.querySelector(".site-footer"); if (foot) foot.hidden = true;
   $app.innerHTML = "";
   stopWxPoll();
   const binding = !!(S.uid && S.guest);  // 访客来绑微信：start 时带着访客会话，记录跟着走
@@ -1733,7 +1736,8 @@ function renderLogin() {
   hero.appendChild(el("h2", "", binding ? "绑定微信" : "登录"));
   hero.appendChild(el("p", "hero-lead", binding
     ? "绑定后换设备、清了浏览器也能接着用，访客期间的记录都会带过去。"
-    : "换手机、清了浏览器也能接着用。微信不用密码、不要手机号；没有微信的设备用用户名和密码。"));
+    : wxOn ? "换手机、清了浏览器也能接着用。微信不用密码、不要手机号；没有微信的设备用用户名和密码。"
+    : "启研是本科生读论文、答题、找方向的入门练习。用用户名和密码登录；没有账号点「注册」；只想先看看，点「以访客进入」。"));
   const consent = consentRow();
   const need = () => { if (consent.ok()) return true; toast("先勾选同意隐私说明"); return false; };
   const onEnter = (btn) => (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); };
@@ -1759,6 +1763,7 @@ function renderLogin() {
   spass.setAttribute("aria-label", "密码");
   const sinv = el("input"); sinv.type = "password"; sinv.placeholder = "邀请码（选填，管理员填）"; sinv.maxLength = 128;
   sinv.setAttribute("aria-label", "邀请码");
+  sinv.hidden = true;
   const sbtn = el("button", "btn", "登录");
   sbtn.type = "button";
   sbtn.onclick = async () => {
@@ -1797,6 +1802,9 @@ function renderLogin() {
   spass.addEventListener("keydown", onEnter(sbtn));
   sinv.addEventListener("keydown", onEnter(sbtn));
   signinStep.append(suser, sinv, spass, sbtn);
+  const adm = el("button", "linkish login-admin", "管理员入口"); adm.type = "button";
+  adm.onclick = () => { sinv.hidden = false; adm.hidden = true; link.hidden = false; sinv.focus(); };
+  signinStep.appendChild(adm);
 
   const registerStep = el("div", "login-step login-body");
   const ruser = el("input"); ruser.placeholder = "用户名，例如 xiaobei（2–24 个字母、数字、下划线）"; ruser.autocomplete = "username"; ruser.maxLength = 24;
@@ -1882,19 +1890,19 @@ function renderLogin() {
     hero.append(consent.row, wxStep);
   } else {
     guestBox.hidden = true;
-    if (!wxOn) hero.appendChild(el("p", "login-note", "微信登录还没开通：用用户名密码，或先以访客进入。"));
     hero.append(consent.row, tabs, wxStep, signinStep, registerStep, guestBox);
     paint();
   }
 
   const links = el("div", "hero-links");
   if (!binding) {
-    const asGuest = el("button", "linkish", "先不登录，以访客进入");
+    const asGuest = el("button", "linkish", "以访客进入（不注册；换设备或清了浏览器就找不回）");
     asGuest.type = "button";
     asGuest.onclick = () => { guestBox.hidden = false; asGuest.remove(); gname.focus(); };
     links.appendChild(asGuest);
   }
   const link = el("button", "linkish", "服务器共用模型（管理员）");
+  link.hidden = true;
   link.type = "button";
   link.onclick = () => openConnect();
   const back = el("button", "linkish", binding ? "返回" : "返回首页");
@@ -4721,16 +4729,16 @@ async function renderToday() {
   const wrap = el("div", "stagger");
   wrap.appendChild(workspaceHead("今日", "打开就看这一件。"));
   const status = el("div", "status-chips");
-  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没选方向"));
+  if (field) status.appendChild(el("span", "status-chip on", esc(dirTitle(saved.dir, field))));
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
   if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
   wrap.appendChild(status);
   const confirmed = facts.filter((f) => f.status === "confirmed" || f.status === "active").length;
   const steps = [
-    { label: "聊过", done: !!talked, view: "dialogue" },
-    { label: "我的", done: !!talked && drafts === 0 && confirmed > 0, view: "me" },
-    { label: "方向", done: !!field, view: "cards" },
-    { label: "这一步", done: doneTasks > 0, view: "workbench" },
+    { label: "聊过了", done: !!talked, view: "dialogue" },
+    { label: "填了资料", done: !!talked && drafts === 0 && confirmed > 0, view: "me" },
+    { label: "选了方向", done: !!field, view: "cards" },
+    { label: "今天这一步", done: doneTasks > 0, view: "workbench" },
   ];
   wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));
   const ruleCard = el("div", "nba-card");
@@ -4753,12 +4761,14 @@ async function renderToday() {
   else {
     const slot = el("div", "today-papers panel daily", '<p class="panel-sub">正在取最近的新论文…</p>');
     wrap.appendChild(slot);
-    const next = el("p", "today-next", `继续：${esc(title)} `);
-    const more = el("button", "linkish", esc(primary.label));
-    more.type = "button";
-    more.onclick = primary.run;
-    next.appendChild(more);
-    wrap.appendChild(next);
+    if (field) {
+      const next = el("p", "today-next", `继续：${esc(title)} `);
+      const more = el("button", "linkish", esc(primary.label));
+      more.type = "button";
+      more.onclick = primary.run;
+      next.appendChild(more);
+      wrap.appendChild(next);
+    }
     dailyBlock(seq).then((box) => { if (!stale(seq)) slot.replaceWith(box); });
   }
   $app.appendChild(wrap);
@@ -4767,12 +4777,16 @@ async function renderToday() {
 /* ---------- 研读：工具包 / 阅读卡 / 矩阵（docs/DESIGN_PROPOSAL.md §1C） ---------- */
 
 const DEFAULT_KIT = "llm-eval";
+
+function splitZhTitle(t) {
+  return { zh: String(t || "").replace(/[（(]机器待核[）)]\s*$/, "").trim(), unverified: /机器待核/.test(String(t || "")) };
+}
 const DIR_LABEL = { up: "↑ 提升", down: "↓ 下降 / 失效", mixed: "~ 有好有坏", none: "? 没报告" };
 
 function readTabs(active) {
   document.body.dataset.readTab = active || "kit";
   const nav = el("nav", "ws-tabs");
-  [["kit", "工具包"], ["cards", "阅读卡"], ["matrix", "矩阵"]].forEach(([key, label]) => {
+  [["kit", "推荐论文"], ["cards", "我的阅读卡"], ["matrix", "对比表"]].forEach(([key, label]) => {
     const b = el("button", `ws-tab${key === active ? " on" : ""}`, label);
     b.type = "button";
     b.onclick = () => { S.readTab = key; setView("read"); };
@@ -4854,7 +4868,7 @@ async function renderRead() {
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
   const q = el("input");
-  q.placeholder = "搜论文（arXiv 只认英文关键词）";
+  q.placeholder = "搜论文（英文关键词）";
   q.name = "q";
   const goSearch = el("button", "btn small", "搜索");
   goSearch.type = "submit";
@@ -4912,6 +4926,7 @@ async function renderRead() {
   const leftPane = el("section", "read-pane");
   const leftHead = el("div", "read-pane-head");
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
+  leftHead.appendChild(el("p", "panel-sub", "点「带读答题」：AI 按节出 8 道题，你边读原文边答，它判对错、给提示。"));
   if (passed > 0) leftHead.appendChild(el("small", "", `已完成 ${passed} 张阅读卡`));
   const leftBody = el("div", "read-pane-body");
   const recPapers = catalog.length ? catalog.map((p, i) => ({
@@ -4933,7 +4948,7 @@ async function renderRead() {
       leftBody.appendChild(back);
     }
     if (!papers.length) {
-      leftBody.appendChild(el("p", "panel-sub", "没有结果。arXiv 只认英文关键词。"));
+      leftBody.appendChild(el("p", "panel-sub", "没有结果。arXiv 只认英文。"));
       return;
     }
     const list = el("ol", "kit-papers");
@@ -4948,11 +4963,17 @@ async function renderRead() {
       const main = el("div", "kp-main");
       const kitForCard = fromSearch ? (p.card_kit || "") : (p.card_kit || (!catalog.length && kit.id) || "");
       const title = el("button", "linkish");
-      title.textContent = p.title_zh || p.title;
+      const zt = splitZhTitle(p.title_zh);
+      title.textContent = zt.zh || p.title;
       title.type = "button";
       title.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       main.appendChild(el("span", "kp-n", String(p.order || i + 1)));
       main.appendChild(title);
+      if (zt.unverified) {
+        const flag = el("i", "kp-flag", "译名待校");
+        flag.title = "中文译名由机器生成，还没人工核对";
+        main.appendChild(flag);
+      }
       if (p.title_zh) {
         const en = el("p", "kp-en");
         en.textContent = p.title;
@@ -4968,7 +4989,7 @@ async function renderRead() {
         main.appendChild(kws);
       }
       if (p.lib === "html" || p.lib === "abstract") {
-        const badge = el("i", "kp-lib", p.lib === "html" ? "库内" : "只有摘要");
+        const badge = el("i", "kp-lib", p.lib === "html" ? "有全文" : "只有摘要");
         main.appendChild(badge);
       }
       if (c) {
@@ -4979,6 +5000,7 @@ async function renderRead() {
       li.appendChild(main);
       const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "带读答题" : "打开"));
       const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
+      if (goLabel === "带读答题") go.title = "AI 按节出 8 道题，你边读原文边答，它判对错";
       go.type = "button";
       go.onclick = () => { S.cardFrom = "read"; openCard(aid, kitForCard); };
       li.appendChild(go);
@@ -5014,7 +5036,7 @@ async function renderRead() {
     ev.preventDefault();
     const term = q.value.trim();
     if (!term) return;
-    if (/[\u4e00-\u9fff]/.test(term)) { toast("arXiv 只认英文关键词"); return; }
+    if (/[\u4e00-\u9fff]/.test(term)) { toast("arXiv 只认英文"); return; }
     try {
       const r = await api("GET", `/api/papers/search?q=${encodeURIComponent(term)}&uid=${S.uid}`);
       paintPapers(r.items || [], true);
@@ -5184,6 +5206,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
   let draft = {}; try { draft = JSON.parse(localStorage.getItem(draftKey) || "{}") || {}; } catch (_) { draft = {}; }
   const saveDraft = () => { try { const keep = Object.fromEntries(Object.entries(draft).filter(([, v]) => String(v || "").trim())); if (Object.keys(keep).length) localStorage.setItem(draftKey, JSON.stringify(keep)); else localStorage.removeItem(draftKey); } catch (_) { /* 存不了就只留在内存 */ } };
   let focusQid = null;
+  let last = null;
   const paint = () => {
     box.innerHTML = "";
     if (!sess) {
@@ -5196,11 +5219,8 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
       return;
     }
     const head = el("div", "tutor-head");
-    const voice = el("span", "tutor-voice");
-    voice.textContent = sess.voice === "llm" ? "模型出题" : sess.voice === "mixed" ? "模型出题 / 规则版" : "规则版";
-    head.appendChild(voice);
     const prog = el("span", "tutor-prog");
-    prog.textContent = `${sess.cur || 0}/${sess.total || 0}`;
+    prog.textContent = `第 ${Math.min((sess.cur || 0) + 1, sess.total || 0)} 题 / 共 ${sess.total || 0} 题`;
     head.appendChild(prog);
     box.appendChild(head);
     if (canGrade === false) {
@@ -5208,22 +5228,40 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
       off.textContent = "模型暂时用不了：可以看题、改答案、存草稿；现在作答会先存着，模型恢复后点「重判」。";
       box.appendChild(off);
     }
+    const slots = sess.slots || [];
+    const cur = sess.cur || 0;
+    const sl = (focusQid && slots.find((s) => s.qid === focusQid)) || slots[cur];
+    if (last && sl && last.qid !== sl.qid) {
+      const strip = el("div", "tutor-last");
+      const lp = el("p");
+      lp.textContent = last.status === "pass" ? "上一题 ✓ 通过" + (last.feedback ? `：${last.feedback}` : "")
+        : last.status === "pending" ? "上一题已保存，等模型恢复后判分"
+        : last.status === "skipped" ? "上一题已跳过"
+        : "上一题：" + last.feedback;
+      strip.appendChild(lp);
+      const look = el("button", "linkish", "看判语");
+      look.type = "button";
+      look.onclick = () => { focusQid = last.qid; paint(); };
+      const ok = el("button", "linkish", "知道了");
+      ok.type = "button";
+      ok.onclick = () => { last = null; paint(); };
+      strip.append(look, ok);
+      box.appendChild(strip);
+    }
     if (sess.notice) {
       const n = el("p", "tutor-notice");
       n.textContent = sess.notice;
       box.appendChild(n);
     }
-    const slots = sess.slots || [];
-    const cur = sess.cur || 0;
-    const sl = (focusQid && slots.find((s) => s.qid === focusQid)) || slots[cur];
     const followups = slots.filter((s) => s.status === "pending" || s.status === "retry");
     const paintFollowups = () => {
       followups.forEach((s) => {
         if (sl && s.qid === sl.qid) return;
         const row = el("p", "tutor-pending");
-        row.textContent = s.status === "pending" ? `这题稍后再判：${s.question || s.qid}` : `再改一改：${s.question || s.qid}`;
-        if (s.status === "pending") {
-          const rg = el("button", "linkish", "重判");
+        const idx = slots.indexOf(s);
+        row.textContent = s.status === "pending" ? `第 ${idx + 1} 题「${s.question || s.qid}」已保存，等模型恢复后判分` : `第 ${idx + 1} 题「${s.question || s.qid}」要再改一改`;
+        if (s.status === "pending" && canGrade !== false) {
+          const rg = el("button", "linkish", "现在重判");
           rg.type = "button";
           rg.onclick = () => turnTutor(s.qid, s.last || "", false, true);
           row.appendChild(rg);
@@ -5331,14 +5369,14 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
     }
     const st = (sess.stations || []).find((x) => x.key === sl.station);
     if (st && scrollTo) {
-      const jump = el("button", "linkish", `跳到本节`);
+      const jump = el("button", "linkish", "看原文这一节");
       jump.type = "button";
       jump.onclick = () => scrollTo(st.heading || st.label, st.start);
       box.appendChild(jump);
     }
     if (sl.status === "pending") {
       const pend = el("p", "tutor-pending");
-      pend.textContent = "这题稍后再判";
+      pend.textContent = "这题已保存，等模型恢复后判分";
       box.appendChild(pend);
     }
     if (sl.feedback || sl.note) {
@@ -5378,6 +5416,8 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
         uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0, regrade: !!regrade,
       });
       sess = out.session;
+      const answered = (sess.slots || []).find((s) => s.qid === qid);
+      last = out.verdict && answered ? { qid, question: answered.question || "", status: answered.status, feedback: out.verdict.feedback || out.verdict.note || "" } : null;
       const done = (sess.slots || []).find((s) => s.qid === qid);
       if (done && ["pass", "pending", "skipped"].includes(done.status)) { delete draft[qid]; saveDraft(); }
       if (focusQid) {
@@ -5478,12 +5518,17 @@ async function renderCard() {
   head.appendChild(back);
   const kitP = (kit.papers || []).find((p) => p.arxiv_id === aid);
   const titleZh = paper.title_zh || (kitP && kitP.title_zh) || "";
-  const zhNote = /（[^（）]*）\s*$/.exec(titleZh);
-  const zhTitle = zhNote ? titleZh.slice(0, zhNote.index).trim() : titleZh;
+  const zt = splitZhTitle(titleZh);
+  const zhTitle = zt.zh;
   if (zhTitle) {
     const h2 = el("h2");
     h2.textContent = zhTitle;
     head.appendChild(h2);
+    if (zt.unverified) {
+      const flag = el("i", "kp-flag", "译名待校");
+      flag.title = "中文译名由机器生成，还没人工核对";
+      head.appendChild(flag);
+    }
     const en = el("p", "paper-en");
     en.textContent = paper.title;
     head.appendChild(en);
@@ -5505,11 +5550,6 @@ async function renderCard() {
     status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a>`));
   }
   status.appendChild(el("span", "", absNote));
-  if (zhNote) {
-    const noteSpan = el("span");
-    noteSpan.textContent = zhNote[0].replace(/^（|）$/g, "");
-    status.appendChild(noteSpan);
-  }
   if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
   if (paper.source !== "html" && paper.source !== "pdf") {
     const retry = el("button", "linkish", "重新取正文");
@@ -5956,7 +5996,7 @@ async function dailyBlock(seq) {
   if (d.day) box.dataset.day = d.day;
   const dirName = d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣";
   const head = el("div", "daily-head");
-  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
+  head.innerHTML = `<div><p class="section-label">新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">挑几篇新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
   box.appendChild(head);
   if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上（如实说明）：${esc(d.error)}`));
   if (!d.items.length) {
@@ -5969,7 +6009,7 @@ async function dailyBlock(seq) {
     } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "这个话题最近的都分拣完了。"));
     else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上来源，这是已缓存的候选。`));
     else if (reason === "no_topics") {
-      const tip = el("p", "panel-sub", "还没有能用来检索的兴趣话题。先聊几句或选定方向。");
+      const tip = el("p", "panel-sub", "先选一个方向，才知道给你推哪些论文。");
       const go = el("button", "btn small", "去选方向");
       go.type = "button";
       go.onclick = () => setView("dialogue");
@@ -5983,7 +6023,7 @@ async function dailyBlock(seq) {
     title.textContent = it.title;
     row.appendChild(title);
     if (it.lib === "html" || it.lib === "abstract") {
-      row.appendChild(el("i", "kp-lib", it.lib === "html" ? "库内" : "只有摘要"));
+      row.appendChild(el("i", "kp-lib", it.lib === "html" ? "有全文" : "只有摘要"));
     }
     if (it.title_zh) {
       const zh = el("p", "triage-zh");
