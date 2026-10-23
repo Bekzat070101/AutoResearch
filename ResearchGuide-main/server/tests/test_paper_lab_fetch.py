@@ -25,7 +25,7 @@ PAGE = """<html><head><title>x</title><script>ignore()</script></head><body>
 <div class="ltx_authors"><span class="ltx_personname">Ann Author</span> Affiliation: Somewhere</div>
 <div class="ltx_abstract"><h6 class="ltx_title ltx_title_abstract">Abstract</h6><p class="ltx_p">Body abstract copy.</p></div>
 <section id="S1" class="ltx_section"><h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">1 </span>Introduction</h2>
-<div class="ltx_para"><p class="ltx_p">Models reach <math alttext="43.9\\%" class="ltx_Math"><semantics><mn>43.9</mn></semantics></math> accuracy (Brown et al., 2020). Brown et al. (2020) also saw this, e.g. in Table 1. We agree.<span class="ltx_note ltx_role_footnote"><sup>1</sup><span class="ltx_note_content">Footnote text here.</span></span></p></div>
+<div class="ltx_para"><p class="ltx_p">Models reach <math alttext="43.9\\%" class="ltx_Math"><semantics><mn>43.9</mn></semantics></math> accuracy (Brown et al., 2020). Brown et al. (2020) also saw this, e.g. in Table 1. We agree.<span class="ltx_note ltx_role_footnote"><sup class="ltx_note_mark">1</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">1</sup><span class="ltx_tag ltx_tag_note">1</span>We also re-ran this on unambiguous items. Results were similar.</span></span></span></p></div>
 <figure class="ltx_figure"><figcaption>Figure 1: caption junk</figcaption><table class="ltx_tabular"><tr><td>cell</td></tr></table></figure>
 <section id="S1.SS1" class="ltx_subsection"><h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag">1.1 </span>Setup</h3>
 <section class="ltx_paragraph"><h4 class="ltx_title ltx_title_paragraph">Prompt.</h4><div class="ltx_para"><p class="ltx_p">First sentence? Second sentence!</p><p class="ltx_p"><span class="ltx_text ltx_font_bold">Inline Head.</span> Third one. <span class="ltx_text ltx_font_bold">Not a head</span> stays.</p></div></section>
@@ -34,6 +34,7 @@ PAGE = """<html><head><title>x</title><script>ignore()</script></head><body>
 <section id="S2.SS1" class="ltx_subsection"><h3 class="ltx_title ltx_title_subsection">2.1 Results</h3><div class="ltx_para"><p class="ltx_p">Only line.</p></div></section></section>
 <section class="ltx_section"><h2 class="ltx_title ltx_title_section">Acknowledgements</h2><div class="ltx_para"><p class="ltx_p">Thanks.</p></div></section>
 <section class="ltx_bibliography"><h2 class="ltx_title ltx_title_bibliography">References</h2><ul><li class="ltx_bibitem">Brown 2020.</li></ul></section>
+<section class="ltx_appendix"><h2 class="ltx_title ltx_title_appendix"><span class="ltx_tag">Appendix A </span>Extra Control</h2><div class="ltx_para"><p class="ltx_p">Random order control. Same conclusion.</p></div></section>
 </article><footer>footer junk</footer></body></html>"""
 
 
@@ -73,11 +74,13 @@ def test_article_blocks_and_render(fp, tmp_path):
     blocks = art.blocks
     kinds = [k for k, _ in blocks]
     heads = [t for k, t in blocks if k == "head"]
-    assert heads == ["1 Introduction", "1.1 Setup", "2 Empty Container", "2.1 Results"]
+    assert heads == ["1 Introduction", "1.1 Setup", "2 Empty Container", "2.1 Results", "Appendix A Extra Control"]
     assert ("runin", "Prompt.") in blocks
     joined = " ".join(t for _, t in blocks)
     assert "43.9%" in joined and "(Brown et al., 2020)" in joined
-    for junk in ("Footnote text", "caption junk", "cell", "Body abstract copy", "Ann Author", "nav junk", "footer junk", "Thanks", "Brown 2020"):
+    assert ("runin", "脚注 1") in blocks and ("para", "We also re-ran this on unambiguous items. Results were similar.") in blocks
+    assert ("para", "Random order control. Same conclusion.") in blocks
+    for junk in ("caption junk", "cell", "Body abstract copy", "Ann Author", "nav junk", "footer junk", "Thanks", "Brown 2020"):
         assert junk not in joined, junk
     assert "Measuring Things" not in joined
     text = fp.render({"id": "0000.00000", "title": "Measuring Things", "authors": ["Ann Author"], "abstract": "We propose X. It works."}, blocks)
@@ -91,6 +94,8 @@ def test_article_blocks_and_render(fp, tmp_path):
     intro = text.split("## 1 Introduction", 1)[1].split("## ", 1)[0]
     assert intro.strip().splitlines()[0] == "[S1] Models reach 43.9% accuracy (Brown et al., 2020)."
     assert "[S3] We agree." in intro
+    assert "**脚注 1**\n[S4] We also re-ran this on unambiguous items.\n[S5] Results were similar." in intro  # 脚注跟在所在段后，编号接着排
+    assert "## Appendix A Extra Control\n[S1] Random order control." in text
     assert "## 2.1 Results\n[S1] Only line." in text
-    assert "Acknowledgements" not in text and "References" not in text
+    assert "Acknowledgements" not in text and "References" not in text and "Thanks." not in text
     assert "{{" not in text

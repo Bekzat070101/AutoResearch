@@ -28,7 +28,7 @@ paper-lab/{{arxiv_id}}/
 └── AGENT_TRACE.md     # 最后复制真实对话或填写真实分享链接
 ```
 
-不要提交密钥、`.env`、论文 PDF 原文件（写 arXiv 号即可）。
+不要提交密钥、`.env`、论文 PDF 原文件和 `paper.txt`（写 arXiv 号即可，用时重新取）。
 
 ## Agent 执行协议
 
@@ -129,13 +129,13 @@ Agent 负责取论文、按节出题、判卷、追问、最后整理 answers.md
 
 > [AGENT STOP]
 
-说明接下来是总评与整理 answers.md。
+这一题的反思问过、学生回过，才说明接下来是总评与整理 answers.md。
 
 ## 提交与结束
 
 > [AGENT ACTION]
 
-给 ≤200 字总评：过了几题、最值得再看的一节。问学生要不要整理 `answers.md`；学生同意后写入：每题题面、学生原话、判定（通过/没过）与一句理由，不改写学生的话。提交 `paper-lab/{{arxiv_id}}/` 下的 README.md、AGENTS.md、answers.md（提交信息 `paper-lab: {{arxiv_id}} answers`）。
+四个任务的反思都问过、学生都回过之后，给 ≤200 字总评：过了几题、最值得再看的一节。问学生要不要整理 `answers.md`；学生同意后写入：每题题面、学生原话、判定（通过/没过）与一句理由，不改写学生的话。提交 `paper-lab/{{arxiv_id}}/` 下的 README.md、AGENTS.md、answers.md（提交信息 `paper-lab: {{arxiv_id}} answers`）。
 
 > [STUDENT ACTION]
 

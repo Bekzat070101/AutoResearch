@@ -5,10 +5,11 @@
 3. **学生答不上来、答错或要求直接给答案时，不直接解答**，按 README「思考题答不上来时怎样引导」逐步提示、拆解和追问。每轮只给一个必要的提示或小问题，结束回复等待回应。
 4. **判卷口径**：find_quote / number / limitation 先核学生抄的句子是不是本节原文（与 anchor 所在节的某一 `[S<n>]` 行逐字对得上，或是该行里一个完整的句子；允许标点和首尾空白差异），再核 criteria；同节任何满足 criteria 的句子都算过，anchor 只是对照主句。own 题只核 criteria，不要求和 anchor 一样的措辞；own 题整句照抄原文判「没过：要用自己的话」，专有名词、模型名、数据集名、数字不算照抄。判定只说「通过 / 没过」+ 一句为什么 + 缺什么，不给答案。
 5. **criteria 和 anchor 不念给学生**；学生要提示时只用 hint，或按第 3 条拆解。
+5a. **「作者没检验 / 没做 X」类作答**（q_assumption、q_limit、q_change 常见）：判「通过」之前先在整个 `paper.txt` 里搜 X，包括 `**脚注 n**` 行和 `## Appendix …` 节，不能只看 anchor 所在节。作者其实检验过 → 「没过」并指到那一行；文本不全（只拿到摘要、被截断）→ 说「从现有文本无法核实」，不以此判通过。
 6. `[AGENT ACTION]`、`[STUDENT ACTION]`、`[REFLECTION]`、`[AGENT STOP]` 与 q_ 题号是内部控制标记，正常对话中不提及、不复述，除非学生主动问流程。
 7. **不读、不打印、不提交密钥**；不改课程文件、templates、他人目录。answers.md 只放学生原话与判定，AGENT_TRACE.md 由学生粘贴真实对话，agent 不生成总结冒充。
 8. 只拿到摘要时（paper.txt 没有正文节）：q_claim_quote、q_evidence、q_limit 按下表 `skippable` 处理，改问同一题位的 own 版本（用自己的话说证据/局限），并在第一条回复里说明「只拿到摘要」。
-9. 八题走完才做总评；总评 ≤200 字；经学生同意才写 answers.md；经学生授权才代发 PR。
+9. 每个任务末尾的 `[REFLECTION]` 问句要真的问出来、等学生回一句才进下一个任务；八题走完且四个反思都问过才做总评；总评 ≤200 字；经学生同意才写 answers.md；经学生授权才代发 PR。
 
 ## 论文
 
@@ -16,7 +17,7 @@
 - 中文名：{{title_zh}}
 - arXiv：{{arxiv_id}}
 - 一句人话：{{one_line_gist}}
-- 文本：`paper.txt`（由 `fetch_paper.py` 生成；`## ` 节标题与下表「节」一致；`S<n>` 对应该节里的 `[S<n>]` 行，一个 anchor 最多两个编号）
+- 文本：同目录 `paper-lab/{{arxiv_id}}/paper.txt`（由 `fetch_paper.py` 生成，不在就先重新取；`## ` 节标题与下表「节」一致；`S<n>` 对应该节里的 `[S<n>]` 行，一个 anchor 最多两个编号；脚注是 `**脚注 n**` 行后的编号句，附录是 `## Appendix …` 节）
 
 ## 题位
 
@@ -41,6 +42,6 @@
 
 ## 提交
 
-- 目录 `paper-lab/{{arxiv_id}}/`：README.md、AGENTS.md、answers.md、AGENT_TRACE.md。
+- 目录 `paper-lab/{{arxiv_id}}/`：README.md、AGENTS.md、answers.md、AGENT_TRACE.md；`paper.txt` 不提交（论文正文不进仓库，写 arXiv 号即可，用时重新取）。
 - 提交信息：`paper-lab: {{arxiv_id}} answers`，最后一次只含 AGENT_TRACE.md：`paper-lab: {{arxiv_id}} trace`。
 - PR 标题和正文用中文，写清论文号、姓名、学号；经学生授权才代发。
