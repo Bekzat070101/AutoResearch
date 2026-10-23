@@ -21,6 +21,7 @@ import interests
 import osf
 import quotes
 import store
+import reading_memory
 from schemas import UserFact, new_id, now_iso
 
 OSF_KEY = re.compile(r"^(psyarxiv|socarxiv):[a-z0-9]{5,}(?:_v\d+)?$", re.I)
@@ -596,7 +597,9 @@ def submit_card(uid: str, kit_id: str, arxiv_id: str, fields: dict[str, str], di
     k = kit(kit_id)
     aid = arxiv.clean_id(arxiv_id)
     try:
-        paper = arxiv.fulltext(aid)
+        paper = store.get_user_paper(uid, aid) if arxiv.is_local(aid) else arxiv.fulltext(aid)
+        if not paper:
+            raise ReadingError("当前画像没有这篇论文")
     except arxiv.ArxivError as exc:
         raise ReadingError(f"取不到原文：{exc}") from exc
     review = review_card(k, paper, fields, dims, decision_log or [])
@@ -607,19 +610,7 @@ def submit_card(uid: str, kit_id: str, arxiv_id: str, fields: dict[str, str], di
             "dims": {d["key"]: (dims.get(d["key"]) or "").strip() for d in k["dimensions"]},
             "decision_log": decision_log or [], "review": review, "status": "pass" if review["pass"] else "revise",
             "prev_passed": prev["review"]["passed"] if prev else None}
-    store.save_card(card)
-    # 卡不分画像、证据（事实）分画像：在新画像里交过线的卡，原来因为「上一版已过线」不再写证据，
-    # 新画像就有过线的卡、却没有对应的已证明的边（Codex 复现）。改成看当前画像里有没有这条证据。
-    fact_key = f"card:{kit_id}:{aid}"
-    has_evidence = any(f.key == fact_key and f.status in ("active", "confirmed") for f in store.list_facts(uid))
-    if review["pass"] and not has_evidence:
-        f = UserFact(user_id=uid, category="capability", key=fact_key,
-                     value=f"已证明：能读《{_short(paper['title'])}》，定位作者自述的局限并写出自己的改动（阅读卡 v{version}）",
-                     confidence=0.85, source="behavior",
-                     evidence=[{"type": "reading_card", "card_id": card["id"], "task_title": _short(paper["title"]), "arxiv_id": aid}],
-                     status="active")
-        store.add_fact(f)
-        card["fact"] = f.to_dict()
+    reading_memory.commit_card(card, paper)
     return card
 
 

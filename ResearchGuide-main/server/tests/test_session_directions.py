@@ -89,7 +89,7 @@ def test_web_has_session_persist_and_choose_direction():
     assert "登录已失效，请重新登录" in js
     assert 'localStorage.setItem("rg_token"' in js
     chat = (Path(__file__).resolve().parents[2] / "web" / "js" / "chat.js").read_text(encoding="utf-8")
-    assert "rg_chat_draft_" in chat
+    assert 'rg_chat_${kind}_${S.uid}_${S.portraitId}_${cid || "new"}' in chat
     assert "可能适合你的方向" in chat
     assert "规则推测" in chat
     assert "这里只看摘要" not in chat

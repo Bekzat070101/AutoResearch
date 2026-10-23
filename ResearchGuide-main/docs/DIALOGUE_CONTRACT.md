@@ -601,3 +601,11 @@ POST /api/onboard/enter
 - 对话派任务、作业催交或接管研读流程
 - 将完整固定字段、成绩单或定方向作为进入软件的前置条件
 - 自动替用户决定终身方向
+# 2026-10-23 接口补充：全局对话与已读文献
+
+当前接口新增明确创建／列出会话；历史默认仅返回最近会话，并返回 conversation_id。
+客户端发送 portrait_id 与 conversation_id，后端在现有用户锁中校验归属，分别以 409／404 拒绝错画像或不存在的会话。
+同画像共享校验后的事实，近期上下文和原话证据池只取本会话。
+新增 reading.search、reading.detail 只读工具；回复和历史可带 reading_sources。
+只有通过阅读卡的文献进入已读索引，个人阅读数据随画像快照隔离。
+完整字段、迁移与兼容说明见 [DIALOGUE_WORKSPACE.md](DIALOGUE_WORKSPACE.md)。

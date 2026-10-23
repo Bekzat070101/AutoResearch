@@ -147,7 +147,19 @@ def count(search_query: str) -> int:
 
 def papers(ids: list[str]) -> list[dict[str, Any]]:
     ids = [clean_id(i) for i in ids]
-    return query({"id_list": ",".join(ids), "max_results": len(ids)}) if ids else []
+    if not ids:
+        return []
+    import datacite
+    cached = [datacite.cached(aid) for aid in ids]
+    if all(cached):
+        return cached
+    try:
+        return query({"id_list": ",".join(ids), "max_results": len(ids)})
+    except ArxivError as original:
+        try:
+            return [p for aid in ids if (p := datacite.paper(aid))]
+        except Exception:
+            raise original
 
 
 _CAT_OK = re.compile(r"^[a-z\-]+(\.[A-Za-z\-]+)?$")
@@ -294,8 +306,12 @@ def search(q: str, max_results: int = 20) -> list[dict[str, Any]]:
     try:
         data = query(params) or []
     except ArxivError as exc:
-        _SEARCH_FAIL.set(key, str(exc))
-        raise
+        import datacite
+        try:
+            data = datacite.search(raw, max_results)
+        except Exception:
+            _SEARCH_FAIL.set(key, str(exc))
+            raise exc
     _SEARCH.set(key, data)
     return data
 

@@ -9,11 +9,190 @@
 "use strict";
 
 const ChatView = (() => {
-  const entryInvitations = new Set();
   let busy = false;      // 正在生成，阻止重复发送
   let abort = null;      // AbortController
   let seq = 0;           // 渲染序号，切走视图后不再写 DOM
-  let turnDone = null;   // 正在生成的那一轮做完时兑现：切走再回来的新视图靠它接上
+  let root, panel, content, list, launcher, caption, newButton, portraitCaption;
+  let scope = "", activeCid = "", conversations = [], pending = null;
+  let opened = false, loading = 0, updateSend = () => {};
+  let remoteWatch = null;
+  let embedded = false;
+
+  const scopeOf = () => `${S.uid}:${S.portraitId}`;
+  const storageKey = (kind, cid = activeCid) => `rg_chat_${kind}_${S.uid}_${S.portraitId}_${cid || "new"}`;
+  const readLocal = (key) => { try { return sessionStorage.getItem(key); } catch (_) { return null; } };
+  const writeLocal = (key, value) => { try { sessionStorage.setItem(key, value); } catch (_) { /* private mode */ } };
+
+  function button(label, cls = "btn small secondary") {
+    const b = el("button", cls, esc(label)); b.type = "button"; return b;
+  }
+
+  function mount() {
+    if (root) return;
+    root = el("div", "chat-widget"); root.id = "chatWidget";
+    launcher = button("", "chat-launcher");
+    launcher.innerHTML = `<span class="chat-launcher-caption" aria-hidden="true"><strong>启研助手</strong><span>说问题 · 补背景</span></span><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M21 13c5 0 9 3.1 9 7 0 2-1.1 3.9-3 5.2L28 29l-5-2c-.7.1-1.3.2-2 .2-5 0-9-3.2-9-7.2s4-7 9-7Z" fill="currentColor" opacity=".65"/><path d="M13 3C6.4 3 1 7.1 1 12.2c0 2.8 1.6 5.3 4.1 7L4 24l6-2.8c1 .2 2 .3 3 .3 6.6 0 12-4.1 12-9.3S19.6 3 13 3Z" fill="currentColor"/><circle cx="9" cy="12" r="1.4" fill="var(--teal-ink)"/><circle cx="17" cy="12" r="1.4" fill="var(--teal-ink)"/></svg>`;
+    launcher.title = "向启研提问，补充背景或讨论阅读";
+    launcher.setAttribute("aria-label", "打开启研对话");
+    launcher.setAttribute("aria-controls", "chatDialog");
+    launcher.setAttribute("aria-expanded", "false");
+    launcher.onclick = () => opened ? close() : open();
+    panel = el("section", "chat-dialog"); panel.id = "chatDialog";
+    panel.setAttribute("role", "dialog"); panel.setAttribute("aria-label", "启研对话"); panel.hidden = true;
+    const head = el("div", "chat-widget-head");
+    const identity = el("div", "chat-widget-identity");
+    caption = button("新对话", "chat-widget-caption");
+    caption.setAttribute("aria-label", "切换会话"); caption.title = "切换会话";
+    caption.setAttribute("aria-controls", "chatConversationList");
+    portraitCaption = el("span", "chat-widget-portrait", "当前画像");
+    identity.append(caption, portraitCaption);
+    const showList = caption; showList.setAttribute("aria-expanded", "false");
+    showList.onclick = () => { list.hidden = !list.hidden; showList.setAttribute("aria-expanded", String(!list.hidden)); };
+    newButton = button("＋ 新对话", "chat-toolbar-new");
+    newButton.setAttribute("aria-label", "新对话"); newButton.title = "新建对话";
+    newButton.onclick = async () => {
+      if (busy) { toast("上一句还在生成，完成后可以新建"); return; }
+      const origin = scope;
+      newButton.disabled = true;
+      try {
+        const r = await api("POST", "/api/dialogue/conversations", { uid: S.uid, portrait_id: S.portraitId });
+        if (origin !== scope) return;
+        conversations.unshift(r.conversation); await select(r.conversation.id);
+      } catch (e) { toast(e.message); }
+      finally { newButton.disabled = busy; }
+    };
+    const expand = button("⤢", "chat-toolbar-icon"); expand.setAttribute("aria-pressed", "false");
+    expand.setAttribute("aria-label", "扩大"); expand.title = "扩大对话框";
+    expand.onclick = () => { const wide = panel.classList.toggle("is-wide"); expand.textContent = wide ? "⤡" : "⤢"; expand.setAttribute("aria-label", wide ? "还原" : "扩大"); expand.title = wide ? "还原对话框" : "扩大对话框"; expand.setAttribute("aria-pressed", String(wide)); };
+    const hide = button("—", "chat-toolbar-icon"); hide.setAttribute("aria-label", "收起"); hide.title = "收起对话框"; hide.onclick = close;
+    head.append(identity, newButton, expand, hide);
+    list = el("nav", "chat-conversations"); list.id = "chatConversationList"; list.hidden = true; list.setAttribute("aria-label", "聊天会话");
+    content = el("div", "chat-widget-content");
+    panel.append(head, list, content); root.append(panel, launcher); document.body.appendChild(root);
+    panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); if (!list.hidden) { list.hidden = true; caption.setAttribute("aria-expanded", "false"); caption.focus(); } else close(); } });
+    document.addEventListener("click", (e) => {
+      if (!head.contains(e.target) && !list.contains(e.target)) { list.hidden = true; caption.setAttribute("aria-expanded", "false"); }
+    });
+  }
+
+  function close() {
+    opened = false; if (!panel) return;
+    list.hidden = true; caption.setAttribute("aria-expanded", "false");
+    panel.hidden = true; launcher.setAttribute("aria-expanded", "false"); launcher.focus();
+  }
+
+  function reset() { scope = ""; ++seq; ++loading; if (content) content.replaceChildren(); }
+
+  function paintList() {
+    if (!list) return;
+    list.replaceChildren();
+    const selected = conversations.find((c) => c.id === activeCid);
+    caption.textContent = (selected?.topic_hint || "新对话") + " ▾";
+    caption.title = selected?.topic_hint ? `切换会话：${selected.topic_hint}` : "切换会话";
+    portraitCaption.textContent = S.portraitName || "当前画像";
+    conversations.forEach((c) => {
+      const b = button((c.topic_hint || "新对话") + (pending?.cid === c.id ? " · 生成中" : ""), "chat-conversation");
+      b.classList.toggle("active", c.id === activeCid);
+      b.setAttribute("aria-current", c.id === activeCid ? "true" : "false");
+      b.onclick = () => select(c.id).catch((e) => toast(e.message)); list.appendChild(b);
+    });
+    newButton.disabled = busy;
+    launcher.classList.toggle("is-generating", busy);
+    updateSend();
+  }
+
+  async function select(cid) {
+    activeCid = cid || ""; writeLocal(storageKey("last", "scope"), activeCid);
+    list.hidden = true; caption.setAttribute("aria-expanded", "false"); paintList();
+    await renderContent(content, activeCid);
+  }
+
+  async function sync() {
+    mount();
+    const onboarding = S.view === "dialogue" && !S.entered && !!S.uid;
+    if (embedded && !onboarding) {
+      embedded = false; content.classList.remove("chat-onboarding-content");
+      panel.appendChild(content); opened = false;
+      await renderContent(content, activeCid);
+    }
+    root.hidden = !S.uid || S.view === "login";
+    if (root.hidden) { panel.hidden = true; opened = false; return; }
+    await ensurePortrait();
+    const next = scopeOf();
+    if (scope !== next) {
+      scope = next; ++loading; ++seq; activeCid = ""; conversations = [];
+      content.replaceChildren();
+      if (opened) await loadScope();
+    }
+    portraitCaption.textContent = S.portraitName || "当前画像";
+    panel.hidden = !opened;
+    launcher.setAttribute("aria-expanded", String(opened));
+    if (onboarding) root.hidden = true;
+  }
+
+  async function renderOnboarding(host) {
+    await sync();
+    embedded = true; opened = false; root.hidden = true; panel.hidden = true;
+    content.classList.add("chat-onboarding-content");
+    host.replaceChildren(content);
+    await loadScope();
+  }
+
+  async function loadScope() {
+    const ticket = ++loading, origin = scope;
+    const r = await api("GET", `/api/dialogue/conversations?uid=${encodeURIComponent(S.uid)}&portrait_id=${encodeURIComponent(S.portraitId)}`);
+    if (ticket !== loading || origin !== scope) return;
+    conversations = r.conversations || [];
+    const last = readLocal(storageKey("last", "scope"));
+    await select(conversations.some((c) => c.id === last) ? last : (conversations[0]?.id || ""));
+    if (r.busy && !busy) watchRemote(S.uid, S.portraitId, origin);
+  }
+
+  async function watchRemote(uid, portrait, origin) {
+    if (remoteWatch) return;
+    const watcher = remoteWatch = {};
+    busy = true; paintList();
+    try {
+      while (origin === scope) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        try {
+          const r = await api("GET", `/api/dialogue/conversations?uid=${encodeURIComponent(uid)}&portrait_id=${encodeURIComponent(portrait)}`);
+          if (origin !== scope) return;
+          if (!r.busy) {
+            conversations = r.conversations || []; remoteWatch = null; busy = false; paintList();
+            if (opened) await renderContent(content, activeCid); else content.replaceChildren();
+            return;
+          }
+        } catch (e) {
+          if ([401, 404, 409, 410].includes(e.status)) { toast(e.message); return; }
+          // Keep drafts and poll after a network interruption. Never resend a turn.
+        }
+      }
+    } finally {
+      if (remoteWatch === watcher) { remoteWatch = null; busy = false; paintList(); }
+    }
+  }
+
+  async function open() {
+    try {
+      await sync(); if (root.hidden) return;
+      const wasOpen = opened; opened = true; panel.hidden = false; launcher.setAttribute("aria-expanded", "true");
+      if (!wasOpen && !content.querySelector("textarea")) await loadScope();
+      content.querySelector("textarea")?.focus({ preventScroll: true });
+    } catch (e) { toast(e.message); }
+  }
+
+  function renderSources(container, sources) {
+    if (!sources?.length) return;
+    const box = el("details", "chat-reading-sources");
+    box.appendChild(el("summary", "", "参考的已读文献"));
+    sources.forEach((s) => {
+      const b = button(`${s.title || s.paper_id} · 阅读卡 v${s.card_version}`, "linkish");
+      b.onclick = () => { S.cardFrom = "read"; openCard(s.paper_id, s.kit_id || DEFAULT_KIT); close(); };
+      box.appendChild(b);
+    });
+    container.appendChild(box);
+  }
 
   const STAGE_CN = {
     observe: "正在看你的近况",
@@ -52,6 +231,11 @@ const ChatView = (() => {
   /* ---------- SSE ---------- */
 
   async function streamTurn(payload, onEvent) {
+    // Decide fallback before sending anything: never POST the same turn twice.
+    if (typeof ReadableStream === "undefined") {
+      const data = await api("POST", "/api/dialogue/turn", payload);
+      onEvent("result", data); return data;
+    }
     abort = new AbortController();
     let res;
     try {
@@ -72,9 +256,7 @@ const ChatView = (() => {
     }
     // 老浏览器没有 ReadableStream 时退回一次性接口
     if (!res.body || !res.body.getReader) {
-      const data = await api("POST", "/api/dialogue/turn", payload);
-      onEvent("result", data);
-      return data;
+      throw new Error("浏览器无法接收流式回复，请稍后重开会话查看结果");
     }
 
     const reader = res.body.getReader();
@@ -118,6 +300,18 @@ const ChatView = (() => {
      标题和标签同行，画像管理退到右侧。 */
   function dialogueHead() {
     const head = el("header", "ws-head");
+    if (embedded) {
+      head.classList.add("onboarding-head");
+      const intro = el("div", "onboarding-intro");
+      intro.append(el("p", "onboarding-kicker", "欢迎来到启研"), el("h2", "", "先认识一下"),
+        el("p", "onboarding-lead", "聊聊你的学习背景和好奇的问题，让之后的阅读建议更贴近你。"));
+      const next = el("div", "onboarding-next");
+      next.appendChild(el("p", "form-note", "不必一次说完，之后随时可以补充或更正。"));
+      const go = button("开始今天的一件事", "btn secondary"); go.onclick = () => enterApp();
+      const read = button("先挑一篇论文读", "btn"); read.onclick = () => enterApp("read");
+      const row = el("div", "onboarding-actions"); row.append(read, go); next.appendChild(row);
+      head.append(intro, next); return head;
+    }
     head.appendChild(el("h2", "", S.entered ? "对话" : "先认识一下"));
     head.appendChild(el("p", "", S.entered
       ? "继续和启研聊一聊你的问题和阅读近况。"
@@ -134,13 +328,15 @@ const ChatView = (() => {
     return head;
   }
 
-  async function render($app) {
+  async function renderContent($app, requestedCid = activeCid) {
+    const origin = scope;
+    let draftKey = storageKey("draft", requestedCid);
+    let scrollKey = storageKey("scroll", requestedCid);
     const mySeq = ++seq;
-    const resumeFrom = turnDone;  // 打开这一页时上一轮还在生成（在别的页等过）：见最后
-    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
+    if (mySeq !== seq || origin !== scope) return;  // 等待期间切到了别的页：不能再往页面上写
 
     $app.innerHTML = "";
-    $app.appendChild(dialogueHead());
+    if (embedded) $app.appendChild(dialogueHead());
 
     // 只有对话流和输入区两块。回执/进入邀请跟随本轮回复，不再挤进中间的独立滚动带。
     const wrap = el("div", "two-col two-col-chat");
@@ -161,6 +357,7 @@ const ChatView = (() => {
     input.setAttribute("aria-label", "对话输入");
     const sendBtn = el("button", "btn small", "发送");
     sendBtn.type = "button";
+    sendBtn.disabled = true; // History and handlers must be ready before sending.
     const stopBtn = el("button", "btn ghost small", "停止");
     stopBtn.type = "button";
     stopBtn.hidden = true;
@@ -168,12 +365,18 @@ const ChatView = (() => {
     // 状态行（正在观察 / 正在查资料）说的是「输入之后会发生什么」，
     // 所以它归输入区，不归行动区——否则它会跟着行动卡一起滚走。
     inputZone.append(suggestions, stageLine, inputRow);
-    inputZone.appendChild(el("p", "composer-hint", "Enter 发送 · Shift+Enter 换行"));
+    if (embedded) inputZone.appendChild(el("p", "composer-hint", "Enter 发送 · Shift+Enter 换行"));
     const extra = el("details", "composer-extra");
-    extra.appendChild(el("summary", "", "可选：粘贴成绩单，让我更了解你的基础"));
+    extra.appendChild(el("summary", "", embedded ? "可选：粘贴成绩单，让我更了解你的基础" : "更多"));
     extra.appendChild(el("p", "", "打开树洞的成绩单页，全选复制后粘贴到上面的输入框；会存到你的资料里，先去掉不想分享的信息。"));
     extra.hidden = true;  // 第一屏不提成绩单（面板三轮 3/3 被它吓到）；发过一句话或已进入后才露出
-    inputZone.appendChild(extra);
+    if (embedded) inputZone.appendChild(extra);
+    else {
+      const footer = el("div", "chat-composer-footer");
+      const mine = button("查看我的画像", "linkish chat-profile-link");
+      mine.onclick = () => { close(); setView("me"); };
+      footer.append(mine, extra); inputZone.appendChild(footer);
+    }
     chat.append(scroll, inputZone);
 
     const side = el("div", "panel side-panel mem-sum");
@@ -182,25 +385,28 @@ const ChatView = (() => {
     const treeBtn = el("button", "linkish", "查看方向树");
     treeBtn.type = "button";
     treeBtn.hidden = !S.entered;
-    treeBtn.onclick = () => (S.entered ? setView("cards") : enterApp("cards"));
+    treeBtn.onclick = openDirections;
     sideHead.appendChild(treeBtn);
     side.appendChild(sideHead);
     side.appendChild(el("p", "side-sub rank-badge", S.entered ? "规则推测" : "从学习背景聊起，其他信息慢慢补充。"));
     const sideList = el("div", "rank-list");
-    const sideEmpty = el("p", "side-empty", "再聊几句兴趣或目标，这里会按你说过的排方向。");
+    const sideEmpty = el("p", "side-empty", embedded
+      ? "从院系、年级或一个感兴趣的问题开始。聊过的背景会整理在这里，你可以随时核对。"
+      : "再聊几句兴趣或目标，这里会按你说过的排方向。");
     const sideFoot = el("p", "rank-foot", "");
     side.append(sideList, sideEmpty, sideFoot);
-    wrap.append(chat, side);
+    if (embedded) wrap.append(chat, side);
+    else wrap.append(chat);
     $app.appendChild(wrap);
 
     autoGrow();
     input.focus({ preventScroll: true });
     try {
-      const draft = sessionStorage.getItem("rg_chat_draft_" + S.uid);
+      const draft = sessionStorage.getItem(draftKey);
       if (draft) { input.value = draft; autoGrow(); }
     } catch (_) { /* ignore */ }
     input.addEventListener("input", () => {
-      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, input.value); } catch (_) { /* ignore */ }
+      try { sessionStorage.setItem(draftKey, input.value); } catch (_) { /* ignore */ }
     });
 
     /* --- 历史 --- */
@@ -213,13 +419,16 @@ const ChatView = (() => {
     let redrawQueued = false;  // 进行中的那一轮做完了要重画，但正在改记忆：等改完（见最后）
     let history = { messages: [], pending_action: null };
     try {
-      history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
+      history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}&portrait_id=${encodeURIComponent(S.portraitId)}${requestedCid ? "&conversation_id=" + encodeURIComponent(requestedCid) : ""}`);
     } catch (e) { toast(e.message); }
-    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
-    history.messages.forEach((m) => addBubble(m.role, m.text));
+    if (mySeq !== seq || origin !== scope) return;  // 等待期间切到了别的页：不能再往页面上写
+    history.messages.forEach((m) => { addBubble(m.role, m.text); renderSources(scroll, m.reading_sources); });
+    scroll.addEventListener("scroll", () => writeLocal(scrollKey, String(scroll.scrollTop)));
+    const position = readLocal(scrollKey);
+    if (position !== null) scroll.scrollTop = Number(position);
     extra.hidden = !(S.entered || history.messages.some((m) => m.role === "user"));
     await refreshFacts();
-    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
+    if (mySeq !== seq || origin !== scope) return;  // 等待期间切到了别的页：不能再往页面上写
     if (history.guide && !S.entered) renderGuide(history.guide);
     if (history.onboard_done && !S.entered) enterCard(history.guide);
     if (!history.messages.length) {
@@ -232,12 +441,15 @@ const ChatView = (() => {
       const msg = (text || "").trim();
       if (!msg) return;
       if (busy) { toast("上一句还在生成，等它好了再发"); return; }
-      try { sessionStorage.setItem("rg_chat_draft_" + S.uid, msg); } catch (_) { /* 无痕模式等 */ }
+      const uid = S.uid, portrait = S.portraitId;
+      const startedIn = scope;
+      let cid = history.conversation_id;
+      let sentKey = draftKey;
+      writeLocal(sentKey, msg);
       busy = true;
-      let finish;
-      turnDone = new Promise((resolve) => { finish = resolve; });
+      paintList();
       input.value = ""; autoGrow();
-      input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
+      sendBtn.disabled = true; stopBtn.hidden = true;
       actions.innerHTML = "";
       actions.remove();
       suggestions.innerHTML = "";
@@ -248,11 +460,25 @@ const ChatView = (() => {
       bubble.classList.add("streaming");
       let acc = "";
       let firstChunk = true;
+      let recoveryNeeded = false;
       setStage("observe");
 
       try {
+        if (!cid) {
+          const created = await api("POST", "/api/dialogue/conversations", { uid, portrait_id: portrait });
+          if (startedIn !== scope) return;
+          cid = created.conversation.id; conversations.unshift(created.conversation);
+          history.conversation_id = cid;
+          const oldDraft = readLocal(draftKey);
+          draftKey = storageKey("draft", cid); scrollKey = storageKey("scroll", cid);
+          writeLocal(draftKey, oldDraft || msg); writeLocal(sentKey, ""); sentKey = draftKey;
+          if (mySeq === seq) activeCid = cid;
+          writeLocal(storageKey("last", "scope"), activeCid);
+        }
+        pending = { cid, scope: startedIn };
+        paintList();
         const result = await streamTurn(
-          { uid: S.uid, message: msg, conversation_id: history.conversation_id },
+          { uid, portrait_id: portrait, message: msg, conversation_id: cid },
           (name, data) => {
             if (name === "stage") { setStage(data.name, data.tool); return; }
             if (name === "delta") {
@@ -263,12 +489,17 @@ const ChatView = (() => {
             }
           },
         );
-        if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
+        if (result && readLocal(sentKey) === msg) writeLocal(sentKey, "");
+        if (result && startedIn === scope) {
+          const c = conversations.find((v) => v.id === cid);
+          if (c) { c.topic_hint = c.topic_hint || msg.slice(0, 60); c.updated_at = new Date().toISOString(); }
+          conversations.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+        }
+        if (mySeq !== seq || origin !== scope) return;
 
         if (result) {
           history.conversation_id = result.conversation_id;
           bubble.innerHTML = mdLite(result.reply);
-          try { sessionStorage.removeItem("rg_chat_draft_" + S.uid); } catch (_) { /* ignore */ }
           afterTurn(result);
         } else if (!acc) {
           bubble.remove();
@@ -280,15 +511,25 @@ const ChatView = (() => {
         } else if (e.name !== "AbortError") {
           toast("对话：上一句没生成完（" + e.message + "）");  // 人在别的页：页面上没地方显示，至少说一声
         }
+        if (startedIn === scope) {
+          // Disconnecting the stream does not cancel the server's worker.
+          // Wait for that worker before enabling another send.
+          const r = await api("GET", `/api/dialogue/conversations?uid=${encodeURIComponent(uid)}&portrait_id=${encodeURIComponent(portrait)}`).catch(() => null);
+          recoveryNeeded = !r || r.busy;
+        }
       } finally {
         bubble.classList.remove("streaming");
-        busy = false; abort = null; turnDone = null;
-        finish();
+        busy = false; abort = null; pending = null;
+        paintList();
+        if (mySeq !== seq && startedIn === scope && activeCid === cid) {
+          renderContent(content, activeCid).catch((e) => toast(e.message));
+        }
         if (mySeq === seq) {
           input.disabled = false; sendBtn.disabled = false; stopBtn.hidden = true;
           setStage("");
           input.focus({ preventScroll: true });
         }
+        if (recoveryNeeded) watchRemote(uid, portrait, startedIn);
       }
     }
 
@@ -311,6 +552,7 @@ const ChatView = (() => {
       }
       const receipt = turnReceipt(result);
       if (receipt) actions.appendChild(receipt);
+      renderSources(actions, result.reading_sources);
       if (result.degraded) {
         const d = el("p", "rc-warn");
         d.appendChild(document.createTextNode("当前未连接模型，这一轮是规则回复。"));
@@ -326,22 +568,20 @@ const ChatView = (() => {
     }
 
     function enterCard(profile) {
-      const key = "rg_entry_invited_v2_" + S.uid + "_" + (S.portraitId || "default");
-      if (S.entered || entryInvitations.has(key) || actions.querySelector(".enter-card")) return;
-      try { if (localStorage.getItem(key)) return; } catch (_) { /* 仅使用本次会话状态 */ }
-      entryInvitations.add(key);
-      try { localStorage.setItem(key, "1"); } catch (_) { /* 仅使用本次会话状态 */ }
+      if (S.entered || actions.querySelector(".enter-card")) return;
       const card = el("div", "enter-card");
       card.appendChild(el("p", "enter-card-title", "可以进入启研了"));
       card.appendChild(el("p", "form-note", "已了解你关注的主题和几方面阅读背景。其他信息可以以后再补；也可以继续聊。"));
       const row = el("div", "submit-actions");
-      const go = el("button", "btn", "进入启研");
+      const go = el("button", "btn", "查看推荐方向");
       go.type = "button";
-      go.onclick = () => enterApp();
+      go.onclick = () => openDirections();
+      const read = button("直接进入研读", "btn secondary");
+      read.onclick = () => enterApp("read");
       const more = el("button", "btn ghost", "再聊聊");
       more.type = "button";
       more.onclick = () => { card.remove(); input.focus({ preventScroll: true }); };
-      row.append(go, more);
+      row.append(go, read, more);
       card.appendChild(row);
       // 邀请放在回执前面，不能被长记忆清单挤到结果区滚动条下面。
       actions.insertBefore(card, actions.firstChild);
@@ -453,7 +693,7 @@ const ChatView = (() => {
     }
 
     function renderGuide(profile) {
-      side.hidden = !S.entered && !(profile.areas || []).some((a) => a.known);  // 什么都还不知道时不摆「目前对你的了解」（面板 3/3 说像在建档）
+      side.hidden = !embedded && !S.entered && !(profile.areas || []).some((a) => a.known);
       sideList.innerHTML = "";
       sideEmpty.style.display = "none";
       (profile.areas || []).forEach((area) => {
@@ -480,6 +720,7 @@ const ChatView = (() => {
        单独改删都在），这里只是把它们聚起来看——因为用户的原话是
        「识别为大项目的可以创建为大文件夹存储相关记忆」。 */
     async function refreshFacts() {
+      if (!embedded) return;
       try {
         if (!S.entered) {
           const profile = await api("GET", `/api/onboard/readiness?uid=${encodeURIComponent(S.uid)}`);
@@ -574,23 +815,10 @@ const ChatView = (() => {
     sendBtn.onclick = () => send(input.value);
     stopBtn.onclick = () => { if (abort) abort.abort(); };
 
-    // 上一轮在生成时切走又回来：这个新视图里没有那一轮的气泡和进度，旧视图收到的回复也不会画到这里。
-    // 还在生成就锁住输入、给停止键；做完（不管在这之前还是之后）从服务器重取一遍历史重画。
-    // 原来发送键看着能点、点了没反应，做完的回复也不显示，要手动刷新（Codex 复现）。
-    if (resumeFrom) {
-      if (busy) {
-        input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
-        stageLine.textContent = "上一句还在生成，好了会自动显示…";
-        stageLine.classList.add("on");
-      }
-      resumeFrom.then(() => {
-        if (mySeq !== seq || S.view !== "dialogue") return;
-        // 正在改一条记忆：重画会把输入框拔掉，失焦保存不一定触发，改动就没了（Codex 复现）。改完再画
-        if (editingCard) { redrawQueued = true; return; }
-        render($app);
-      });
-    }
+    updateSend = () => { sendBtn.disabled = busy; stopBtn.hidden = true; };
+    updateSend();
+    if (busy) setStage("compose");
   }
 
-  return { render, mdLite };
+  return { open, close, sync, reset, renderOnboarding, mdLite, isBusy: () => busy };
 })();

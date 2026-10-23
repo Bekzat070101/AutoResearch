@@ -53,6 +53,7 @@ import positioning
 import projects
 import quotes
 import reading
+import recommendations
 import store
 import submission
 import transcript
@@ -193,7 +194,7 @@ async def db_ready_gate(request: Request, call_next):
         reason = store.db_blocked() or "nas_not_mounted"
         return JSONResponse({"detail": DB_BLOCKED_DETAIL.get(reason, DB_BLOCKED_DETAIL["nas_not_mounted"]),
                              "code": "db_not_ready", "reason": reason}, status_code=503)
-    return await call_next(request)
+    return await portrait_read_guard(request, call_next)
 
 
 BUSY_MSG = "上一件事还在处理（比如正在等模型回话），稍后再试"
@@ -211,12 +212,41 @@ async def _serial(request: Request):
     except userlock.Busy as exc:
         raise HTTPException(409, BUSY_MSG) from exc
     try:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = {}
+        expected = (body.get("portrait_id") if isinstance(body, dict) else None) or request.query_params.get("portrait_id")
+        await run_in_threadpool(_check_portrait, uid, expected)
         yield
     finally:
         ticket.release()
 
 
 SERIAL = [Depends(_serial)]
+
+
+def _check_portrait(uid: str, portrait_id: str | None) -> None:
+    if portrait_id is not None and portrait_id != store.active_portrait_id(uid):
+        raise HTTPException(409, "当前画像已变化，请刷新后再试")
+
+
+def _check_dialogue(req) -> None:
+    _check_portrait(req.uid, req.portrait_id)
+    if req.conversation_id and not store.get_conversation(req.uid, req.conversation_id):
+        raise HTTPException(404, "conversation not found")
+
+
+async def portrait_read_guard(request: Request, call_next):
+    # Check again after the read: a portrait may have changed during an await.
+    expected = request.query_params.get("portrait_id")
+    path = request.url.path
+    guarded = request.method == "GET" and expected and path.startswith("/api/") and path not in ("/api/portraits",) and not path.startswith("/api/auth/")
+    response = await call_next(request)
+    uid = getattr(request.state, "uid", None)
+    if guarded and uid and response.status_code < 400 and expected != await run_in_threadpool(store.active_portrait_id, uid):
+        return JSONResponse({"detail": "当前画像已变化，请刷新后再试"}, status_code=409)
+    return response
 
 
 @app.exception_handler(sqlite3.IntegrityError)
@@ -471,6 +501,12 @@ class DialogueTurnReq(BaseModel):
     uid: str
     message: str
     conversation_id: str | None = None
+    portrait_id: str | None = None
+
+
+class ConversationReq(BaseModel):
+    uid: str
+    portrait_id: str | None = None
 
 
 class DialogueActionReq(BaseModel):
@@ -603,6 +639,7 @@ def onboard_readiness(uid: str):
 @_model_work
 def dialogue_turn(req: DialogueTurnReq):
     _user_or_404(req.uid)
+    _check_dialogue(req)
     if not req.message.strip():
         raise HTTPException(400, "message is required")
     try:
@@ -649,6 +686,11 @@ async def dialogue_stream(req: DialogueTurnReq):
         ticket = await userlock.acquire(req.uid)  # 整轮拿着这个人的锁：等模型时切画像、再发一句，都等它做完
     except userlock.Busy as exc:
         raise HTTPException(409, BUSY_MSG) from exc
+    try:
+        await run_in_threadpool(_check_dialogue, req)
+    except BaseException:
+        ticket.release()
+        raise
     loop = asyncio.get_running_loop()
     events: asyncio.Queue = asyncio.Queue()
 
@@ -719,9 +761,40 @@ def dialogue_action(req: DialogueActionReq):
 
 
 @app.get("/api/dialogue/history")
-def dialogue_history(uid: str, conversation_id: str | None = None):
+def dialogue_history(uid: str, conversation_id: str | None = None, portrait_id: str | None = None):
     _user_or_404(uid)
-    return dialogue.history(uid, conversation_id)
+    _check_portrait(uid, portrait_id)
+    try:
+        result = dialogue.history(uid, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    _check_portrait(uid, portrait_id)
+    return result
+
+
+@app.get("/api/dialogue/conversations")
+def dialogue_conversations(uid: str, portrait_id: str | None = None):
+    _user_or_404(uid)
+    _check_portrait(uid, portrait_id)
+    result = store.list_conversations(uid)
+    _check_portrait(uid, portrait_id)
+    return {"conversations": result, "portrait_id": store.active_portrait_id(uid), "busy": userlock.busy(uid)}
+
+
+@app.post("/api/dialogue/conversations", dependencies=SERIAL)
+def dialogue_conversation_create(req: ConversationReq):
+    _user_or_404(req.uid)
+    _check_portrait(req.uid, req.portrait_id)
+    return {"conversation": store.create_conversation(req.uid), "portrait_id": store.active_portrait_id(req.uid)}
+
+
+@app.get("/api/reading/completed")
+def reading_completed(uid: str, query: str = "", portrait_id: str | None = None):
+    _user_or_404(uid)
+    _check_portrait(uid, portrait_id)
+    result = reading.reading_memory.search(uid, query)
+    _check_portrait(uid, portrait_id)
+    return result
 
 
 def _portrait_dir_nodes(trail: dict) -> list[str]:
@@ -750,9 +823,11 @@ def portraits_list(uid: str):
         named = [{"node": n, "name": interests.direction_name(n)} for n in dirs]
         # 默认名：一个方向 = 方向名；多个 = 最先加的两个，形如 方向1·方向2
         default = "·".join([d["name"] for d in named if d["name"]][:2])[:40]
-        # 勾选状态：sel 是列表就按它来（空 = 全没勾）；没有 sel 键的老数据视为全选
+        # 当前方向优先；收藏和本轮学习范围分开，旧 sel 仅作兼容。
         raw_sel = trail.get("sel")
-        if isinstance(raw_sel, list):
+        if trail.get("dir") in interests.table()["nodes"]:
+            sel_ids = [trail["dir"]]
+        elif isinstance(raw_sel, list):
             ok = {d["node"] for d in named}
             sel_ids = [str(n or "") for n in raw_sel if str(n or "") in ok]
         else:
@@ -940,9 +1015,25 @@ def portraits_delete(pid: str, uid: str):
 # ---------- directions ----------
 
 @app.get("/api/directions/recommend")
-def directions_recommend(uid: str):
-    """按当前画像的兴趣给方向建议，不检索课程、不等模型改写。"""
+@_model_work
+def directions_recommend(uid: str, portrait_id: str | None = None):
+    """复用画像检索计划建议父节点；模型不可用时保留原规则。"""
     _user_or_404(uid)
+    _check_portrait(uid, portrait_id)
+    try:
+        suggested = recommendations.direction_suggestions(uid, portrait_id)
+    except recommendations.StaleProfile as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if suggested:
+        cards = []
+        for it in suggested:
+            code = planner._code_of_node(it["node"])
+            if code:
+                import interests
+                cards.append({"node": it["node"], "direction": {"code": code, "name": interests.direction_name(it["node"])},
+                              "why_you": it["why"], "evidence_refs": it["evidence_refs"], "voice": "portrait"})
+        if cards:
+            return {"cards": cards}
     cards = planner.direction_cards(uid, with_courses=False, voice=False)
     if not cards:
         cards = planner.cards_from_ranking(uid)
@@ -1816,11 +1907,13 @@ def _interest_daily(uid: str, allow_fetch: bool = True) -> dict:
 
 
 @app.get("/api/daily")
-async def daily_feed(uid: str, kit: str = ""):
+async def daily_feed(uid: str, kit: str = "", portrait_id: str | None = None):
     await run_in_threadpool(_user_or_404, uid)
     if kit:
         source = await _daily_source_for(kit)
         return await run_in_threadpool(_daily_payload, uid, kit, source)
+    if llm.ready(uid):
+        return await _in_model_pool(_personal_daily, uid, portrait_id)
     prep = await run_in_threadpool(_interest_prep, uid)
     if prep.get("fetch_tid"):
         try:
@@ -1828,7 +1921,40 @@ async def daily_feed(uid: str, kit: str = ""):
         except workpool.PoolFull:
             raise HTTPException(503, "今日正在取，稍后再试") from None
         await asyncio.wrap_future(fut)
-    return await run_in_threadpool(_reading, _interest_daily, uid, False)
+    result = await run_in_threadpool(_reading, _interest_daily, uid, False)
+    result["recommendation"] = {"status": "basic", "message": "基础列表，个性化暂未完成（模型未配置或不可用）", "warnings": []}
+    return result
+
+
+def _recommend(uid, portrait_id, scene, base=None):
+    try:
+        return recommendations.recommend(uid, portrait_id, scene, base)
+    except recommendations.StaleProfile as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _personal_daily(uid, portrait_id):
+    try:
+        snap = recommendations.snapshot(uid, portrait_id)
+        base = reading.daily_for_user(uid)
+        r = _recommend(uid, portrait_id, "today", base["items"])
+        recommendations.check(snap)
+    except recommendations.StaleProfile as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**base, "items": r["items"], "recommendation": {k: v for k, v in r.items() if k != "items"},
+            "empty_reason": "" if r["items"] else "no_match"}
+
+
+@app.get("/api/papers/recommend")
+@_model_work
+def papers_recommend(uid: str, portrait_id: str, scene: str = "read"):
+    _user_or_404(uid)
+    _check_portrait(uid, portrait_id)
+    if scene not in ("read", "today"):
+        raise HTTPException(400, "不支持的推荐场景")
+    if not auth._allow(f"recommend:{uid}", 15):
+        raise HTTPException(429, "推荐请求较多，请稍后重试")
+    return _recommend(uid, portrait_id, scene)
 
 
 @app.post("/api/daily/triage", dependencies=SERIAL)
@@ -2110,6 +2236,8 @@ async def tutor_finish(arxiv_id: str, req: TutorFinishReq):
 async def card_submit(req: CardReq):
     aid = _reading(reading.arxiv.clean_id, req.arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
+    if reading.arxiv.is_local(aid):
+        return await run_in_threadpool(_card_submit, req)
     if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
         await _shared(("paper", aid), _paper_payload, aid)  # 缓存里没有才去取；并发提交同一篇只取一次
     await _shared(("index", aid), _paper_index, aid)    # 再把引文索引建好；之后每张卡的核对都直接命中

@@ -11,6 +11,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -26,6 +27,7 @@ import projects  # noqa: E402
 import store  # noqa: E402
 import submission  # noqa: E402
 from limits import TTLCache  # noqa: E402
+import limits  # noqa: E402
 from singleflight import SingleFlight  # noqa: E402
 
 
@@ -360,11 +362,13 @@ def test_quote_checks_prepare_each_paper_once(monkeypatch):
     assert review["pass"] and len(calls) == 1
 
 
-def test_ttl_cache_drops_expired_entries_and_caps_size():
+def test_ttl_cache_drops_expired_entries_and_caps_size(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(limits, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     c = TTLCache(0.05, 1000)
     for i in range(200):
         c.set(i, i)
-    time.sleep(0.06)
+    clock[0] += 0.06
     assert c.lookup("other") == (False, None) and len(c) == 0
     small = TTLCache(60, 3)
     for i in range(10):
@@ -1015,11 +1019,13 @@ def test_quote_sections_use_original_offsets():
 
 def test_last_search_results_expire_and_are_bounded(monkeypatch):
     from limits import TTLCache as _T
+    clock = [100.0]
+    monkeypatch.setattr(limits, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(projects, "_LAST", _T(0.05, 100))
     for i in range(1000):
         projects._LAST.set(f"u{i}", {"c": {"id": "c"}})
     assert len(projects._LAST) == 100  # 有条数上限
-    time.sleep(0.06)
+    clock[0] += 0.06
     projects._LAST.set("someone", {"c": {"id": "c"}})
     assert len(projects._LAST) == 1  # 过期的随下一次写入一起清掉
     with pytest.raises(KeyError):

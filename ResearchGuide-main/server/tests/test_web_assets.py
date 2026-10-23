@@ -329,14 +329,15 @@ def test_new_class_names_all_have_rules():
             f".{cls} 在 JS 里用了，样式表里却没有规则（空钩子）"
 
 
-def test_sidebar_is_five_rooms_and_user_owns_portrait():
-    """学生侧栏是今日 / 对话 / 研读 / 定位 / 项目五个房间；作业不在栏目里。
+def test_sidebar_has_four_rooms_chat_is_global_and_user_owns_portrait():
+    """学生侧栏是今日 / 研读 / 定位 / 项目；对话使用全局气泡。
     另外还有一个默认隐藏的「监测」（w104 起）：只对管理员显示，不占学生的栏目。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")
     nav = re.search(r'<nav class="side-links".*?</nav>', html, re.S).group(0)
     views = re.findall(r'data-view="([^"]+)"', nav)
-    assert views[:5] == ["today", "dialogue", "read", "position", "projects"], views
-    assert views[5:] == ["monitor"], views
+    assert views[:4] == ["today", "read", "position", "projects"], views
+    assert views[4:] == ["monitor"], views
+    assert "chatWidget" in (WEB / "js" / "chat.js").read_text(encoding="utf-8")
     mbtn = re.search(r'<button[^>]*data-view="monitor"[^>]*>', nav)
     assert mbtn and "hidden" in mbtn.group(0)  # 管理员入口默认隐藏
     assert "作业" not in nav
@@ -498,10 +499,21 @@ def test_read_list_zh_first_and_search_placeholder():
 
 def test_tutor_draft_key_and_resume_gate_present():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
-    assert 'rg_tutor_${S.uid || "anon"}_${kitId}_${aid}' in js
+    assert 'rg_tutor_${S.uid || "anon"}_${S.portraitId || "none"}_${kitId}_${aid}' in js
     assert "tutor-draft-note" in js
     assert "if (!canGrade && !hasSession) {" in js
     assert "  if (!canGrade) {\n    tabTutor.disabled = true;" not in js
+
+
+def test_first_visit_keeps_full_information_dialogue():
+    app = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    chat = (WEB / "js" / "chat.js").read_text(encoding="utf-8")
+    css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+    assert "await ChatView.renderOnboarding($app)" in app
+    assert "host.replaceChildren(content)" in chat
+    assert "panel.appendChild(content)" in chat
+    assert '"onboarding-head"' in chat
+    assert ".chat-onboarding-content .two-col-chat" in css
 
 
 def test_login_admin_fold_footer_and_chat_shortcut_present():

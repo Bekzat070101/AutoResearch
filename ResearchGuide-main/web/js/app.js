@@ -184,6 +184,14 @@ async function confirmSessionGone() {
 }
 
 async function apiFetch(path, opt = {}) {
+  if (S.uid && S.portraitId && !String(path).startsWith("/api/auth/")) {
+    if (typeof opt.body === "string" && (opt.headers || {})["Content-Type"] === "application/json") {
+      try { const body = JSON.parse(opt.body); if (body && !body.portrait_id) opt = { ...opt, body: JSON.stringify({ ...body, portrait_id: S.portraitId }) }; } catch (_) { /* non JSON */ }
+    }
+    if (!String(path).includes("portrait_id=")) {
+      path += (String(path).includes("?") ? "&" : "?") + "portrait_id=" + encodeURIComponent(S.portraitId);
+    }
+  }
   const send = () => fetch(apiUrl(path), { ...opt, headers: authHeaders(opt.headers) });
   let res = await send();
   if (res.status !== 401 || !S.token || String(path).startsWith("/api/auth/")) return res;
@@ -332,7 +340,14 @@ async function enterApp(next) {
   finally { enteringApp = false; }
 }
 
+function openDirections() {
+  S.cardsPane = "direction";
+  if (typeof ChatView !== "undefined") ChatView.close();
+  if (S.entered) setView("cards"); else return enterApp("cards");
+}
+
 function setView(name) {
+  if (name === "dialogue" && S.entered) { ChatView.open(); return; }
   if (name === "confirm") {
     S.scrollToConfirm = true;
     name = "me";
@@ -360,7 +375,7 @@ function setView(name) {
     b.disabled = !S.uid;
   });
   const dlgBtn = document.querySelector('.nav-btn[data-view="dialogue"]');
-  if (dlgBtn) dlgBtn.hidden = !S.entered;
+  if (dlgBtn) dlgBtn.hidden = true;
   const mbtn = document.querySelector('.nav-btn[data-view="monitor"]');
   if (mbtn) mbtn.hidden = !S.isAdmin;  // 运营监测只有管理员看得见
   if (name !== "monitor" && S.monitorTimer) { clearInterval(S.monitorTimer); S.monitorTimer = null; }
@@ -383,12 +398,16 @@ function stale(seq) {
 async function render() {
   stopPaperSpy?.(); stopPaperSpy = null;
   const seq = S.renderSeq = (S.renderSeq || 0) + 1;
+  if (typeof ChatView !== "undefined") await ChatView.sync();
+  if (stale(seq)) return;
   if (S.view === "home") { renderHome(); return; }
   if (!S.uid && S.view !== "login") { renderLogin(); return; }
   try {
     switch (S.view) {
       case "login": renderLogin(); break;
-      case "dialogue": await ChatView.render($app); break;  // 要 await：不然它取画像失败时绕过下面的提示
+      case "dialogue": {
+        await ChatView.renderOnboarding($app); break;
+      }
       case "confirm": await renderMe(); break;
       case "cards": await renderCards(); break;
       case "workbench": await renderWorkbench(); break;
@@ -2217,9 +2236,9 @@ function paintChrome() {
   applyNavCollapsed();
   const chip = document.getElementById("dirChip");
   if (!chip) return;
-  const name = portraitChipLabel();
+  const name = trail().dir ? dirTitle(trail().dir) : "";
   chip.textContent = name || "选个方向 ▾";
-  chip.title = name ? "换方向：今日任务和推荐论文都跟着方向走" : "选一个方向：今日任务和推荐论文都跟着方向走";
+  chip.title = "查看或更换方向；论文还会结合你的目标、基础与阅读记录";
   chip.classList.toggle("empty", !name);
 }
 
@@ -2368,29 +2387,24 @@ async function putPrefs(patch, c) {
   return r;
 }
 
-/* 一份画像的方向写进 trail：trail 本来就按画像存在服务端，方向跟着画像走。
-   dirs = 添加过的方向（菜单里的选项池，常驻可勾）；sel = 勾选中的，推荐按 sel 来。
-   加方向默认勾上；全部取消也可以（推荐回落到泛兴趣）。
-   S.myDirs（全局 prefs）继续同步维护。 */
+/* dirs 保存收藏，dir 是本轮方向；sel 只作旧客户端兼容镜像。
+   切换方向保留 byDir 进度，不改变长期兴趣或另开画像。 */
 function selectedDirs(t) {
   const x = t || trail();
-  return x.sel.filter((id) => x.dirs.includes(id));
+  return x.dir ? [x.dir] : [];
 }
 
 function portraitDirsAdd(nodeId) {
   const t = trail();
   const dirs = t.dirs.includes(nodeId) ? t.dirs : t.dirs.concat(nodeId);
-  const sel = selectedDirs(t);
-  return { ...t, dirs, sel: sel.includes(nodeId) ? sel : sel.concat(nodeId) };
+  return { ...t, dirs, sel: selectedDirs(t) };
 }
 
-/* 菜单里勾/取消不打 toast：✓ 本身就是反馈，角上的画像名也不因此变 */
+/* 菜单切本轮方向，复用确认与进度恢复流程。 */
 async function toggleDirSel(nodeId) {
-  const t = trail();
-  const sel = selectedDirs(t);
-  const next = sel.includes(nodeId) ? sel.filter((x) => x !== nodeId) : sel.concat(nodeId);
-  await saveTrail({ ...t, sel: next });
-  paintChrome();
+  if (trail().dir === nodeId) return;
+  await chooseDirection(nodeId);
+  if (S.view === "read" || S.view === "today" || S.view === "workbench") setView(S.view);
 }
 
 /* 方向操作绑定发起时的会话/画像/纪元：切画像、换人、退出后，旧操作的回包不得写进新画像（R5-01） */
@@ -2463,6 +2477,7 @@ async function removeMyDirection(nodeId) {
         next.code = ""; next.dir = ""; next.done = []; next.tasks = {};
       }
     }
+    next.sel = next.dir ? [next.dir] : [];
     await saveTrail(next, true, c);
     c.check();
     const kept = S.myDirs.filter((x) => x !== nodeId);
@@ -2488,7 +2503,7 @@ async function chooseDirection(nodeId) {
     const nxt = byDir[nodeId] || { done: [], tasks: {} };
     await saveTrail({
       code: backend, dir: nodeId, done: nxt.done || [], tasks: nxt.tasks || {}, byDir,
-      dirs: withDirs.dirs, sel: withDirs.sel,
+      dirs: withDirs.dirs, sel: [nodeId],
     }, true, c);
     if (!(await loadPrefs(c))) {
       S.myDir = undefined;
@@ -2506,7 +2521,7 @@ async function chooseDirection(nodeId) {
 
 /* ---------- 画像 × 方向（我的页） ----------
    画像 = 一套完整记录（对话、事实、任务、方向、进度）。
-   切画像是换整套记录；同画像里的「可见组合」只换推荐口径——
+   切画像是换整套记录；同画像里切方向保留背景并恢复该方向进度——
    这两件事容易混，所以这里把画像摆在方向卡上方，卡里只讲方向。 */
 
 async function portraitSection() {
@@ -2530,7 +2545,7 @@ async function portraitSection() {
   const isActive = shown.id === active.id;
 
   box.appendChild(el("p", "panel-sub",
-    "一份画像可以选几个方向（多选），推荐按所选的组合来。点别的画像是先看它选了哪些方向，确认了再换。"));
+    "账号可以保存多份独立画像。每份画像保留自己的背景、对话和进度；同一画像可以收藏多个方向，每次选择一个当前方向来推荐。"));
 
   // 画像条：在方向卡上方，不与卡片重叠
   const bar = el("div", "portrait-bar");
@@ -2645,7 +2660,7 @@ async function portraitSection() {
     });
     card.appendChild(list);
     if (isActive) {
-      const hint = el("p", "form-note", "✓ = 勾选进推荐，在右上角的「方向」菜单里勾选或取消。");
+      const hint = el("p", "form-note", "✓ = 本轮方向。在右上角切换后，今日和研读会结合这份画像重新选文，原方向进度保留。");
       card.appendChild(hint);
       const go = el("button", "linkish", "去方向树添加");
       go.type = "button";
@@ -3155,6 +3170,7 @@ function trailStorageKey() {
    做完以服务器回的「哪一份是当前的」为准，不以点了哪个为准。 */
 let portraitBusy = false;
 async function portraitOp(run, nextView, wasActive = false, after = null) {
+  if (typeof ChatView !== "undefined" && ChatView.isBusy()) { toast("对话还在生成，完成后可以更换画像"); return; }
   if (portraitBusy) { toast("正在切换画像，稍等"); return; }
   portraitBusy = true;
   ++directionEpoch;
@@ -3166,6 +3182,7 @@ async function portraitOp(run, nextView, wasActive = false, after = null) {
     S.portraitId = active ? active.id : "";
     // 只有当前画像真的换了（切换、新建、删掉的正是当前那份）才清：删一份不在用的画像，当前这份没写完的定位陈述不能跟着丢（Codex 复现）
     if (wasActive || S.portraitId !== before || !before) {  // 删的是当前那份（最后一份删掉是原地清空、id 不变）也算换了
+      if (typeof ChatView !== "undefined") ChatView.reset();
       S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
       // 下面这些也都属于上一份画像：项目表单（方向、阶段、关键词）和搜到的项目、打开的项目和任务、定位陈述草稿、
       // 方向树上点着的节点。原来切到数学画像，项目表单还停在 AI、第 6 步和旧关键词（Codex 复现）
@@ -3173,6 +3190,7 @@ async function portraitOp(run, nextView, wasActive = false, after = null) {
         openTaskId: "", posDraft: null, dirPicked: null });
     }
     if (after) await after(r);  // 上游 w97 的画像面板要在切完之后刷画像名、拉 trail
+    try { localStorage.setItem("rg_portrait_event", JSON.stringify({ uid: S.uid, id: S.portraitId, at: Date.now() })); } catch (_) { /* private mode */ }
     setView(nextView);
   } catch (e) {
     toast(e.message);
@@ -3556,7 +3574,7 @@ function recDirIds(recommended) {
   const out = new Set();
   if (!window.RG_DIR) return out;
   recommended.forEach((code) => {
-    const id = RG_DIR.legacyDir[code];
+    const id = RG_DIR.byId[code] ? code : RG_DIR.legacyDir[code];
     if (id) out.add(id);
     if (id && RG_DIR.l1Of(id)) out.add(RG_DIR.l1Of(id));
   });
@@ -3708,7 +3726,7 @@ async function renderCards() {
   const viewName = () => dirTitle(focus) || "未选方向";
   const recCard = () => {
     const backend = window.RG_DIR ? RG_DIR.backendCode(focus) : "";
-    return cards.find((c) => c.direction && c.direction.code === backend);
+    return cards.find((c) => c.node === focus) || cards.find((c) => !c.node && c.direction && c.direction.code === backend);
   };
   const recWhy = () => {
     const card = recCard();
@@ -3736,15 +3754,15 @@ async function renderCards() {
     recLine.innerHTML = "";
     if (pane === "tutorial") return;
     if (!cards.length) {
-      recLine.appendChild(el("p", "", "还没有可对照的兴趣。先去聊几句，建议才会标到树上。"));
+      recLine.appendChild(el("p", "", "暂未匹配到推荐方向。可以先浏览方向树，确认一个感兴趣的方向，也可以继续对话补充背景。"));
       return;
     }
     const names = cards.map((c) => {
       const code = c.direction && c.direction.code;
-      const id = window.RG_DIR && RG_DIR.legacyDir[code];
+      const id = c.node || (window.RG_DIR && RG_DIR.legacyDir[code]);
       return (id && RG_DIR.displayName(id)) || (FIELD_TREES[code] && FIELD_TREES[code].name) || (c.direction && c.direction.name) || "";
     }).filter(Boolean);
-    recLine.appendChild(el("p", "", `按你刚说的，更贴近${names.map(esc).join("、")}。${esc(cards[0].why_you || "")}`));
+    recLine.appendChild(el("p", "", `建议了解：${names.map(esc).join("、")}。这是根据背景给出的建议，确认后才会作为你的方向。${esc(cards[0].why_you || "")}`));
     if (window.innerWidth < 920) {
       recLine.classList.add("clamp");
       recLine.onclick = () => recLine.classList.remove("clamp");
@@ -3762,7 +3780,7 @@ async function renderCards() {
         ok.onclick = () => chooseFocus();
         confirmBar.append(note, ok);
       } else {
-        const note = el("p", "", `「${name}」的教程和学习流程在这里。`);
+        const note = el("p", "", `已确认「${name}」。教程和学习流程在这里。`);
         const go = el("button", "btn small", "看教程");
         go.type = "button";
         go.onclick = () => { S.cardsPane = "tutorial"; pane = "tutorial"; grew = true; paint(); };
@@ -3924,11 +3942,11 @@ async function renderCards() {
   api("GET", `/api/directions/recommend?uid=${S.uid}`).then((rec) => {
     if (stale(seq)) return;
     cards = rec.cards || [];
-    recommended = new Set(cards.map((c) => c.direction && c.direction.code).filter(Boolean));
+    recommended = new Set(cards.map((c) => c.node || (c.direction && c.direction.code)).filter(Boolean));
     const marks = recDirIds(recommended);
     if (!touched && marks.size && window.RG_DIR) {
       const top = cards[0] && cards[0].direction && cards[0].direction.code;
-      const id = RG_DIR.legacyDir[top];
+      const id = cards[0]?.node || RG_DIR.legacyDir[top];
       if (id) {
         focus = id;
         branch = RG_DIR.l1Of(id);
@@ -4188,11 +4206,16 @@ function taskStemBlock(task, opts) {
   const deliver = task.deliverable || "一段文字：你做了什么、结果是什么、你的判断。";
   const box = el("div", "task-stem");
   if (stem) box.appendChild(el("p", "task-stem-text", esc(stem)));
+  const basis = [...((f.personalization || {}).evidence || [])].sort((a, b) =>
+    Number(["grade", "department", "major"].includes(a.key)) - Number(["grade", "department", "major"].includes(b.key)));
+  if (basis.length) box.appendChild(el("p", "form-note", esc("本题参考你的记录：" + basis.slice(0, 2).map((e) =>
+    (e.source === "inferred" ? "系统推断：" : "") + e.value).join("；"))));
   box.appendChild(el("p", "section-label", "已知"));
   if (given.length) {
     const ul = el("ul", "task-given");
     given.forEach((g) => ul.appendChild(el("li", "", esc(g))));
     box.appendChild(ul);
+    if (f.notes) box.appendChild(el("p", "form-note", esc(f.notes)));
   } else {
     box.appendChild(el("p", "form-note", esc(f.notes || "本题不另给数据，用你能核对的一个例子。")));
   }
@@ -4440,7 +4463,7 @@ function dialogueTaskSection(tasks) {
   box.appendChild(el("h3", "section-label", "对话给你的这一步"));
   if (!tasks.length) {
     box.appendChild(el("p", "panel-sub",
-      "还没有对话里接下来要做的一步。去对话看右边的方向排序，或去今日读一篇。"));
+      "还没有从对话中接受的练习。需要时可在右下角启研助手里讨论下一步。"));
     return box;
   }
   const open = tasks.filter((tk) => tk.status !== "done");
@@ -4475,7 +4498,13 @@ async function renderWorkbench() {
   if (stale(seq)) return;
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("这一步", "先看题。做完再对。"));
+  const backBar = el("nav", "workbench-nav");
+  backBar.setAttribute("aria-label", "练习页导航");
+  const back = el("button", "btn secondary small", "← 返回今日");
+  back.type = "button"; back.onclick = () => setView("today");
+  backBar.appendChild(back);
+  wrap.appendChild(backBar);
+  wrap.appendChild(workspaceHead("学习练习", "这里完成方向教程或对话中接受的练习，可以随时返回今日。"));
   $app.appendChild(wrap);
   if (tasksFailed) {
     // 没取到不等于没有：原来当成空列表往下走，进度被对成「没做过」、当前节点又生成一份新作业，做完的变回没做（Codex 复现）
@@ -4543,6 +4572,11 @@ async function renderWorkbench() {
   }
   const path = pathNodes(field);
   const stepNo = path.findIndex((n) => n.id === node.id) + 1;
+  const source = el("aside", "task-route-note");
+  source.appendChild(el("h3", "", "这道题从哪里来？"));
+  source.appendChild(el("p", "", `来自「${esc(dirTitle(t.dir, field))}」方向教程，第 ${stepNo} / ${path.length} 个节点：${esc(node.label)}。`));
+  source.appendChild(el("p", "", "教程按已有进度选择节点，题目在该节点目标内结合你的背景调整。它用于补充方向基础，不是今日推荐论文的配套题，也不要求先做完才能读论文。"));
+  wrap.appendChild(source);
   wrap.appendChild(el("div", "ws-status",
     `<span>${esc(dirTitle(t.dir, field))}</span><span>第 ${stepNo} / ${path.length} 个节点</span>`));
 
@@ -4710,7 +4744,7 @@ async function renderToday() {
 
   // 每条建议：一个主动作 + 至多一个备选，落到一件具体的事
   let title; let why; let primary; let alt = null;
-  const goView = (label, view) => ({ label, run: () => setView(view) });
+  const goView = (label, view) => ({ label, run: () => view === "cards" ? openDirections() : setView(view) });
   if (!field && !talked) {
     title = "先聊聊你现在的情况";
     why = "年级、已经会的、想试什么。说不清就说不知道。聊完再看方向。";
@@ -4721,12 +4755,12 @@ async function renderToday() {
     primary = goView("去我的页面核对", "me");
   } else if (!field) {
     title = "先选定一个方向";
-    why = "按你刚说的会标出建议。确认一个，这一步从它的教程起点开始。";
+    why = "方向帮助限定选文范围；确认后也可以按需做这个方向的基础练习。";
     primary = goView("去选方向", "cards");
   } else if (node) {
-    title = `继续「${node.label}」`;
-    why = node.intro;
-    primary = goView("去做这一步", "workbench");
+    title = node.label;
+    why = `来自「${dirTitle(saved.dir, field)}」方向教程，按该方向的进度继续。用于补充基础，不是上面论文的配套题；不做也可以直接研读论文。`;
+    primary = goView("打开方向练习", "workbench");
   } else {
     title = `「${field.name}」这条路已经走到头`;
     why = "回方向区换一棵树，或先去研读。";
@@ -4736,22 +4770,13 @@ async function renderToday() {
 
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("今日", "每日文献速递。"));
+  wrap.appendChild(workspaceHead("今日", "挑选感兴趣的论文进入研读；方向基础练习可按需选择。"));
   const status = el("div", "status-chips");
   if (field) status.appendChild(el("span", "status-chip on", esc(dirTitle(saved.dir, field))));
-  if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
-  if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
+  if (doneTasks) status.appendChild(el("span", "status-chip", `方向练习已提交 ${doneTasks} 次`));
   wrap.appendChild(status);
   const cont = continueCard("today");
   if (cont) wrap.appendChild(cont);
-  const confirmed = facts.filter((f) => f.status === "confirmed" || f.status === "active").length;
-  const steps = [
-    { label: "聊过了", done: !!talked, view: "dialogue" },
-    { label: "填了资料", done: !!talked && drafts === 0 && confirmed > 0, view: "me" },
-    { label: "选了方向", done: !!field, view: "cards" },
-    { label: "今天这一步", done: doneTasks > 0, view: "workbench" },
-  ];
-  if (field) wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));  // 没选方向前不摆四步条：卡片里只有一件事（面板 5/5 把「当前步」读成「已做过」）
   const ruleCard = el("div", "nba-card");
   ruleCard.appendChild(el("h3", "nba-title", esc(title)));
   ruleCard.appendChild(el("p", "nba-why", esc(why)));
@@ -4770,11 +4795,15 @@ async function renderToday() {
   const showPapers = !!(talked || field);
   if (!showPapers) wrap.appendChild(ruleCard);
   else {
-    const slot = el("div", "today-papers panel daily", '<p class="panel-sub">正在取最近的新论文…</p>');
+    const slot = el("div", "today-papers panel daily", '<p class="panel-sub">正在匹配候选论文…</p>');
     wrap.appendChild(slot);
     if (field) {
-      const next = el("p", "today-next", `继续：${esc(title)} `);
-      const more = el("button", "linkish", esc(primary.label));
+      const next = el("section", "today-next");
+      next.setAttribute("aria-label", "可选的方向基础练习");
+      next.appendChild(el("p", "section-label", "方向基础练习 · 可选"));
+      next.appendChild(el("h3", "", esc(title)));
+      next.appendChild(el("p", "", esc(why)));
+      const more = el("button", "btn secondary small", esc(primary.label));
       more.type = "button";
       more.onclick = primary.run;
       next.appendChild(more);
@@ -4794,7 +4823,7 @@ function splitZhTitle(t) {
 }
 // 「继续上次」：最近一次没读完的带读记在本机，研读页和今日页顶上给一张卡直接回到那道题（Luna 试用 UX-04：别把人送回目录）
 function rememberTutor(aid, kitId, sess, title) {
-  const key = `rg_last_tutor_${S.uid || "anon"}`;
+  const key = `rg_last_tutor_${S.uid || "anon"}_${S.portraitId || "none"}`;
   try {
     if (!sess || !["active", "read"].includes(sess.status)) {
       const cur = JSON.parse(localStorage.getItem(key) || "null");
@@ -4807,7 +4836,7 @@ function rememberTutor(aid, kitId, sess, title) {
 
 function lastTutor() {
   try {
-    const v = JSON.parse(localStorage.getItem(`rg_last_tutor_${S.uid || "anon"}`) || "null");
+    const v = JSON.parse(localStorage.getItem(`rg_last_tutor_${S.uid || "anon"}_${S.portraitId || "none"}`) || "null");
     return v && v.aid ? v : null;
   } catch (_) { return null; }
 }
@@ -4854,11 +4883,27 @@ function useKit(kitId) {
 async function renderRead() {
   const seq = S.renderSeq;
   let catalog = [];
+  let recommendation = null;
   if (S.uid) {
     try {
-      const d = await api("GET", `/api/papers/dir?uid=${encodeURIComponent(S.uid)}`);
+      await ensurePortrait();
+      if (stale(seq)) return;
+      const personal = (S.readTab || "kit") === "kit";
+      if (personal) {
+        $app.innerHTML = "";
+        $app.append(workspaceHead("研读"), el("p", "note-box", "正在结合你的目标、基础与阅读记录匹配论文…"));
+      }
+      const d = await api("GET", personal
+        ? `/api/papers/recommend?uid=${encodeURIComponent(S.uid)}&scene=read`
+        : `/api/papers/dir?uid=${encodeURIComponent(S.uid)}`);
       catalog = d.items || [];
-    } catch (_) { catalog = []; }
+      if (personal) recommendation = d;
+    } catch (e) {
+      if (stale(seq)) return;
+      if (e.status === 409) { toast(e.message); return; }
+      recommendation = { status: "basic", message: "基础列表，个性化暂未完成；可继续阅读或使用搜索", warnings: [] };
+      catalog = [];
+    }
   }
   if (!S.kitId && !catalog.length) useKit(DEFAULT_KIT);
   const kitId = S.kitId || "";
@@ -4901,12 +4946,13 @@ async function renderRead() {
   }
   if (stale(seq)) return;
   const byPaper = Object.fromEntries((cards.cards || []).map((c) => [c.arxiv_id, c]));
+  paintChrome();
   $app.innerHTML = "";
   const passed = Object.values(byPaper).filter((c) => c.status === "pass").length;
   const bar = el("header", "ws-head ws-head-bar");
   const leftH = el("div", "ws-bar-main");
   leftH.appendChild(el("h2", "", "研读"));
-  leftH.appendChild(el("p", "ws-lead", esc((catalog.length ? "方向论文目录" : (kit.goal || "")).slice(0, 42))));
+  leftH.appendChild(el("p", "ws-lead", esc((recommendation ? "结合当前目标、基础与阅读记录" : (catalog.length ? "方向论文目录" : (kit.goal || ""))).slice(0, 42))));
   // 控件不塞在标题右侧了：整行工具栏，放不下就换行，不出横向滚动条
   const rightH = el("div", "read-toolbar");
   rightH.appendChild(readTabs(tab));
@@ -4971,11 +5017,16 @@ async function renderRead() {
   const leftHead = el("div", "read-pane-head");
   const cont = continueCard("read");
   if (cont) leftHead.appendChild(cont);
-  leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
-  leftHead.appendChild(el("p", "panel-sub", "点「带读答题」：AI 按节出 8 道题，你边读原文边答，它判对错、给提示。"));
+  leftHead.appendChild(el("h3", "panel-title", "推荐论文"));
+  if (recommendation) {
+    leftHead.appendChild(el("p", "panel-sub", esc(recommendation.message || "")));
+    (recommendation.warnings || []).forEach(w => leftHead.appendChild(el("p", "form-note", esc(w))));
+  }
+  leftHead.appendChild(el("p", "panel-sub", "打开论文查看可用摘要或正文；支持带读的材料可以边读边答。"));
   if (passed > 0) leftHead.appendChild(el("small", "", `已完成 ${passed} 张阅读卡`));
   const leftBody = el("div", "read-pane-body");
-  const recPapers = catalog.length ? catalog.map((p, i) => ({
+  const recPapers = (catalog.length || recommendation?.status === "no_match") ? catalog.map((p, i) => ({
+    ...p,
     arxiv_id: p.paper_id || p.id,
     title: p.title,
     title_zh: p.title_zh || "",
@@ -4994,7 +5045,7 @@ async function renderRead() {
       leftBody.appendChild(back);
     }
     if (!papers.length) {
-      leftBody.appendChild(el("p", "panel-sub", "没有结果。arXiv 只认英文。"));
+      leftBody.appendChild(el("p", "panel-sub", fromSearch ? "没有搜索结果。可调整英文关键词。" : "暂未找到符合当前目标的论文，可继续搜索或浏览方向。"));
       return;
     }
     const list = el("ol", "kit-papers");
@@ -5045,6 +5096,11 @@ async function renderRead() {
           c.status === "pass" ? `✓ 已完成 v${c.version}` : `待改 v${c.version}`));
       }
       if (p.why) main.appendChild(el("p", "form-note", esc(p.why)));
+      if (p.url && /^https:\/\//.test(p.url)) {
+        const source = el("a", "form-note", "论文来源 ↗");
+        source.href = p.url; source.target = "_blank"; source.rel = "noopener";
+        main.appendChild(source);
+      }
       li.appendChild(main);
       const goLabel = fromSearch ? "打开" : (c ? (c.status === "pass" ? "看卡" : "改这张卡") : (kitForCard ? "带读答题" : "打开"));
       const go = el("button", primary ? "btn small" : "btn small secondary", goLabel);
@@ -5117,7 +5173,8 @@ async function renderRead() {
   (kit.datasets || []).forEach((d) => dl.appendChild(el("li", "", `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)} ↗</a>　${esc(d.note)}`)));
   dataBody.appendChild(dl);
   data.appendChild(dataBody);
-  if (!catalog.length) side.append(open, data);
+  if (!catalog.length && recommendation?.status !== "no_match") side.append(open, data);
+  if (!side.childElementCount) grid.style.gridTemplateColumns = "minmax(0, 1fr)";
   grid.append(leftPane, side);
   $app.appendChild(grid);
 }
@@ -5250,7 +5307,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
   const box = el("section", "tutor-panel");
   box.hidden = false;
   let sess = session || null;
-  const draftKey = `rg_tutor_${S.uid || "anon"}_${kitId}_${aid}`;
+  const draftKey = `rg_tutor_${S.uid || "anon"}_${S.portraitId || "none"}_${kitId}_${aid}`;
   let draft = {}; try { draft = JSON.parse(localStorage.getItem(draftKey) || "{}") || {}; } catch (_) { draft = {}; }
   const saveDraft = () => { try { const keep = Object.fromEntries(Object.entries(draft).filter(([, v]) => String(v || "").trim())); if (Object.keys(keep).length) localStorage.setItem(draftKey, JSON.stringify(keep)); else localStorage.removeItem(draftKey); } catch (_) { /* 存不了就只留在内存 */ } };
   let focusQid = null;
@@ -5550,18 +5607,20 @@ async function renderCard() {
     } else {
       loading.textContent = `原文取不到（${why}）。`;
     }
+    if (/^\d{4}\.\d{4,5}$/.test(aid)) {
+      const source = el("a", "back-link", "到论文来源查看摘要／全文 ↗");
+      source.href = `https://arxiv.org/abs/${aid}`; source.target = "_blank"; source.rel = "noopener";
+      $app.appendChild(source);
+    }
     return;
   }
   if (!isCurrent()) return;
   loading.remove();
   const showCard = !isLocal && !!(kit.papers || []).some((p) => p.arxiv_id === aid);
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
-  const draftKey = `rg_card_${S.uid || "anon"}_${kitId}_${aid}`;
+  const draftKey = `rg_card_${S.uid || "anon"}_${S.portraitId || "none"}_${kitId}_${aid}`;
   let draft = null;
   try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch (_) { /* 坏草稿就丢掉 */ }
-  if (!draft) {
-    try { draft = JSON.parse(localStorage.getItem(`rg_card_${kitId}_${aid}`) || "null"); } catch (_) { /* 旧键没有就空着 */ }
-  }
   const state = draft || { fields: { ...((prev && prev.fields) || {}) }, dims: { ...((prev && prev.dims) || {}) }, log: (prev && prev.decision_log) || [] };
   const save = () => { try { localStorage.setItem(draftKey, JSON.stringify(state)); } catch (_) { /* 存不了不影响提交 */ } };
 
@@ -5637,7 +5696,7 @@ async function renderCard() {
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
   const hasSession = !!(tutorMeta && tutorMeta.session && tutorMeta.session.status);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
-  const modeKey = `rg_mode_${S.uid || "anon"}_${kitId}_${aid}`;
+  const modeKey = `rg_mode_${S.uid || "anon"}_${S.portraitId || "none"}_${kitId}_${aid}`;
   let savedMode = "";
   try { savedMode = localStorage.getItem(modeKey) || ""; } catch (_) { /* 记不住就按规则选 */ }
   const hasDraft = Object.values((state.fields || {})).some((v) => String(v || "").trim());
@@ -5703,7 +5762,9 @@ async function renderCard() {
   const jumpTargets = [];   // 有「跳到」按钮的章节标题，滚动联动用
   let off = 0;
   let currentJump = null;
-  let sawSec = false;
+  // Plain abstracts have no section headings. Treat their body as content,
+  // rather than folding the whole paper into the author/affiliation drawer.
+  let sawSec = paper.source === "abstract" || !(paper.sections || []).length;
   let frontWrap = null;
   let frontCount = 0;
   const fillPaperLine = (node, line) => {
@@ -6047,10 +6108,17 @@ async function dailyBlock(seq) {
   }
   if (stale(seq)) return box;
   if (d.day) box.dataset.day = d.day;
-  const dirName = d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣";
+  const dirName = d.recommendation?.status === "personalized" ? "结合你的目标与阅读背景" : (d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣");
   const head = el("div", "daily-head");
-  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要，决定留下还是跳过</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
+  const paperLabel = d.items.some(it => it.old) ? "候选论文 · 含较早材料"
+    : d.items.some(it => !it.published) ? "候选论文 · 部分发表时间待核对" : "新论文";
+  head.innerHTML = `<div><p class="section-label">${paperLabel} · 约 5 分钟筛选 · 可跳过</p><h3 class="panel-title">挑几篇论文</h3><p class="panel-sub">${esc(dirName)}的候选论文。先看标题和摘要，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 已分拣</div>`;
   box.appendChild(head);
+  box.appendChild(el("p", "daily-route-note", "留／过只记录筛选，不代表读完。想细读就打开研读，再完成带读与阅读卡；不需要先做方向练习。"));
+  if (d.recommendation) {
+    box.appendChild(el("p", "panel-sub", esc(d.recommendation.message || "")));
+    (d.recommendation.warnings || []).forEach(w => box.appendChild(el("p", "form-note", esc(w))));
+  }
   if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上：${esc(d.error)}`));
   if (!d.items.length) {
     const reason = d.empty_reason;
@@ -6059,13 +6127,14 @@ async function dailyBlock(seq) {
       (d.channels || []).forEach((c) => {
         box.appendChild(el("p", "", `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)} ↗</a>`));
       });
-    } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "本话题已分拣完毕。"));
+    } else if (reason === "no_match") box.appendChild(el("p", "panel-sub", "暂未找到符合当前目标的论文，可以到研读搜索或导入PDF。"));
+    else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "这个话题最近的都分拣完了。"));
     else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上来源，这是已缓存的候选。`));
     else if (reason === "no_topics") {
       const tip = el("p", "panel-sub", "先选一个方向，才知道给你推哪些论文。");
       const go = el("button", "btn small", "去选方向");
       go.type = "button";
-      go.onclick = () => setView("dialogue");
+      go.onclick = () => openDirections();
       box.append(tip, go);
     } else box.appendChild(el("p", "panel-sub", "最近没有待分拣论文。"));
   }
@@ -6075,6 +6144,8 @@ async function dailyBlock(seq) {
     title.href = it.url; title.target = "_blank"; title.rel = "noopener";
     title.textContent = it.title;
     row.appendChild(title);
+    if (it.old) row.appendChild(el("i", "kp-lib", "较早论文 · 补充候选"));
+    else if (!it.published) row.appendChild(el("i", "kp-lib", "发表时间待核对"));
     if (it.lib === "html" || it.lib === "abstract") {
       row.appendChild(el("i", "kp-lib", it.lib === "html" ? "有全文" : "只有摘要"));
     }
@@ -6093,6 +6164,7 @@ async function dailyBlock(seq) {
       row.appendChild(kws);
     }
     row.appendChild(highlightHits(clipAbs(it.abstract), it.hits));
+    if (it.why) row.appendChild(el("p", "form-note", esc(it.why)));
     row.appendChild(el("small", "", `${esc((it.authors || []).join(", "))} · ${esc(it.published || "")}`));
     const ctl = el("div", "triage-ctl");
     const why = el("input");
@@ -6135,6 +6207,10 @@ async function dailyBlock(seq) {
       card.onclick = () => { S.kitId = it.card_kit; S.cardFrom = "today"; openCard(it.arxiv_id, it.card_kit); };
       ctl.appendChild(card);
     } else {
+      const read = el("button", "btn small ghost", "打开研读");
+      read.type = "button";
+      read.onclick = () => { S.cardFrom = "today"; openCard(it.arxiv_id, ""); };
+      ctl.appendChild(read);
       const ext = el("a", "linkish", (/^arxiv$/i.test(String(it.source || "")) || /arxiv\.org/i.test(String(it.url || ""))) ? "在 arXiv 读" : "打开原文");
       ext.href = it.url || "#"; ext.target = "_blank"; ext.rel = "noopener";
       ctl.appendChild(ext);
@@ -7539,6 +7615,10 @@ function factCard(f, editable = false, isNew = false) {
 
 /* 同一个浏览器的另一个标签页退出或换了人：这一页手里的会话和画面都已经不对，跟着重载 */
 window.addEventListener("storage", (e) => {
+  if (e.key === "rg_portrait_event") {
+    try { if (JSON.parse(e.newValue || "{}").uid === S.uid) location.reload(); } catch (_) { /* invalid event */ }
+    return;
+  }
   if (e.key !== null && e.key !== "rg_token") return;
   let now = "";
   try { now = localStorage.getItem("rg_token") || ""; } catch (_) { return; }
@@ -7562,9 +7642,7 @@ function closeDirMenu() {
   document.getElementById("dirMenu")?.remove();
 }
 
-/* 右上角「画像/方向」下拉：方向是多选。添加过的方向都列在这里，
-   勾上的进推荐，取消勾选就退出去（选项保留，随时勾回来）。
-   按钮上显示的是画像名，具体勾了哪些在这里看 ✓。 */
+/* 右上角只切本轮方向；收藏的其他方向和它们各自的进度保留。 */
 function openDirMenu() {
   const chip = document.getElementById("dirChip");
   if (!chip || !S.uid) return;
@@ -7572,10 +7650,10 @@ function openDirMenu() {
   const t = trail();
   // 老数据只有方向没有 dirs：把它当作选项池
   const dirs = t.dirs.length ? t.dirs : (t.dir && (!window.RG_DIR || RG_DIR.byId[t.dir]) ? [t.dir] : []);
-  if (!dirs.length) { setView("cards"); return; }
+  if (!dirs.length) { openDirections(); return; }
   const menu = el("div", "dir-menu");
   menu.id = "dirMenu";
-  menu.appendChild(el("p", "dir-menu-head", "我的方向 · 可多选，推荐按勾选的组合来"));
+  menu.appendChild(el("p", "dir-menu-head", "本轮方向 · 结合当前画像推荐，其他方向保留"));
   const sel = new Set(selectedDirs(t));
   dirs.forEach((id) => {
     const on = sel.has(id);
@@ -7586,13 +7664,12 @@ function openDirMenu() {
     b.onclick = async () => {
       closeDirMenu();
       await toggleDirSel(id);
-      setTimeout(() => { if (document.getElementById("dirChip")) openDirMenu(); }, 0);
     };
     menu.appendChild(b);
   });
   const tree = el("button", "dir-menu-item", "查看方向树");
   tree.type = "button";
-  tree.onclick = () => { closeDirMenu(); S.entered ? setView("cards") : enterApp("cards"); };
+  tree.onclick = () => { closeDirMenu(); openDirections(); };
   const mine = el("button", "dir-menu-item", "管理画像与方向");
   mine.type = "button";
   mine.onclick = () => { closeDirMenu(); setView("me"); };

@@ -126,6 +126,7 @@ _EXACT: dict[str, KeySpec] = {
 
 # 命名空间 key：<namespace>:<slug>
 _NAMESPACED: dict[str, KeySpec] = {
+    "card": KeySpec("experience", "multi", ("behavior",), layer="experience", ask=False),
     # 学籍：双专业 / 辅修。变化很慢，但会改变他要补的课，所以归身份层。
     "enroll": KeySpec("background", "multi", ("declared",), layer="identity"),
     "goal": KeySpec("interest", "multi", ("declared",), layer="interest"),
@@ -310,6 +311,8 @@ def coverage(uid: str) -> dict[str, Any]:
 
 
 def layer_of(key: str) -> str:
+    if key.startswith("card:"):
+        return "experience"
     spec = spec_for(key)
     return spec.layer if spec else DEFAULT_LAYER
 
@@ -338,6 +341,9 @@ def spec_for(key: str) -> KeySpec | None:
     k = canon_key(key)
     if not k:
         return None
+    if k.startswith("card:"):
+        parts = k.split(":", 2)
+        return _NAMESPACED["card"] if len(parts) == 3 and parts[1] and parts[2] and len(k) <= 250 else None
     if k in _EXACT:
         return _EXACT[k]
     if ":" not in k:
@@ -918,6 +924,39 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         })
 
     return accepted, rejected
+
+
+def validate_dialogue_ops(uid, ops, evidence_pool):
+    """Retry a lexical rejection with the verbatim quote, never a looser gate.
+
+    A model paraphrase can contain unsupported details even when its cited
+    user sentence is useful. Preserve only that sentence, re-running every
+    existing source, negation, subject, temporal and registry check.
+    Identity/grade and behavior/derived fields never take this path.
+    """
+    accepted, rejected = validate_ops(uid, ops, evidence_pool)
+    remaining = []
+    for item in rejected:
+        raw = item.get("raw") or {}
+        if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
+            remaining.append(item)
+            continue
+        key = canon_key(raw.get("key") or "")
+        quote = str(raw.get("evidence_quote") or "").strip()
+        unsafe_scope = any(s.kind in (evidence.OTHER, evidence.IRREALIS, evidence.COND,
+                                     evidence.MENTION, evidence.QUESTION)
+                           for s in evidence.scan(quote).scopes)
+        if (raw.get("op") in ("add", "replace")
+                and key.split(":")[0] in ("interest", "goal", "field", "career", "current", "base", "project", "style")
+                and str(item.get("reason", "")).split(":")[0] in ("value_exceeds_evidence", "short_value_not_in_evidence")
+                and 12 <= len(quote) <= 200 and not unsafe_scope):
+            retry, _ = validate_ops(uid, [{**raw, "value": quote}], evidence_pool)
+            if retry:
+                retry[0]["notes"].append("verbatim_quote_recovered")
+                accepted.extend(retry)
+                continue
+        remaining.append(item)
+    return accepted, remaining
 
 
 # ---------- 提交 ----------

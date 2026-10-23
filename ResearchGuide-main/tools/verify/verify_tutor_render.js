@@ -4,7 +4,7 @@ const path = require("path");
 
 const src = fs.readFileSync(
   path.join(path.resolve(__dirname, "..", ".."), "web", "js", "app.js"),
-  "utf8");
+  "utf8").replace(/\r\n/g, "\n");
 
 let fails = 0;
 const check = (c, l, e = "") => { console.log(`  [${c ? "OK " : "!! "}] ${l} ${e}`); if (!c) fails++; };
@@ -448,7 +448,7 @@ async function testShortDesktopPaperSpy() {
 
 async function testTutorDraftPersistsAcrossRerender() {
   const typed = "这一节想解决现有基准太窄的问题";
-  const key = "rg_tutor_u1_k1_2009.03300";
+  const key = "rg_tutor_u1_none_k1_2009.03300";
   const quoteSlot = { qid: "q_claim_quote", type: "find_quote", status: "pass", last: "x" };
   const baseSess = () => ({ status: "active", cur: 1, total: 8, slots: [{ ...quoteSlot }, { qid: "q_problem", type: "own", status: "open" }] });
   const build = (aid) => tutorPanel({

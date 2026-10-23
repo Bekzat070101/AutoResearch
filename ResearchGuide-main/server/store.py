@@ -32,6 +32,19 @@ DB_PATH = Path(os.environ.get("QIYAN_DB") or Path(__file__).resolve().parent / "
 _LOCK = threading.Lock()
 DB_READY = False
 
+# These tables belong to the live portrait, just like facts/messages. Public
+# paper text and generated question caches deliberately stay outside snapshots.
+_READING_COLS = {
+    "cards": ("id", "user_id", "kit_id", "arxiv_id", "version", "data", "status", "created_at"),
+    "triage": ("user_id", "kit_id", "arxiv_id", "verdict", "why", "title", "created_at"),
+    "tutor_sessions": ("user_id", "kit_id", "arxiv_id", "status", "state", "created_at", "updated_at"),
+    "user_papers": ("user_id", "pid", "sha", "title", "filename", "text", "pages", "created_at"),
+    "read_documents": ("user_id", "paper_id", "data", "completed_at", "updated_at"),
+    "edges": ("id", "user_id", "kind", "text", "evidence_url", "ref", "created_at"),
+    "statements": ("id", "user_id", "kit_id", "version", "x_ref", "data", "created_at"),
+    "bets": ("id", "user_id", "data", "status", "created_at", "updated_at"),
+}
+
 
 USER_DELETED = "user deleted"  # 触发器拒绝写入时的错误信息；main 把它转成 410
 
@@ -513,6 +526,7 @@ CREATE TABLE IF NOT EXISTS paper_collect_state (
 
 # 老库补列：SQLite 的 ADD COLUMN 是安全操作，已存在就跳过。
 _MIGRATIONS: list[tuple[str, str, str]] = [
+    ("messages", "reading_sources", "ALTER TABLE messages ADD COLUMN reading_sources TEXT NOT NULL DEFAULT '[]'"),
     ("users", "memory_version", "ALTER TABLE users ADD COLUMN memory_version INTEGER NOT NULL DEFAULT 0"),
     ("messages", "conversation_id", "ALTER TABLE messages ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"),
     ("facts", "valid_until", "ALTER TABLE facts ADD COLUMN valid_until TEXT"),
@@ -631,6 +645,8 @@ def init_db() -> None:
                 c.execute(ddl)
         for ddl in _AFTER_MIGRATIONS:
             c.execute(ddl)
+        import reading_memory
+        reading_memory.migrate(c)
         # 每张带 user_id 的表一个触发器：已删除的账号不能再插入行（以后加的表在下次启动时自动补上）
         for t in _user_tables(c):
             c.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{t}_not_deleted BEFORE INSERT ON {t} "
@@ -1416,13 +1432,14 @@ def save_submission(task_id: str, uid: str, payload: str) -> str:
     return sid
 
 
-def add_message(uid: str, role: str, text: str, round_id: str = "", conversation_id: str = "") -> str:
+def add_message(uid: str, role: str, text: str, round_id: str = "", conversation_id: str = "",
+                reading_sources: list | None = None) -> str:
     mid = new_id()
     with _LOCK, _conn() as c:
         c.execute(
-            "INSERT INTO messages(id, user_id, role, text, round, conversation_id, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (mid, uid, role, text, round_id, conversation_id, now_iso()),
+            "INSERT INTO messages(id, user_id, role, text, round, conversation_id, created_at, reading_sources)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (mid, uid, role, text, round_id, conversation_id, now_iso(), json.dumps(reading_sources or [], ensure_ascii=False)),
         )
     return mid
 
@@ -1481,10 +1498,10 @@ def _dump_live(c: sqlite3.Connection, uid: str) -> dict[str, Any]:
         item["evidence"] = json.loads(item.get("evidence") or "[]")
         facts.append(item)
     msgs = [
-        {"role": r["role"], "text": r["text"], "round": r["round"],
+        {"role": r["role"], "text": r["text"], "round": r["round"], "reading_sources": r["reading_sources"],
          "conversation_id": r["conversation_id"], "created_at": r["created_at"]}
         for r in c.execute(
-            "SELECT role, text, round, conversation_id, created_at FROM messages"
+            "SELECT role, text, round, conversation_id, created_at, reading_sources FROM messages"
             " WHERE user_id=? ORDER BY rowid", (uid,))
     ]
     u = c.execute("SELECT onboard_state, memory_version FROM users WHERE id=?", (uid,)).fetchone()
@@ -1514,10 +1531,13 @@ def _dump_live(c: sqlite3.Connection, uid: str) -> dict[str, Any]:
         "fact_revisions": rows("SELECT * FROM fact_revisions WHERE user_id=? ORDER BY rowid"),
         "decisions": rows("SELECT * FROM decisions WHERE user_id=? ORDER BY rowid"),
         "enrollments": rows("SELECT * FROM enrollments WHERE user_id=? ORDER BY rowid"),
+        **{t: rows(f"SELECT * FROM {t} WHERE user_id=? ORDER BY rowid") for t in _READING_COLS},
     }
 
 
 def _clear_live(c: sqlite3.Connection, uid: str) -> None:
+    for table in _READING_COLS:
+        c.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
     for table in ("facts", "messages", "tasks", "submissions", "projects",
                   "conversations", "actions", "events", "fact_revisions", "decisions",
                   "enrollments"):
@@ -1528,6 +1548,7 @@ def _clear_live(c: sqlite3.Connection, uid: str) -> None:
 # 恢复快照时的列顺序；memory_version / degraded 是整数列，缺省补 0，其余补空串。
 _NULLABLE_COLS = {"feedback"}  # 切画像存取快照时，这些列缺了就是 NULL，不要补成空串
 _RESTORE_COLS: dict[str, tuple[str, ...]] = {
+    **_READING_COLS,
     "tasks": ("id", "user_id", "data"),
     "submissions": ("id", "task_id", "user_id", "payload", "created_at", "feedback"),
     "projects": ("id", "user_id", "data", "status", "created_at", "updated_at"),
@@ -1542,7 +1563,7 @@ _RESTORE_COLS: dict[str, tuple[str, ...]] = {
     "enrollments": ("id", "user_id", "course", "grade", "credits", "term", "kind",
                     "status", "created_at", "updated_at"),
 }
-_NUMERIC_COLS = {"memory_version", "degraded", "credits"}
+_NUMERIC_COLS = {"memory_version", "degraded", "credits", "version", "pages"}
 
 
 def _restore_rows(c: sqlite3.Connection, table: str, uid: str, items: Any) -> None:
@@ -1577,10 +1598,10 @@ def _load_live(c: sqlite3.Connection, uid: str, snap: dict[str, Any]) -> None:
         )
     for m in snap.get("messages") or []:
         c.execute(
-            "INSERT INTO messages(id, user_id, role, text, round, conversation_id, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id, user_id, role, text, round, conversation_id, created_at, reading_sources)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (new_id(), uid, m.get("role") or "assistant", m.get("text") or "",
-             m.get("round") or "", m.get("conversation_id") or "", m.get("created_at") or now_iso()),
+             m.get("round") or "", m.get("conversation_id") or "", m.get("created_at") or now_iso(), m.get("reading_sources") or "[]"),
         )
     for table in _RESTORE_COLS:
         _restore_rows(c, table, uid, snap.get(table))
@@ -2123,6 +2144,13 @@ def put_user_paper(uid: str, pid: str, sha: str, title: str, filename: str, text
 
 def delete_user_paper(uid: str, pid: str) -> None:
     with _LOCK, _conn() as c:
+        c.execute("DELETE FROM read_documents WHERE user_id=? AND paper_id=?", (uid, pid))
+        keys = [f"card:{r['kit_id']}:{pid}" for r in c.execute("SELECT DISTINCT kit_id FROM cards WHERE user_id=? AND arxiv_id=?", (uid, pid))]
+        for key in keys:
+            c.execute("DELETE FROM facts WHERE user_id=? AND key=?", (uid, key))
+        c.execute("DELETE FROM cards WHERE user_id=? AND arxiv_id=?", (uid, pid))
+        if keys:
+            c.execute("UPDATE users SET memory_version=memory_version+1 WHERE id=?", (uid,))
         c.execute("DELETE FROM user_papers WHERE user_id=? AND pid=?", (uid, pid))
         c.execute("DELETE FROM tutor_sessions WHERE user_id=? AND arxiv_id=?", (uid, pid))
 
@@ -2163,6 +2191,12 @@ def put_paper_pool(key: str, day: str, papers: list[dict[str, Any]]) -> None:
             (key, day, json.dumps(papers, ensure_ascii=False), now_iso()),
         )
         c.execute("DELETE FROM paper_pool WHERE day < ?", (_arxiv_day_offset(-3),))
+        if key.startswith("recommend-search:"):
+            # Only public retrieval metadata. Account/portrait results and
+            # evidence never enter this shared cache; bound distinct queries.
+            c.execute("DELETE FROM paper_pool WHERE key LIKE 'recommend-search:%' AND rowid NOT IN "
+                      "(SELECT rowid FROM paper_pool WHERE key LIKE 'recommend-search:%' "
+                      "ORDER BY fetched_at DESC, rowid DESC LIMIT 256)")
 
 
 def _arxiv_day_offset(delta: int) -> str:
@@ -2328,6 +2362,19 @@ def _conv_row(r: sqlite3.Row) -> dict[str, Any]:
     return dict(r)
 
 
+def _conversation_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def create_conversation(uid: str) -> dict[str, Any]:
+    cid, now = new_id(), _conversation_now()
+    with _LOCK, _conn() as c:
+        c.execute("INSERT INTO conversations(id,user_id,status,topic_hint,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                  (cid, uid, "open", "", now, now))
+    return {"id": cid, "status": "open", "topic_hint": "", "created_at": now, "updated_at": now}
+
+
 def open_conversation(uid: str, topic_hint: str = "") -> dict[str, Any]:
     """取本画像当前打开的会话；没有就新建。"""
     with _LOCK, _conn() as c:
@@ -2357,10 +2404,10 @@ def get_conversation(uid: str, cid: str) -> dict[str, Any] | None:
 def touch_conversation(uid: str, cid: str, topic_hint: str | None = None) -> None:
     with _LOCK, _conn() as c:
         if topic_hint is None:
-            c.execute("UPDATE conversations SET updated_at=? WHERE id=? AND user_id=?", (now_iso(), cid, uid))
+            c.execute("UPDATE conversations SET updated_at=? WHERE id=? AND user_id=?", (_conversation_now(), cid, uid))
         else:
-            c.execute("UPDATE conversations SET updated_at=?, topic_hint=? WHERE id=? AND user_id=?",
-                      (now_iso(), topic_hint[:200], cid, uid))
+            c.execute("UPDATE conversations SET updated_at=?, topic_hint=CASE WHEN topic_hint='' THEN ? ELSE topic_hint END WHERE id=? AND user_id=?",
+                      (_conversation_now(), topic_hint[:200], cid, uid))
 
 
 def close_conversation(uid: str, cid: str) -> None:
@@ -2375,7 +2422,7 @@ def list_conversations(uid: str, statuses: list[str] | None = None) -> list[dict
     if statuses:
         q += f" AND status IN ({','.join('?' * len(statuses))})"
         args += statuses
-    q += " ORDER BY rowid"
+    q += " ORDER BY updated_at DESC, rowid DESC"
     with _conn() as c:
         return [_conv_row(r) for r in c.execute(q, args).fetchall()]
 

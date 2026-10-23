@@ -102,7 +102,7 @@ function extract(src, name) {
 
   console.log("=== 18-F05 历史加载不覆盖输入 ===");
   const histIdx = chatSrc.indexOf("await api(\"GET\", `/api/dialogue/history");
-  const restoreIdx = chatSrc.indexOf("sessionStorage.getItem(\"rg_chat_draft_\"");
+  const restoreIdx = chatSrc.indexOf("sessionStorage.getItem(draftKey)");
   const listenIdx = chatSrc.indexOf("input.addEventListener(\"input\"");
   check(restoreIdx >= 0 && restoreIdx < histIdx, "草稿恢复在 await history 之前");
   check(listenIdx >= 0 && listenIdx < histIdx, "input 监听在 await history 之前");

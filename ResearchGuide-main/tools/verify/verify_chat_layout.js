@@ -81,13 +81,14 @@ function layoutBlock() {
 
 // Execute the real layout builder: receipts belong to the conversation,
 // suggestions belong to the composer. There is no third scroll strip.
-const mkHead = (entered) => new Function("el", "S", extract("dialogueHead") + "\nreturn dialogueHead();")(el, {entered});
-check(byClass(mkHead(false), "enter-bar").length === 1, "首次引导有提前进入入口");
-check(mkHead(false).textContent.includes("聊一聊你的大概情况"), "首次引导先邀请提供明确的学习背景");
+const button = (text, cls) => el("button", cls, text);
+const mkHead = (entered) => new Function("el", "S", "embedded", "button", "enterApp", extract("dialogueHead") + "\nreturn dialogueHead();")(el, {entered}, !entered, button, () => {});
+check(byClass(mkHead(false), "onboarding-actions").length === 1, "首次引导有提前进入入口");
+check(mkHead(false).textContent.includes("学习背景"), "首次引导先邀请提供明确的学习背景");
 check(byClass(mkHead(true), "enter-bar").length === 0, "普通对话不重做引导");
-const built = new Function("el", "$app", "S", layoutBlock() +
+const built = new Function("el", "$app", "S", "embedded", "openDirections", layoutBlock() +
   "\nreturn {wrap,chat,scroll,actions,inputZone,inputRow,input,stageLine,side,suggestions};")(
-    el, el("main"), {entered:false});
+    el, el("main"), {entered:false}, true, () => {});
 check(built.chat.children.length === 2, "对话流和输入区两块，不存在中间滚动带");
 check(built.chat.children[0] === built.scroll, "对话流在上方");
 check(built.chat.children[1] === built.inputZone, "输入区固定在下方");

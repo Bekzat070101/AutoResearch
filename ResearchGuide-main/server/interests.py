@@ -70,8 +70,9 @@ def l1_of_topic(tid: str) -> str:
 
 
 def direction_nodes(uid: str) -> list[str]:
-    """当前画像勾选的方向（多选）：trail.sel，空列表 = 全没勾（推荐回落到泛兴趣）；
-    没有 sel 键的老数据视为全选 trail.dirs；再退到单个 trail.dir。"""
+    """本轮方向以 trail.dir 为准；dirs 是收藏，不是当前推荐范围。
+    老数据没有当前方向时仍兼容 sel，但不把所有收藏混入推荐。
+    """
     trail = store.get_trail(uid, store.active_portrait_id(uid) or "default")
     nodes = table()["nodes"]
 
@@ -80,14 +81,13 @@ def direction_nodes(uid: str) -> list[str]:
             return None
         return [str(n or "") for n in raw if str(n or "") in nodes]
 
+    node = str(trail.get("dir") or "")
+    if node in nodes:
+        return [node]
     sel = as_ids(trail.get("sel"))
     if sel is not None:
         return sel
-    pool = as_ids(trail.get("dirs"))
-    if pool:
-        return pool
-    node = str(trail.get("dir") or "")
-    return [node] if node in nodes else []
+    return []
 
 
 def direction_node(uid: str) -> str:

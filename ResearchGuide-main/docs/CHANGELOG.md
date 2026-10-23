@@ -14,6 +14,23 @@
 - 决策来源：合入 PR #35（Yukinannie/feat/web-copy-login-layout），叠在 #29–#34 之上
 - 登记人：邬程灿
 
+## [2026-10-23] [UI] 保留首次信息对话并统一页面风格
+
+- 首次登录恢复完整信息采集对话，桌面双栏显示聊天和用户背景摘要，手机单栏；进入应用后原会话迁入全局气泡。
+- 统一标题层级、纸色卡片、圆角、边距和青绿色按钮，与今日、研读模块保持一致。界面版本 w109。
+- 影响文档：docs/DIALOGUE_WORKSPACE.md；影响模块：web/js/chat.js、web/js/app.js、web/css/styles.css。
+- 决策来源：用户要求保留首次信息对话，并统一与其他模块的风格；登记人：Codex。
+
+## [2026-10-23] [FEAT] 全局气泡、多会话与画像内已读文献
+
+- 对话移至全局常驻气泡，提供新建／切换会话及独立草稿；沿用一次一条生成和用户写锁。
+- 发送核对画像及会话，历史不再合并会话，原话证据池限定本会话。
+- 阅读卡、个人带读和私有论文纳入画像快照；通过卡片事务写入已读索引，新增阅读检索工具和来源展示。
+- 旧数据按明确证据归属，未知归属保留为待处理记录，提供只读迁移报告。详见 `DIALOGUE_WORKSPACE.md`。
+- 影响文档：docs/DIALOGUE_WORKSPACE.md、docs/DIALOGUE_CONTRACT.md。
+- 决策来源：用户确认的本周对话模块实施方案。
+- 登记人：Codex。
+
 ## [2026-10-23] [FIX] CI 上 pytest 的 /tmp/pytest-of-runner 不再被误判成 db_in_tmp
 
 - 变更内容：`store.db_blocked()` 只把 `/tmp/qiyan.db` 这类实例临时盘判成 `db_in_tmp`。GitHub Actions 的 `tmp_path` 在 `/tmp/pytest-of-runner/...`，里面用 `mnt/nas` 模拟挂盘，不能当临时盘，否则 `test_db_mount_gate` 两条全红（PR #29–#34 的检查都栽在这）。

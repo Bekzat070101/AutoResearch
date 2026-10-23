@@ -14,6 +14,7 @@ from typing import Any, Callable
 import curriculum
 import mcp_curriculum
 import store
+import reading_memory
 import transcript
 from pku_adapter import search_courses
 
@@ -21,6 +22,14 @@ from pku_adapter import search_courses
 # 每个工具：说明（进 prompt）+ 参数 + 执行函数。参数只做必要校验，多余的一律丢弃。
 
 TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "reading.search": {
+        "desc": "检索当前画像已通过阅读卡的文献和阅读笔记。问读过什么或提到已读论文时用；query 为空列最近已读。",
+        "params": {"query": "可选，论文名、论文ID或笔记关键词", "limit": "可选，1-20，默认5"},
+    },
+    "reading.detail": {
+        "desc": "读取当前画像某篇已读文献的通过卡片、笔记与已核对引文。不能读取其他画像或尚未通过的论文。",
+        "params": {"paper_id": "reading.search 返回的 paper_id"},
+    },
     "course.search": {
         "desc": "检索北大公开课。用户问到「有没有课」「该上什么课」时用。失败会返回 ok=false，照实说。",
         "params": {"query": "检索词，如「机器学习」「社会心理学」", "limit": "可选，1-10，默认 5"},
@@ -220,6 +229,8 @@ def _kb_tool(name: str, uid: str, args: dict[str, Any],
 
 
 _HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
+    "reading.search": lambda uid, args: reading_memory.search(uid, _as_text(args.get("query"), 200), _as_int(args.get("limit"), 5, 1, 20)),
+    "reading.detail": lambda uid, args: reading_memory.detail(uid, _as_text(args.get("paper_id"), 160)),
     "course.search": _course_search,
     "transcript.summary": _transcript_summary,
 }

@@ -33,7 +33,7 @@ function mkEl(tag) {
     remove() { const p = this.parent; if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); } },
     setAttribute(k, v) { this.attrs[k] = v; },
     addEventListener() {}, focus() {}, blur() {}, click() { if (this.onclick) this.onclick(); },
-    querySelector() { return null; },
+    querySelector(s) { return s.startsWith(".") ? byClass(this, s.slice(1))[0] || null : null; },
   };
   // 真 DOM 里 .parentNode 和 .parentElement 都在。渲染代码用的是
   // actions.parentNode.insertBefore(...)，只给 .parent 会误报成产品 bug。
@@ -78,14 +78,15 @@ const S = { uid: "u1", portraitId: "p1", entered: false };
 const saved = new Map();
 const localStorage = { getItem: (k) => saved.get(k), setItem: (k, v) => saved.set(k, v) };
 const entryInvitations = new Set();
-let entries = 0, focuses = 0;
+let entries = 0, focuses = 0, directions = 0;
 const enterApp = () => { entries++; };
 const input = { focus: () => { focuses++; } };
 let actions;
 function make() {
   actions = el("div", "action-slot");
-  return new Function("el", "S", "localStorage", "entryInvitations", "actions", "input", "enterApp", "scroll",
-    extract("enterCard") + "\nreturn enterCard;")(el, S, localStorage, entryInvitations, actions, input, enterApp, el("div", "chat-scroll"));
+  return new Function("el", "S", "localStorage", "entryInvitations", "actions", "input", "enterApp", "scroll", "button", "openDirections",
+    extract("enterCard") + "\nreturn enterCard;")(el, S, localStorage, entryInvitations, actions, input, enterApp, el("div", "chat-scroll"),
+      (text, cls) => el("button", cls, text), () => directions++);
 }
 let invite = make();
 invite();
@@ -95,15 +96,19 @@ let buttons = walk(actions).filter((n) => n.tagName === "BUTTON");
 buttons.find((b) => b.textContent === "再聊聊").click();
 check(actions.children.length === 0 && focuses === 1, "再聊聊关闭卡片并回到输入框");
 invite();
-check(actions.children.length === 0, "下一轮不重复催进入");
+check(actions.children.length === 1, "下一轮仍可找到进入入口，不要求继续补信息");
+invite();
+check(actions.children.length === 1, "同一面板内不插入重复邀请");
 entryInvitations.clear();
 invite = make(); invite();
-check(actions.children.length === 0, "刷新后也不重复弹出");
+check(actions.children.length === 1, "刷新后恢复可见的进入入口");
 S.portraitId = "p2";
 invite = make(); invite();
 check(actions.children.length === 1, "新画像有独立的一次邀请");
 buttons = walk(actions).filter((n) => n.tagName === "BUTTON");
-buttons.find((b) => b.textContent === "进入启研").click();
+buttons.find((b) => b.textContent === "查看推荐方向").click();
+check(directions === 1, "方向入口调用统一方向页面");
+buttons.find((b) => b.textContent === "直接进入研读").click();
 check(entries === 1, "进入按钮仍能调用现有进入流程");
 S.entered = true; S.portraitId = "p3";
 invite = make(); invite();

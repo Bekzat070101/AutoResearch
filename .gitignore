@@ -38,3 +38,6 @@ desktop.ini
 .idea/
 .vscode/
 *.log
+
+# 只供本机回归：含测试账号、数据库、真实对话和验收输出，不进 GitHub。
+local-regression-*/

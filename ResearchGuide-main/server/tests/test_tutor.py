@@ -170,6 +170,8 @@ def test_abstract_only_paper_has_one_station_and_flags_it(fake_model, monkeypatc
     pub = tutor.start(uid(), KIT, AID)
     assert "只拿到摘要" in pub["notice"]
     assert all(s["station"] == "abstract" for s in pub["slots"])
+    assert pub["summary_only"] and pub["total"] == 3
+    assert not any(s["type"] in ("number", "limitation") for s in pub["slots"])
 
 
 def test_full_flow_with_model_grading(fake_model):

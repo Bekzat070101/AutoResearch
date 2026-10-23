@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from typing import Any
@@ -15,7 +16,7 @@ import skills
 import store
 from schemas import now_iso
 
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 EXCERPT_MAX = 3500
 SENT_MIN, SENT_MAX = 12, 400
 ATTEMPTS_MAX, ANSWERS_MAX = 3, 40
@@ -257,6 +258,8 @@ def _template_items(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items = []
     for sl in slots:
         q, h, crit = TEMPLATES.get((sl["type"], sl["field"]), ("回答这一题", "", []))
+        if sl.get("summary_only") and sl["qid"] == "q_problem":
+            h = "只依据摘要，说清作者想解决的问题；摘要没说的保持未知"
         items.append(_fresh({**sl, "question": q, "hint": h, "criteria": list(crit), "voice": "rules", "anchor": None}))
     return items
 
@@ -340,7 +343,14 @@ def _cache_blob(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _gen_station(uid: str, paper: dict[str, Any], station: dict[str, Any], slots: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    import recommendations
+    context = recommendations.learning_context(uid)
     sha, sk = paper_sha(paper), skill_sha()
+    personal = any(e["key"] != "current_direction" for e in context["evidence"])
+    if personal:
+        # Same public text may be shared; personalized questions must not be.
+        sk = recommendations.digest({"skill": sk, "uid": uid, "portrait": context["portrait_id"],
+                                     "evidence": context["evidence"], "direction": context["current_direction"]})
     key = (paper.get("id") or "", station["key"], sha, PLAN_VERSION, sk)
     with _GEN_GUARD:
         wait = _GEN_WAIT.setdefault(key, threading.Lock())
@@ -360,6 +370,13 @@ def _gen_station(uid: str, paper: dict[str, Any], station: dict[str, Any], slots
                     f"{sl['qid']} | {sl['type']} | {sl['field'] or '不进卡'} | {TEMPLATES.get((sl['type'], sl.get('field') or ''), ('考察本节', '', []))[0]}"
                     for sl in slots)
             )
+            if personal:
+                user += ("\n用户学习依据（只用于调整问法、提示和例子，不能替用户作答或改写原文）：\n"
+                         + json.dumps(context, ensure_ascii=False)
+                         + "\n必须仍围绕本站原文及既定题位出题；在修不等于掌握，历史兴趣不能改变本文事实。"
+                           "没有全文时仅检验摘要中实际出现的主张，不问未提供的实验细节。"
+                           "至少一个解释题或提示要具体衔接用户的已知实践或困难，例如Tool调用、统计对照或公式不熟；"
+                           "保持题干不超过60字、提示不超过40字，不泄露题目答案。")
             data = llm.chat_json(skills.load("paper-tutor"), user, timeout=MODEL_TIMEOUT, tag="paper-tutor", uid=uid)
             items = _valid_items(data, slots, sents, paper)
             if items and any(i.get("voice") == "llm" for i in items):
@@ -509,7 +526,7 @@ def public(state: dict[str, Any], ready: bool | None = None) -> dict[str, Any]:
     total = len(state.get("plan") or state.get("slots") or [])
     notice = []
     if any("只拿到摘要" in (st.get("label") or "") for st in state.get("stations") or []):
-        notice.append("只拿到摘要")
+        notice.append("只拿到摘要，仅做摘要练习；不计为完成全文阅读，获取全文后可重开完整带读")
     if state.get("status") == "stale":
         notice.append("原文变了，请重开")
     if state.get("rules_fallback") and ready is not True:
@@ -522,6 +539,7 @@ def public(state: dict[str, Any], ready: bool | None = None) -> dict[str, Any]:
         notice.append(f"有 {n} 题已保存，等模型恢复后判分")
     return {
         "status": state.get("status"), "rev": state.get("rev", 0),
+        "summary_only": state.get("paper_source") == "abstract",
         "voice": voice, "notice": "；".join(notice),
         "cur": cur, "total": total, "slots": slots,
         "stations": [{"key": s["key"], "label": s["label"], "heading": s.get("heading") or "",
@@ -569,6 +587,9 @@ def _fill_station(uid: str, paper: dict[str, Any], state: dict[str, Any], st_key
 def _build(uid: str, kit_id: str, paper: dict[str, Any]) -> dict[str, Any]:
     sts = stations(paper)
     plan = _place_slots(sts)
+    if paper.get("source") == "abstract":
+        plan = [{**sl, "summary_only": True} for sl in plan
+                if sl["qid"] in ("q_claim_quote", "q_claim", "q_problem")]
     state = {
         "v": 1, "plan_version": PLAN_VERSION, "paper_source": paper.get("source"),
         "paper_sha": paper_sha(paper), "stations": sts, "plan": plan, "slots": [],

@@ -492,7 +492,8 @@ async function r4Dirs() {
       await run(env, op);
       const last = env.calls.trailPuts[env.calls.trailPuts.length - 1] || {};
       const wantDirs = op === "remove" ? ["110.67"] : ["190.20", "110.67", "520.20"];
-      const wantSel = op === "remove" ? ["110.67"] : ["110.67", "520.20"];
+      // 收藏不切换本轮方向；明确 choose 才把 sel 镜像为唯一当前方向。
+      const wantSel = op === "choose" ? ["520.20"] : [];
       check(env.calls.trailGets >= 1, `${op} trail200: 写前读了 trail`, String(env.calls.trailGets));
       check(env.calls.trailPuts.length === 1, `${op} trail200: 恰 1 次 trail PUT`, String(env.calls.trailPuts.length));
       check(J(last.dirs) === J(wantDirs) && J(last.sel) === J(wantSel), `${op} trail200: dirs/sel 按新读值构造`, J({ dirs: last.dirs, sel: last.sel }));
@@ -517,7 +518,7 @@ async function r4Dirs() {
     const env = mk({ prefsGetFail: true });
     await env.chooseDirection("520.20");
     const last = env.calls.trailPuts[env.calls.trailPuts.length - 1] || {};
-    check(J(last.dirs) === J(["190.20", "110.67", "520.20"]) && J(last.sel) === J(["110.67", "520.20"]), "choose prefs500: trail 按新读值写", J(last));
+    check(J(last.dirs) === J(["190.20", "110.67", "520.20"]) && J(last.sel) === J(["520.20"]), "choose prefs500: trail 按新读值写", J(last));
     check(env.calls.prefsPuts.length === 0, "choose prefs500: 0 次 prefs PUT", J(env.calls.prefsPuts));
     check(env.toasts.includes("方向已确认，收藏列表没读到，没有改「我的」"), "choose prefs500: 原提示", J(env.toasts));
   }

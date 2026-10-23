@@ -112,8 +112,9 @@ def test_project_tools_are_unavailable_to_dialogue(name):
     assert r == {"ok": False, "tool": name, "error": "unknown tool"}
 
 
-def test_dialogue_keeps_all_seven_profile_and_curriculum_tools():
+def test_dialogue_keeps_profile_curriculum_and_reading_tools():
     assert set(tools.TOOL_SPECS) == {
         "course.search", "transcript.summary", "major_lookup", "major_detail",
         "match_transcript", "minor_programs", "course_lookup",
+        "reading.search", "reading.detail",
     }

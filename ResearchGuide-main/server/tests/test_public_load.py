@@ -113,14 +113,29 @@ def test_flight_caps_pending_work_and_drops_abandoned_jobs():
 def test_many_distinct_papers_get_a_busy_answer_not_an_unbounded_queue(monkeypatch):
     release = threading.Event()
     monkeypatch.setattr(main, "_paper_cached", lambda aid: None)
-    monkeypatch.setattr(main, "_paper_payload", lambda aid: release.wait(5) and {"id": aid, "text": "t"})
+    monkeypatch.setattr(main, "_paper_payload", lambda aid: release.wait(10) and {"id": aid, "text": "t"})
 
     async def run():
+        arrived = asyncio.Event()
+        calls = 0
+        original = main._shared
+        async def counted(key, fn, *args):
+            nonlocal calls
+            if key[0] == "paper":
+                calls += 1
+                if calls == 60:
+                    arrived.set()
+            return await original(key, fn, *args)
+        monkeypatch.setattr(main, "_shared", counted)
         async with _asgi() as c:
             reqs = [asyncio.create_task(c.get(f"/api/papers/2601.{10000 + i}")) for i in range(60)]
-            await asyncio.sleep(0.3)
-            pending = main._FLIGHTS["arxiv"].in_flight()
-            release.set()
+            try:
+                # Wait for the intended simultaneous pressure; a fixed 300ms
+                # released early on slow hosts and never actually filled it.
+                await asyncio.wait_for(arrived.wait(), 5)
+                pending = main._FLIGHTS["arxiv"].in_flight()
+            finally:
+                release.set()
             done = await asyncio.gather(*reqs)
         return pending, [r.status_code for r in done]
 
