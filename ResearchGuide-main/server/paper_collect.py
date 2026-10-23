@@ -15,6 +15,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import arxiv  # noqa: E402
+import biorxiv  # noqa: E402
 import interests  # noqa: E402
 import osf  # noqa: E402
 import reading  # noqa: E402
@@ -55,21 +56,34 @@ def _fetch_topic(tid: str, max_results: int = 40) -> tuple[list[dict[str, Any]],
                              max_results=max_results)
             _pause()
             return got or [], ""
+        if spec.get("source") == "biorxiv":
+            got = biorxiv.recent(spec.get("server") or "biorxiv", spec.get("biorxiv_category") or "",
+                                 spec.get("en") or [], max_results=max_results)
+            return got or [], ""
         got = arxiv.recent(spec.get("categories") or [], spec.get("en") or [],
                            max_results=max_results) or []
         return got, ""
-    except (arxiv.ArxivError, osf.OsfError) as exc:
+    except (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError) as exc:
         if spec.get("source") == "osf":
             _pause()
         return [], str(exc)
 
 
-def _fetch_node(node_id: str, quota: int) -> tuple[list[dict[str, Any]], list[str]]:
+def _topic_source(tid: str) -> str:
+    spec = interests.topic(tid) or {}
+    return str(spec.get("source") or "arxiv")
+
+
+def _fetch_node(node_id: str, quota: int, source: str = "") -> tuple[list[dict[str, Any]], list[str]]:
+    """source 非空时只收该来源的话题（spec 无 source 键视为 arxiv）；q-bio 常常自己凑够定额，
+    轮不到第二来源，要专门铺 bioRxiv 目录时就靠这个开关。"""
     reasons: list[str] = []
     papers: list[dict[str, Any]] = []
     nodes = interests.table()["nodes"]
-    tids = list(nodes.get(node_id) or [])
-    for tid in tids:
+    wanted = [t for t in (nodes.get(node_id) or []) if not source or _topic_source(t) == source]
+    if not wanted:
+        return [], ([f"没有 source={source} 的话题"] if source else ["没有这个话题"])
+    for tid in wanted:
         got, err = _fetch_topic(tid, 40)
         if err:
             reasons.append(f"{tid}: {err}")
@@ -80,7 +94,7 @@ def _fetch_node(node_id: str, quota: int) -> tuple[list[dict[str, Any]], list[st
     parent = node_id.rsplit(".", 1)[0] if "." in node_id else ""
     if len(papers) < quota and parent and parent in nodes:
         for tid in nodes[parent]:
-            if tid in tids:
+            if tid in wanted or (source and _topic_source(tid) != source):
                 continue
             got, err = _fetch_topic(tid, 40)
             if err:
@@ -123,10 +137,12 @@ def _is_arxiv_id(pid: str) -> bool:
         return False
 
 
-def _fulltext_node(node_id: str, want: int) -> dict[str, int]:
+def _fulltext_node(node_id: str, want: int, source: str = "") -> dict[str, int]:
     html_or_pdf = abstract_only = failed = 0
     rows = store.list_paper_dir(node_id)
     for row in rows:
+        if source and row.get("source") != source:
+            continue  # 按来源铺目录时，别拿别的来源的旧正文凑定额
         if html_or_pdf >= want:
             break
         pid = row["paper_id"]
@@ -141,6 +157,21 @@ def _fulltext_node(node_id: str, want: int) -> dict[str, int]:
                 src = (got or {}).get("source") or ""
                 if src in ("html", "pdf"):
                     store.put_paper_text(osf.clean_id(pid), got, pinned=True)
+                    html_or_pdf += 1
+                else:
+                    abstract_only += 1
+                    _log({"phase": "fulltext", "node": node_id, "paper_id": pid,
+                          "error": (got or {}).get("reason") or "abstract_only"})
+            except Exception as exc:
+                failed += 1
+                _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": str(exc)[:200]})
+            continue
+        if biorxiv.is_id(pid):
+            try:
+                got = biorxiv.fulltext(pid)
+                src = (got or {}).get("source") or ""
+                if src in ("html", "pdf"):
+                    store.put_paper_text(biorxiv.clean_id(pid), got, pinned=True)
                     html_or_pdf += 1
                 else:
                     abstract_only += 1
@@ -219,22 +250,28 @@ def node_quota(node_id: str, quota: int, fulltext: int) -> tuple[int, int]:
 
 
 def collect_node(node_id: str, quota: int = 20, fulltext: int = 8, xlate: bool = False,
-                 metadata_only: bool = False) -> dict[str, Any]:
+                 metadata_only: bool = False, source: str = "") -> dict[str, Any]:
     if node_id not in interests.table()["nodes"]:
         raise CollectError(f"没有这个节点：{node_id}")
     q, ft = node_quota(node_id, quota, fulltext)
-    topic_id = (interests.table()["nodes"].get(node_id) or [""])[0]
-    have = len(store.list_paper_dir(node_id))
+    tids = [t for t in (interests.table()["nodes"].get(node_id) or [])
+            if not source or _topic_source(t) == source]
+    topic_id = tids[0] if tids else ""
+    have = len(store.list_paper_dir(node_id)) if not source else len(
+        [r for r in store.list_paper_dir(node_id) if r.get("source") == source])
     reasons: list[str] = []
     if have < q:
-        papers, reasons = _fetch_node(node_id, q)
+        papers, reasons = _fetch_node(node_id, q, source)
         _write_dir(node_id, papers, topic_id)
-    dir_n = len(store.list_paper_dir(node_id))
+    dir_n = len(store.list_paper_dir(node_id)) if not source else len(
+        [r for r in store.list_paper_dir(node_id) if r.get("source") == source])
     ft_stats = {"html_or_pdf": 0, "abstract_only": 0, "failed": 0}
     if not metadata_only and ft:
-        ft_stats = _fulltext_node(node_id, ft)
+        ft_stats = _fulltext_node(node_id, ft, source)
         html_n = 0
         for row in store.list_paper_dir(node_id):
+            if source and row.get("source") != source:
+                continue
             t = store.get_paper_text(row["paper_id"])
             if t and t.get("source") in ("html", "pdf"):
                 html_n += 1
@@ -258,7 +295,8 @@ def collect_node(node_id: str, quota: int = 20, fulltext: int = 8, xlate: bool =
 
 
 def collect(node: str = "", quota: int = 20, fulltext: int = 8, xlate: bool = False,
-            metadata_only: bool = False, pin_kit: bool = True, max_seconds: float = 240) -> dict[str, Any]:
+            metadata_only: bool = False, pin_kit: bool = True, max_seconds: float = 240,
+            source: str = "") -> dict[str, Any]:
     store.init_db()
     if store.ephemeral():
         raise CollectError("ephemeral 库禁止 collect，避免往生产 /tmp 灌库")
@@ -284,7 +322,7 @@ def collect(node: str = "", quota: int = 20, fulltext: int = 8, xlate: bool = Fa
         store.set_collect_progress(nid, "running")
         try:
             out.append(collect_node(nid, quota=quota, fulltext=fulltext, xlate=xlate,
-                                    metadata_only=metadata_only))
+                                    metadata_only=metadata_only, source=source))
         except CollectError:
             raise
         except Exception as exc:
@@ -346,6 +384,7 @@ def main() -> None:
     p.add_argument("--metadata-only", action="store_true")
     p.add_argument("--no-xlate", action="store_true")
     p.add_argument("--no-kit", action="store_true")
+    p.add_argument("--source", default="", help="只收该来源的话题：arxiv / osf / biorxiv / medrxiv；空=不过滤")
     args = p.parse_args()
     store.init_db()
     if args.report and not args.all and not args.node:
@@ -356,7 +395,7 @@ def main() -> None:
         p.error("需要 --node、--all 或 --report")
     rec = collect(node="" if args.all else args.node, quota=args.quota, fulltext=args.fulltext,
                   xlate=not args.no_xlate, metadata_only=args.metadata_only,
-                  pin_kit=not args.no_kit)
+                  pin_kit=not args.no_kit, source=args.source)
     print(json.dumps(rec, ensure_ascii=False, indent=2))
     if args.report:
         print(json.dumps(report(), ensure_ascii=False, indent=2))

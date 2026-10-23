@@ -47,7 +47,7 @@ def main() -> None:
         if time.time() - t0 > args.budget:
             break
         try:
-            arxiv.fulltext(aid, hint=hint or None)
+            reading.warm_fetch(aid, hint=hint or None)
             done += 1
         except Exception as exc:
             print(f"fail {aid}: {exc}")

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import arxiv
+import biorxiv
 import interests
 import osf
 import quotes
@@ -165,6 +166,15 @@ def daily_source(kit_id: str, cached_only: bool = False) -> tuple[list[dict[str,
         return [], str(exc)
 
 
+def warm_fetch(aid: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
+    """预热取正文：按 id 前缀分派（arXiv / OSF / bioRxiv）。osf/biorxiv 的 fulltext 自己落库。"""
+    if osf.is_id(aid):
+        return osf.fulltext(aid)
+    if biorxiv.is_id(aid):
+        return biorxiv.fulltext(aid)
+    return arxiv.fulltext(aid, hint=hint)
+
+
 def arxiv_day() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=5)).date().isoformat()
 
@@ -185,12 +195,15 @@ def topic_source(topic_id: str, cached_only: bool = False) -> tuple[list[dict[st
     try:
         if spec.get("source") == "osf":
             papers = osf.recent(spec.get("provider") or "psyarxiv", spec.get("subjects") or [], max_results=25) or []
+        elif spec.get("source") == "biorxiv":
+            papers = biorxiv.recent(spec.get("server") or "biorxiv", spec.get("biorxiv_category") or "",
+                                    spec.get("en") or [], max_results=25) or []
         else:
             papers = arxiv.recent(spec.get("categories") or [], spec.get("en") or [], max_results=50) or []
         store.put_paper_pool(topic_id, day, papers)
         schedule_xlate(papers[:12], spec)
         return papers, "", False
-    except (arxiv.ArxivError, osf.OsfError) as exc:
+    except (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError) as exc:
         if old:
             return old["papers"], str(exc), True
         return [], str(exc), False
@@ -495,7 +508,10 @@ def triage(uid: str, kit_id: str, arxiv_id: str, verdict: str, why: str, title: 
     if kit_id != "*daily":
         kit(kit_id)
     raw = (arxiv_id or "").strip()
-    aid = osf.clean_id(raw) if osf.is_id(raw) else arxiv.clean_id(raw)
+    if biorxiv.is_id(raw):
+        aid = biorxiv.clean_id(raw)
+    else:
+        aid = osf.clean_id(raw) if osf.is_id(raw) else arxiv.clean_id(raw)
     if verdict not in ("keep", "skip"):
         raise ReadingError("只能选「留」或「跳过」")
     why = (why or "").strip()

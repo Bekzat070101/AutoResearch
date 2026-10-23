@@ -235,18 +235,20 @@ def _write_restore_bytes(path: Path, raw: bytes) -> None:
 
 @router.post("/api/admin/papers/collect")
 def papers_collect(request: Request, node: str = "", quota: int = 20, fulltext: int = 8,
-                   max_seconds: int = 240):
+                   max_seconds: int = 240, source: str = ""):
     _admin(request)
     if quota < 1 or quota > 50:
         raise HTTPException(400, "quota 须在 1–50")
     if fulltext < 0 or fulltext > quota:
         raise HTTPException(400, "fulltext 须在 0–quota")
+    if source not in ("", "arxiv", "osf", "biorxiv", "medrxiv"):
+        raise HTTPException(400, "source 只认 arxiv / osf / biorxiv / medrxiv")
     import paper_collect
     if not store.try_collect_lock(max_seconds):
         raise HTTPException(409, "采集正在跑")
     try:
         return paper_collect.collect(node=node, quota=quota, fulltext=fulltext, xlate=True,
-                                     max_seconds=max_seconds)
+                                     max_seconds=max_seconds, source=source)
     except paper_collect.CollectError as exc:
         raise HTTPException(409, str(exc)) from exc
     finally:
@@ -264,7 +266,7 @@ def papers_warm(request: Request, budget: int = 240):
         if time.time() - t0 > budget:
             break
         try:
-            reading.arxiv.fulltext(aid, hint=hint or None)
+            reading.warm_fetch(aid, hint=hint or None)
             if pinned:
                 row = store.get_paper_text(aid)
                 if row:

@@ -43,7 +43,7 @@ def topic(tid: str) -> dict[str, Any] | None:
 
 def is_thin_topic(tid: str) -> bool:
     spec = topic(tid) or {}
-    if spec.get("source") in ("osf", "psyarxiv", "socarxiv"):
+    if spec.get("source") in ("osf", "psyarxiv", "socarxiv", "biorxiv", "medrxiv"):
         return False
     if spec.get("source") == "arxiv" and not spec.get("en"):
         return False

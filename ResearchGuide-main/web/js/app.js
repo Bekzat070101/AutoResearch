@@ -5544,10 +5544,10 @@ async function renderCard() {
   const kws = (paper.keywords && paper.keywords.length) ? paper.keywords : ((kitP && kitP.keywords) || []);
   let absNote = "正文已取到，引文可逐字核对";
   if (paper.source === "pdf") absNote = "你导入的 PDF · 只有你能看到";
-  else if (paper.source !== "html") absNote = "只取到摘要：正文引文核对不了，请先读 arXiv 原文";
+  else if (paper.source !== "html") absNote = "只取到摘要：正文引文核对不了，请先读原文";
   const status = el("div", "ws-status");
   if (!isLocal && paper.url) {
-    status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">arXiv:${esc(aid)} ↗</a>`));
+    status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">${esc(aid)} ↗</a>`));
   }
   status.appendChild(el("span", "", absNote));
   if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
@@ -5557,7 +5557,7 @@ async function renderCard() {
     const until = Number(paper.retry_after || 0);
     if (until && until * 1000 > Date.now()) {
       const hh = new Date(until * 1000);
-      retry.textContent = `arXiv 在 ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 前不会再试`;
+      retry.textContent = `${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 前不会再试取正文`;
       retry.disabled = true;
     } else {
       retry.onclick = () => renderCard();
@@ -6082,7 +6082,7 @@ async function dailyBlock(seq) {
       card.onclick = () => { S.kitId = it.card_kit; S.cardFrom = "today"; openCard(it.arxiv_id, it.card_kit); };
       ctl.appendChild(card);
     } else {
-      const ext = el("a", "linkish", /arxiv/i.test(it.source || it.url || "") ? "在 arXiv 读" : "打开原文");
+      const ext = el("a", "linkish", (/^arxiv$/i.test(String(it.source || "")) || /arxiv\.org/i.test(String(it.url || ""))) ? "在 arXiv 读" : "打开原文");
       ext.href = it.url || "#"; ext.target = "_blank"; ext.rel = "noopener";
       ctl.appendChild(ext);
     }
@@ -6094,7 +6094,7 @@ async function dailyBlock(seq) {
     kept.appendChild(el("summary", "", `你最近留下的 ${d.recent_keeps.length} 篇（共分拣 ${d.triaged_total} 篇）`));
     const ul = el("ul");
     d.recent_keeps.forEach((k) => {
-      const href = k.url || (/^(psyarxiv|socarxiv):/i.test(k.arxiv_id || "") ? "#" : `https://arxiv.org/abs/${esc(k.arxiv_id)}`);
+      const href = k.url || (/^(psyarxiv|socarxiv|biorxiv|medrxiv):/i.test(k.arxiv_id || "") ? "#" : `https://arxiv.org/abs/${esc(k.arxiv_id)}`);
       ul.appendChild(el("li", "", `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(k.title || k.arxiv_id)}</a><span>${esc(k.why)}</span>`));
     });
     kept.appendChild(ul);

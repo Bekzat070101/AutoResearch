@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 import account_store
 import admin
 import auth
+import biorxiv
 import catalog
 import curriculum
 import dialogue
@@ -1985,6 +1986,24 @@ async def paper_text(arxiv_id: str, request: Request):
             "title_zh": "", "keywords": [],
             "sections": [],
         }
+    if biorxiv.is_id(arxiv_id):
+        aid = biorxiv.clean_id(arxiv_id)
+        row = store.get_paper_text(aid)
+        if row and (row.get("text") or "") and row.get("source") in ("html", "pdf"):
+            got = {**row, "lib_at": "db", "tables": row.get("tables") or []}
+        else:
+            try:
+                got = await _shared(("paper", aid), biorxiv.fulltext, aid)
+            except biorxiv.BiorxivError as exc:
+                code = 400 if exc.status == 400 else (404 if exc.status == 404 else 502)
+                raise HTTPException(code, str(exc)) from exc
+            got["lib_at"] = "db" if store.get_paper_text(aid) else ""
+        zh = store.get_paper_zh(aid) or {}
+        got.setdefault("title_zh", zh.get("title_zh") or "")
+        got.setdefault("keywords", zh.get("keywords") or [])
+        got["sections"] = [{"name": n, "label": reading.arxiv.section_cn(n), "at": at}
+                           for n, at in reading.arxiv.sections(got.get("text") or "")]
+        return got
     aid = _reading(reading.arxiv.clean_id, arxiv_id)
     got = await run_in_threadpool(_reading, _paper_cached, aid)
     if got is None:
@@ -2034,6 +2053,8 @@ def _paper_ref(uid: str, raw: str) -> str:
         if not store.get_user_paper(uid, raw):
             raise tutor.TutorError("没有这篇")
         return raw
+    if biorxiv.is_id(raw):
+        return biorxiv.clean_id(raw)
     if osf.is_id(raw):
         return osf.clean_id(raw)
     return reading.arxiv.clean_id(raw)

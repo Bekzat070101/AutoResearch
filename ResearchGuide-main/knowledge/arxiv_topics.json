@@ -2,7 +2,7 @@
   "status": "草稿",
   "checked_at": "",
   "reviewed_by": "",
-  "word_whitelist": ["LLM", "NLP", "RL", "CNN", "GNN", "PDE", "OS", "SQL", "GPU", "CPU", "MRI", "EEG", "BERT", "GPT", "SVM", "PCA", "OLS", "RCT", "DNA", "RNA", "HIV", "transformer", "algorithm", "biochemistry", "computability", "database", "econometrics", "fMRI", "immunology", "kernel", "macroeconomics", "microarchitecture", "pathology", "pharmacology", "rendering", "synchronization"],
+  "word_whitelist": ["LLM", "NLP", "RL", "CNN", "GNN", "PDE", "OS", "SQL", "GPU", "CPU", "MRI", "EEG", "BERT", "GPT", "SVM", "PCA", "OLS", "RCT", "DNA", "RNA", "HIV", "transformer", "algorithm", "biochemistry", "computability", "database", "econometrics", "fMRI", "immunology", "kernel", "macroeconomics", "microarchitecture", "pathology", "pharmacology", "rendering", "synchronization", "anatomy", "physiology", "microbiology", "toxicology", "genetics", "genomics"],
   "topics": {
     "llm-eval": {
       "name": "大模型评测",
@@ -298,7 +298,16 @@
     "med-micro": {"name": "医学微生物", "zh": ["微生物"], "slugs": ["micro"], "en": ["medical microbiology"], "categories": ["q-bio.MN"]},
     "med-patho": {"name": "病理学", "zh": ["病理"], "slugs": ["patho"], "en": ["pathology"], "categories": ["q-bio.TO"]},
     "med-pharma": {"name": "药理学", "zh": ["药理"], "slugs": ["pharma"], "en": ["pharmacology"], "categories": ["q-bio.MN"]},
-    "med-gene": {"name": "医学遗传", "zh": ["遗传学"], "slugs": ["gene"], "en": ["medical genetics", "DNA"], "categories": ["q-bio.GN"]}
+    "med-gene": {"name": "医学遗传", "zh": ["遗传学"], "slugs": ["gene"], "en": ["medical genetics", "DNA"], "categories": ["q-bio.GN"]},
+    "bio-med": {"name": "基础医学(bioRxiv)", "zh": ["基础医学"], "slugs": ["biomed"], "en": ["molecular medicine", "molecular biology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "molecular_biology"},
+    "bio-biochem": {"name": "医学生化(bioRxiv)", "zh": ["生物化学"], "slugs": ["biobiochem"], "en": ["biochemistry"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "biochemistry"},
+    "bio-anat": {"name": "人体解剖(bioRxiv)", "zh": ["解剖"], "slugs": ["bioanat"], "en": ["anatomy"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "developmental_biology"},
+    "bio-physio": {"name": "人体生理(bioRxiv)", "zh": ["生理"], "slugs": ["biophysio"], "en": ["physiology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "physiology"},
+    "bio-immuno": {"name": "人体免疫(bioRxiv)", "zh": ["免疫"], "slugs": ["bioimmuno"], "en": ["immunology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "immunology"},
+    "bio-micro": {"name": "医学微生物(bioRxiv)", "zh": ["微生物"], "slugs": ["biomicro"], "en": ["microbiology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "microbiology"},
+    "bio-patho": {"name": "病理学(bioRxiv)", "zh": ["病理"], "slugs": ["biopatho"], "en": ["pathology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "pathology"},
+    "bio-pharma": {"name": "药理学(bioRxiv)", "zh": ["药理"], "slugs": ["biopharma"], "en": ["pharmacology", "toxicology"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "pharmacology_and_toxicology"},
+    "bio-gene": {"name": "医学遗传(bioRxiv)", "zh": ["遗传学"], "slugs": ["biogene"], "en": ["genetics", "genomics"], "categories": [], "source": "biorxiv", "server": "biorxiv", "biorxiv_category": "genetics"}
   },
   "nodes": {
     "520": ["cs-overview"],
@@ -345,15 +354,15 @@
     "790.29": ["econ-intl"],
     "790.45": ["econ-labor"],
     "790.51": ["econ-env"],
-    "310": ["med"],
-    "310.11": ["med-biochem"],
-    "310.14": ["med-anat"],
-    "310.21": ["med-physio"],
-    "310.34": ["med-immuno"],
-    "310.41": ["med-micro"],
-    "310.44": ["med-patho"],
-    "310.47": ["med-pharma"],
-    "310.27": ["med-gene"]
+    "310": ["med", "bio-med"],
+    "310.11": ["med-biochem", "bio-biochem"],
+    "310.14": ["med-anat", "bio-anat"],
+    "310.21": ["med-physio", "bio-physio"],
+    "310.34": ["med-immuno", "bio-immuno"],
+    "310.41": ["med-micro", "bio-micro"],
+    "310.44": ["med-patho", "bio-patho"],
+    "310.47": ["med-pharma", "bio-pharma"],
+    "310.27": ["med-gene", "bio-gene"]
   },
   "legacy": {
     "ai": "520.20",

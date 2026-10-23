@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-22] [FEAT] 文献库接入 bioRxiv / medRxiv：元数据、今日、收集、打开、预热全链路
+
+- 变更内容：新增 `server/biorxiv.py`（照 `osf.py` 骨架）：官方 `api.biorxiv.org` details 接口取元数据与最新论文（分类过滤 + 本地关键词过滤，30 条/页翻页）；全文下载 JATS XML（`<sec><title>` 成行、`<table-wrap>` 抽表，契约同 `arxiv.parse_html`），取不到退摘要并按 `retry_after` 重试。内部 id 形如 `biorxiv:10.1101.2024.12.06.627082`（DOI 的 `/` 编码为 `.`，路径参数安全；bioRxiv 混用 10.1101 / 10.64898 前缀，都留在 id 里）。api 域名 1 秒串行锁、www 域名（Cloudflare 后面）3 秒单独锁，与 arXiv / OSF 分锁；多版本论文最新版 JATS 路径 404 时退回最早版路径。medRxiv 同一模块 `server` 参数即用（树上暂无临床节点，未挂话题）。`knowledge/arxiv_topics.json` 给 310 基础医学 9 个 thin 节点各追加一个 `bio-*` 话题（q-bio 仍是第一来源，biorxiv 补量；今日取每节点前 2 个话题所以两个来源都会打）。接线：`reading.topic_source`/`triage`、`main.py` 打开论文（库优先，缺则现场取并落库）与 `_paper_ref`、`paper_collect` 元数据与正文分支、`admin.papers_warm` 与 `paper_warm.py` 改走新的 `reading.warm_fetch` 按 id 前缀分派（顺带修掉 psyarxiv 论文在预热里永远失败的旧问题）、`interests.is_thin_topic`。收集加来源过滤：`collect(..., source=…)`、CLI `--source`、`POST /api/admin/papers/collect?source=…`（限 arxiv/osf/biorxiv/medrxiv），可强制只收某一来源的话题铺目录——q-bio 常常自己凑够 thin 定额，轮不到 biorxiv，服务器上铺 bioRxiv 目录靠这个开关（正文定额同样只数该来源）。前端 `app.js`：留文列表外链正则加 `biorxiv|medrxiv` 前缀（否则生成 arxiv 死链）、「在 arXiv 读」判断精确化（`/arxiv/i` 子串会把 biorxiv 误判）、卡片头与重试提示不再写死 arXiv 字样。测试 `server/tests/test_biorxiv.py` 16 例全离线。
+- 影响文档：docs/CHANGELOG.md、docs/PAPER_COLLECTION.md（来源范围自此含 bioRxiv）
+- 影响模块：server/biorxiv.py（新）、server/reading.py、server/main.py、server/paper_collect.py、server/paper_warm.py、server/admin.py、server/interests.py、knowledge/arxiv_topics.json、web/js/app.js、server/tests/test_biorxiv.py（新）
+- 决策来源：扩文献库（310 基础医学 q-bio 文献少，PAPER_COLLECTION §2 thin 名单）
+- 登记人：Yukinannie
+
 ## [2026-10-21] [FIX] --allow-ephemeral 发生产不再被 NAS 门挡住
 
 - 变更内容：现网仍是 `/tmp` + 速度优先。`production_release_checks` 在 `--allow-ephemeral` 时不再要求函数已挂 NAS、也不再要求 `health.db.ephemeral=false`，但仍带 `QIYAN_ALLOW_EPHEMERAL=1`，否则 PR #27 守门会让 `/api/*` 全 503。正常发生产（不带开关）规矩不变。
