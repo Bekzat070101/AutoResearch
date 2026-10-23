@@ -368,7 +368,7 @@ function setView(name) {
   if (dirChip) dirChip.hidden = !S.entered;
   $nav.hidden = !inApp || !S.entered;
   $header.hidden = !inApp;
-  const foot = document.querySelector(".site-footer"); if (foot) foot.hidden = !inApp;  // 首页、登录页不放页脚（Haiku 面板 8/8 看不懂）
+  const foot = document.querySelector(".site-footer"); if (foot) foot.hidden = name !== "me";  // 页脚（课名来源、版本号）只在「我的」页：别的页三轮面板都当噪音
   paintChrome();
   render();
   window.scrollTo({ top: 0 });
@@ -2210,6 +2210,7 @@ function paintChrome() {
   if (!chip) return;
   const name = portraitChipLabel();
   chip.textContent = name || "选个方向 ▾";
+  chip.title = name ? "换方向：今日任务和推荐论文都跟着方向走" : "选一个方向：今日任务和推荐论文都跟着方向走";
   chip.classList.toggle("empty", !name);
 }
 
@@ -4733,6 +4734,8 @@ async function renderToday() {
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
   if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次`));
   wrap.appendChild(status);
+  const cont = continueCard("today");
+  if (cont) wrap.appendChild(cont);
   const confirmed = facts.filter((f) => f.status === "confirmed" || f.status === "active").length;
   const steps = [
     { label: "聊过了", done: !!talked, view: "dialogue" },
@@ -4740,7 +4743,7 @@ async function renderToday() {
     { label: "选了方向", done: !!field, view: "cards" },
     { label: "今天这一步", done: doneTasks > 0, view: "workbench" },
   ];
-  wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));
+  if (field) wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));  // 没选方向前不摆四步条：卡片里只有一件事（面板 5/5 把「当前步」读成「已做过」）
   const ruleCard = el("div", "nba-card");
   ruleCard.appendChild(el("h3", "nba-title", esc(title)));
   ruleCard.appendChild(el("p", "nba-why", esc(why)));
@@ -4780,6 +4783,39 @@ const DEFAULT_KIT = "llm-eval";
 
 function splitZhTitle(t) {
   return { zh: String(t || "").replace(/[（(]机器待核[）)]\s*$/, "").trim(), unverified: /机器待核/.test(String(t || "")) };
+}
+// 「继续上次」：最近一次没读完的带读记在本机，研读页和今日页顶上给一张卡直接回到那道题（Luna 试用 UX-04：别把人送回目录）
+function rememberTutor(aid, kitId, sess, title) {
+  const key = `rg_last_tutor_${S.uid || "anon"}`;
+  try {
+    if (!sess || !["active", "read"].includes(sess.status)) {
+      const cur = JSON.parse(localStorage.getItem(key) || "null");
+      if (cur && cur.aid === aid) localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify({ aid, kitId: kitId || "", title: title || aid, cur: sess.cur || 0, total: sess.total || 0, at: Date.now() }));
+  } catch (_) { /* 存不了就没有「继续上次」 */ }
+}
+
+function lastTutor() {
+  try {
+    const v = JSON.parse(localStorage.getItem(`rg_last_tutor_${S.uid || "anon"}`) || "null");
+    return v && v.aid ? v : null;
+  } catch (_) { return null; }
+}
+
+function continueCard(from) {
+  const last = lastTutor();
+  if (!last) return null;
+  const box = el("div", "continue-card");
+  const text = el("div", "continue-text");
+  text.appendChild(el("p", "continue-title", `继续上次：${esc(last.title)}`));
+  text.appendChild(el("p", "continue-sub", `第 ${Math.min((last.cur || 0) + 1, last.total || 0)} 题 / 共 ${last.total || 0} 题`));
+  const go = el("button", "btn small", "接着答");
+  go.type = "button";
+  go.onclick = () => { S.cardFrom = from; openCard(last.aid, last.kitId); };
+  box.append(text, go);
+  return box;
 }
 const DIR_LABEL = { up: "↑ 提升", down: "↓ 下降 / 失效", mixed: "~ 有好有坏", none: "? 没报告" };
 
@@ -4925,6 +4961,8 @@ async function renderRead() {
   const grid = el("div", "read-grid");
   const leftPane = el("section", "read-pane");
   const leftHead = el("div", "read-pane-head");
+  const cont = continueCard("read");
+  if (cont) leftHead.appendChild(cont);
   leftHead.appendChild(el("h3", "panel-title", "经典文献推荐"));
   leftHead.appendChild(el("p", "panel-sub", "点「带读答题」：AI 按节出 8 道题，你边读原文边答，它判对错、给提示。"));
   if (passed > 0) leftHead.appendChild(el("small", "", `已完成 ${passed} 张阅读卡`));
@@ -4984,12 +5022,14 @@ async function renderRead() {
         (p.keywords || []).slice(0, 4).forEach((k) => {
           const s = el("span");
           s.textContent = k.zh || k.en || k;
+          s.title = "这篇论文的主题标签";
           kws.appendChild(s);
         });
         main.appendChild(kws);
       }
       if (p.lib === "html" || p.lib === "abstract") {
         const badge = el("i", "kp-lib", p.lib === "html" ? "有全文" : "只有摘要");
+        badge.title = p.lib === "html" ? "全文已在站内，带读时引文可逐字核对" : "只取到摘要，引文题会改成用自己的话答";
         main.appendChild(badge);
       }
       if (c) {
@@ -5198,7 +5238,7 @@ function pickBenchMode({ saved, session, hasDraft, hasCard, passedCount, canGrad
   return "tutor";
 }
 
-function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGrade }) {
+function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGrade, title }) {
   const box = el("section", "tutor-panel");
   box.hidden = false;
   let sess = session || null;
@@ -5405,6 +5445,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
   async function startTutor(restart) {
     try {
       sess = await api("POST", `/api/tutor/${encodeURIComponent(aid)}/start`, { uid: S.uid, kit: kitId, restart: !!restart });
+      rememberTutor(aid, kitId, sess, title || aid);
       focusQid = null;
       box.hidden = false;
       paint();
@@ -5416,6 +5457,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
         uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0, regrade: !!regrade,
       });
       sess = out.session;
+      rememberTutor(aid, kitId, sess, title || aid);
       const answered = (sess.slots || []).find((s) => s.qid === qid);
       last = out.verdict && answered ? { qid, question: answered.question || "", status: answered.status, feedback: out.verdict.feedback || out.verdict.note || "" } : null;
       const done = (sess.slots || []).find((s) => s.qid === qid);
@@ -5434,6 +5476,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGr
     try {
       const out = await api("POST", `/api/tutor/${encodeURIComponent(aid)}/finish`, { uid: S.uid, kit: kitId });
       sess = out.session;
+      rememberTutor(aid, kitId, sess, title || aid);
       const alts = onPrefill ? onPrefill(out.prefill || {}, out.missing || []) : [];
       paint();
       (alts || []).forEach((a) => {
@@ -5582,6 +5625,7 @@ async function renderCard() {
     catch (_) { /* 没有会话就当没开始 */ }
     if (!isCurrent()) return;
   }
+  rememberTutor(aid, kitId, tutorMeta && tutorMeta.session, zhTitle || paper.title);
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
   const hasSession = !!(tutorMeta && tutorMeta.session && tutorMeta.session.status);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
@@ -5788,6 +5832,7 @@ async function renderCard() {
     },
     session: tutorMeta && tutorMeta.session,
     canGrade,
+    title: zhTitle || paper.title,
   });
   fillChip.onclick = () => {
     const got = readSelection();

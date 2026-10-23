@@ -107,11 +107,9 @@ def build_env(uid: str, conversation_id: str, message: str) -> dict[str, Any]:
             "profile": guide.assess(uid),
             "transcript_history": _transcript_history(uid),
             "transcript_available": bool(store.list_enrollments(uid)),
-            # 不依赖最近 12 条消息，长聊或另开会话也不会忘记已经介绍过。
-            "transcript_introduced": any(
-                m["role"] == "assistant" and "树洞" in m["text"] and "成绩单" in m["text"]
-                for m in store.list_messages(uid)
-            ),
+            # 成绩单选项现在固定摆在输入框下面的「可选：粘贴成绩单」折叠里（第四轮 HCI：开场里那段 3/3 被吓到），
+            # 开场一出现就算介绍过；不再靠扫消息里的「树洞」「成绩单」字样，长聊或另开会话也不会再主动推销。
+            "transcript_introduced": any(m["role"] == "assistant" for m in store.list_messages(uid)),
             "preferences": [{"key": f.key, "value": f.value} for f in facts
                             if f.key.startswith("style:") or f.key == "pace"],
         },

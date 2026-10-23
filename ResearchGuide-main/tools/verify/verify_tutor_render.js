@@ -71,6 +71,8 @@ function api(method, url, body) {
   return Promise.resolve({ session: currentSess, verdict: { pass: false, state: "fail" } });
 }
 
+eval(extract("rememberTutor"));
+eval(extract("lastTutor"));
 eval(extract("applyTutorPrefill"));
 eval(extract("pickBenchMode"));
 eval(extract("tutorPanel"));
@@ -267,6 +269,8 @@ function paperHarness(cfg = {}) {
   let paperRenderEpoch = 0;
   eval(extract("stale"));
   eval(extract("splitZhTitle"));
+  eval(extract("rememberTutor"));
+  eval(extract("lastTutor"));
   eval(extract("tutorPanel"));
   eval(extract("render"));
   const at0 = src.search(/async\s+function\s+renderCard\s*\(/);

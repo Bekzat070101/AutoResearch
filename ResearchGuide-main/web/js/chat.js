@@ -121,15 +121,14 @@ const ChatView = (() => {
     head.appendChild(el("h2", "", S.entered ? "对话" : "先认识一下"));
     head.appendChild(el("p", "", S.entered
       ? "继续聊你的问题和阅读近况。"
-      : "先聊院系、专业、年级和课程，再顺着你的想法慢慢了解。随时可以先进入使用。"));
+      : "启研带你读论文、答题、找方向。说说你的院系和年级，我才知道从哪开始；不想聊就直接进去。"));
     if (!S.entered) {
       const bar = el("div", "enter-bar");
-      const go = el("button", "btn", "进入启研");
+      const go = el("button", "btn", "开始今天的一件事");  // 第四轮第三遍吐槽 3/3：「进入启研」不知道进去干嘛——按钮直接说去向（今日页）
       go.type = "button";
       go.onclick = () => enterApp();
       bar.appendChild(go);
-      const read = el("button", "btn ghost", "直接去读论文"); read.type = "button"; read.onclick = () => enterApp("read"); bar.appendChild(read);
-      bar.appendChild(el("span", "form-note", "不用聊完，随时可以进去。"));
+      const read = el("button", "btn ghost", "先挑一篇论文读"); read.type = "button"; read.onclick = () => enterApp("read"); bar.appendChild(read);
       head.appendChild(bar);
     }
     return head;
@@ -158,7 +157,7 @@ const ChatView = (() => {
     const inputRow = el("div", "chat-input-row");
     const input = el("textarea");
     input.rows = 1;
-    input.placeholder = S.entered ? "想聊什么，直接说…" : "说说你的想法，也可以粘贴成绩单…";
+    input.placeholder = S.entered ? "想聊什么，直接说…" : "说说你的院系、年级，或直接问我…";
     input.setAttribute("aria-label", "对话输入");
     const sendBtn = el("button", "btn small", "发送");
     sendBtn.type = "button";
@@ -170,6 +169,11 @@ const ChatView = (() => {
     // 所以它归输入区，不归行动区——否则它会跟着行动卡一起滚走。
     inputZone.append(suggestions, stageLine, inputRow);
     inputZone.appendChild(el("p", "composer-hint", "Enter 发送 · Shift+Enter 换行"));
+    const extra = el("details", "composer-extra");
+    extra.appendChild(el("summary", "", "可选：粘贴成绩单，让我更了解你的基础"));
+    extra.appendChild(el("p", "", "打开树洞的成绩单页，全选复制后粘贴到上面的输入框；会存到你的资料里，先去掉不想分享的信息。"));
+    extra.hidden = true;  // 第一屏不提成绩单（面板三轮 3/3 被它吓到）；发过一句话或已进入后才露出
+    inputZone.appendChild(extra);
     chat.append(scroll, inputZone);
 
     const side = el("div", "panel side-panel mem-sum");
@@ -213,12 +217,13 @@ const ChatView = (() => {
     } catch (e) { toast(e.message); }
     if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     history.messages.forEach((m) => addBubble(m.role, m.text));
+    extra.hidden = !(S.entered || history.messages.some((m) => m.role === "user"));
     await refreshFacts();
     if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     if (history.guide && !S.entered) renderGuide(history.guide);
     if (history.onboard_done && !S.entered) enterCard(history.guide);
     if (!history.messages.length) {
-      addBubble("assistant", history.welcome_message || "你好，我是启研。你可以直接问问题，不用先把背景填齐。也可以在树洞成绩单页全选、复制，再粘贴到这里，帮助我了解你的学习基础；这完全可选，粘贴后会保存到当前画像。");
+      addBubble("assistant", history.welcome_message || "你好，我是启研。你是哪个院系、几年级？也可以直接问我；不想聊就点上面的按钮。");
     }
 
     /* --- 发送 --- */
@@ -237,6 +242,7 @@ const ChatView = (() => {
       actions.remove();
       suggestions.innerHTML = "";
       addBubble("user", msg);
+      extra.hidden = false;
 
       const bubble = addBubble("assistant", "");
       bubble.classList.add("streaming");
@@ -447,6 +453,7 @@ const ChatView = (() => {
     }
 
     function renderGuide(profile) {
+      side.hidden = !S.entered && !(profile.areas || []).some((a) => a.known);  // 什么都还不知道时不摆「目前对你的了解」（面板 3/3 说像在建档）
       sideList.innerHTML = "";
       sideEmpty.style.display = "none";
       (profile.areas || []).forEach((area) => {

@@ -83,7 +83,7 @@ function layoutBlock() {
 // suggestions belong to the composer. There is no third scroll strip.
 const mkHead = (entered) => new Function("el", "S", extract("dialogueHead") + "\nreturn dialogueHead();")(el, {entered});
 check(byClass(mkHead(false), "enter-bar").length === 1, "首次引导有提前进入入口");
-check(mkHead(false).textContent.includes("院系、专业、年级和课程"), "首次引导先邀请提供明确的学习背景");
+check(mkHead(false).textContent.includes("院系和年级"), "首次引导先邀请提供明确的学习背景");  // 第四轮副标题改成「说说你的院系和年级」
 check(byClass(mkHead(true), "enter-bar").length === 0, "普通对话不重做引导");
 const built = new Function("el", "$app", "S", layoutBlock() +
   "\nreturn {wrap,chat,scroll,actions,inputZone,inputRow,input,stageLine,side,suggestions};")(
