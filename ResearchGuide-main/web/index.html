@@ -6,7 +6,7 @@
   <title>启研 · 本科生进科研</title>
   <meta name="description" content="给北大本科一、二年级。先聊你现在卡在哪，再给一件能做完的事。" />
   <meta name="theme-color" content="#f5f2ea" />
-  <link rel="stylesheet" href="static/css/styles.css?v=w107" />
+  <link rel="stylesheet" href="static/css/styles.css?v=w108" />
   <!-- 标题衬线字体走国内可达的镜像，且不阻塞首屏；加载失败时回退系统宋体 -->
   <link rel="preconnect" href="https://fonts.googleapis.cn" />
   <link rel="stylesheet" media="print" onload="this.media='all'"
@@ -24,7 +24,7 @@
       <button class="side-brand" id="brandHome" type="button" title="回到首页">启研<small>本科生进科研</small></button>
       <button class="nav-toggle" id="navToggle" type="button" aria-label="收起侧栏">«</button>
       <nav class="side-links" aria-label="工作区">
-        <button class="nav-btn" type="button" data-view="today" data-workspace="today"><span>今日</span><small>今天的一件事</small></button>
+        <button class="nav-btn" type="button" data-view="today" data-workspace="today"><span>今日</span><small>每日文献速递</small></button>
         <button class="nav-btn" type="button" data-view="dialogue" data-workspace="dialogue" hidden><span>对话</span><small>聊聊你的情况</small></button>
         <button class="nav-btn" type="button" data-view="read" data-workspace="read"><span>研读</span><small>论文与带读</small></button>
         <button class="nav-btn" type="button" data-view="position" data-workspace="position" hidden><span>定位</span><small>待开发</small><i class="nav-soon">待开发</i></button>
@@ -59,12 +59,12 @@
         <!-- 各视图由 app.js 渲染 -->
       </main>
       <footer class="site-footer">
-        <p>课名来自北大教务公开接口。查不到就空着，不编。</p>
+        <p>课名来自北大教务公开接口。</p>
         <!-- 版本戳：唯一目的是让「我改了没有」可以一眼确认，不用猜缓存。
              每次改前端都要把这个号 +1，并同步下面三个 ?v=。
              **三个都必须一样** —— 上次 CSS 停在 w27 而 JS 到了 w28，
              用户就拿到了「新 JS + 旧 CSS」，样式全不对。有测试钉着这件事。 -->
-        <p class="build-stamp">界面版本 <b>w107</b></p>
+        <p class="build-stamp">界面版本 <b>w108</b></p>
       </footer>
     </div>
   </div>
@@ -73,8 +73,8 @@
   window.apiUrl = function (path) {
     return String(window.QIYAN_API || "").replace(/\/$/, "") + path;
   };</script>
-  <script src="static/js/directions.js?v=w107"></script>
-  <script src="static/js/chat.js?v=w107"></script>
-  <script src="static/js/app.js?v=w107"></script>
+  <script src="static/js/directions.js?v=w108"></script>
+  <script src="static/js/chat.js?v=w108"></script>
+  <script src="static/js/app.js?v=w108"></script>
 </body>
 </html>

@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-24] [UX] 登录页同意行跟标签走；访客入口改短；过线改合格
+
+- 变更内容：合入 PR #35 前端提示。登录同意行不再钉在页头，跟着当前标签插到「登录 / 注册 / 微信 / 访客」按钮正上方（勾完就能点）；访客入口改成「访客模式」，点开后同意行进访客框。隐私勾选旁写「已阅读」+ 仍保留「同意按这个方式保存」短说明。界面不再写「过线」（阅读卡上一版、矩阵门槛改「合格」）；今日侧栏「每日文献速递」、分拣标题「分拣最近的新论文」；对话副标题改成「聊一聊你的大概情况」。第四轮两个去向按钮（「开始今天的一件事」「先挑一篇论文读」）和短版本戳留下。界面 w108。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：web/index.html、web/js/app.js、web/js/chat.js、tools/verify/verify_chat_layout.js、tools/verify/verify_frontend_state.js、server/tests/test_web_assets.py、server/tests/test_web_copy_r3.py、server/tests/test_web_copy_r4.py、server/tests/test_session_directions.py
+- 决策来源：合入 PR #35（Yukinannie/feat/web-copy-login-layout），叠在 #29–#34 之上
+- 登记人：邬程灿
+
 ## [2026-10-23] [FIX] CI 上 pytest 的 /tmp/pytest-of-runner 不再被误判成 db_in_tmp
 
 - 变更内容：`store.db_blocked()` 只把 `/tmp/qiyan.db` 这类实例临时盘判成 `db_in_tmp`。GitHub Actions 的 `tmp_path` 在 `/tmp/pytest-of-runner/...`，里面用 `mnt/nas` 模拟挂盘，不能当临时盘，否则 `test_db_mount_gate` 两条全红（PR #29–#34 的检查都栽在这）。

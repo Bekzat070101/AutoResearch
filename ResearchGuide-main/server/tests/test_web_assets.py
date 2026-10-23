@@ -147,8 +147,8 @@ def test_task_panel_hides_rubric_behind_toggle():
 def test_matrix_copy_no_longer_asks_for_three_cards():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     assert "再交 3" not in js
-    assert "先交一张过线的阅读卡" in js
-    assert "格子只来自你自己的过线卡" in js
+    assert "先交一张合格的阅读卡" in js
+    assert "矩阵只来自你自己的合格卡" in js
 
 
 def test_the_mark_done_button_is_gone():
@@ -510,7 +510,7 @@ def test_login_admin_fold_footer_and_chat_shortcut_present():
     html = (WEB / "index.html").read_text(encoding="utf-8")
     assert "管理员入口" in app
     assert "sinv.hidden = true;" in app
-    assert "以访客进入（不注册；换设备或清了浏览器就找不回）" in app
+    assert "访客模式" in app
     assert "consent-brief" in app
     assert "开始今天的一件事" in chat and "先挑一篇论文读" in chat  # 第四轮第三遍：按钮说去向，「进入启研」「直接去读论文」3/3 不知道点了会怎样
     assert "不用聊完" not in chat  # 第四轮：两个按钮旁的那句解释删掉，开场第二段已说「不想聊也行」

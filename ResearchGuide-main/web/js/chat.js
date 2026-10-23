@@ -120,8 +120,8 @@ const ChatView = (() => {
     const head = el("header", "ws-head");
     head.appendChild(el("h2", "", S.entered ? "对话" : "先认识一下"));
     head.appendChild(el("p", "", S.entered
-      ? "继续聊你的问题和阅读近况。"
-      : "启研带你读论文、答题、找方向。说说你的院系和年级，我才知道从哪开始；不想聊就直接进去。"));
+      ? "继续和启研聊一聊你的问题和阅读近况。"
+      : "和启研聊一聊你的大概情况（基本信息，兴趣点，未来规划...）也可以随时进入使用。"));
     if (!S.entered) {
       const bar = el("div", "enter-bar");
       const go = el("button", "btn", "开始今天的一件事");  // 第四轮第三遍吐槽 3/3：「进入启研」不知道进去干嘛——按钮直接说去向（今日页）
@@ -178,7 +178,7 @@ const ChatView = (() => {
 
     const side = el("div", "panel side-panel mem-sum");
     const sideHead = el("div", "rank-head");
-    sideHead.appendChild(el("p", "side-title", S.entered ? "按你说过的，可能适合的方向" : "目前对你的了解"));
+    sideHead.appendChild(el("p", "side-title", S.entered ? "可能适合你的方向" : "目前对你的了解"));
     const treeBtn = el("button", "linkish", "查看方向树");
     treeBtn.type = "button";
     treeBtn.hidden = !S.entered;
@@ -466,7 +466,7 @@ const ChatView = (() => {
       sideFoot.innerHTML = "";
       sideFoot.appendChild(el("p", "guide-note", profile.ready
         ? "已有适合开始的初步了解，剩下的可以在使用中慢慢补充。"
-        : "聊到足够了解你的主题和阅读需要时，我会回顾一下，再邀请你开始。也可以随时提前进入。"));
+        : "聊到足够了解你的主题和阅读需要时，我会回顾一下并邀请你开始，也可以随时提前进入。"));
       const go = el("button", "linkish", "查看或修改已记录的信息");
       go.onclick = () => setView("me");
       sideFoot.appendChild(go);

@@ -213,7 +213,7 @@ async function api(method, path, body, opt = {}) {
     return data;
   }
   if (!opt.timeoutMs) return request();
-  const slowMsg = "服务器响应慢（可能在冷启动），请 10 秒后再试";
+  const slowMsg = "服务器响应慢，请 10 秒后再试";
   const ctrl = new AbortController();
   req.signal = ctrl.signal;
   let timer;
@@ -297,10 +297,10 @@ function confirmEarlyEntry(profile) {
       : "暂时无法确认已了解的信息。你仍可以直接进入，或留在这里继续聊。"));
     if (profile) {
       const missing = (profile.areas || []).filter((a) => !a.known).map((a) => a.label);
-      if (missing.length) dialog.appendChild(el("p", "form-note", "还可以聊聊：" + esc(missing.join("、")) + "。这些都不是必填项。"));
+      if (missing.length) dialog.appendChild(el("p", "form-note", "还可以继续对话：" + esc(missing.join("、")) + "。这些都不是必填项。"));
     }
     const row = el("div", "submit-actions");
-    const more = el("button", "btn", "再聊一聊");
+    const more = el("button", "btn", "继续对话");
     const go = el("button", "btn secondary", "直接进入");
     more.type = go.type = "button";
     const finish = (yes) => { dialog.close(); dialog.remove(); resolve(yes); };
@@ -1412,7 +1412,7 @@ const ROOM_GUIDES = {
   },
   read: {
     key: "rg_guide_read",
-    steps: ["挑一篇能打开的论文。", "先读原文，再在阅读卡里写；原句从正文里圈。", "过线之后再看矩阵。一张卡也能看。"],
+    steps: ["挑一篇能打开的论文。", "先读原文，再在阅读卡里写；原句从正文里圈。", "合格之后再看矩阵。一张卡也能看。"],
   },
   position: {
     key: "rg_guide_position",
@@ -1556,7 +1556,7 @@ function openPrivacy(gate) {
   const mask = el("div", "connect-mask");
   const box = el("div", "connect-box privacy-box");
   box.appendChild(el("p", "hero-kicker", "PRIVACY"));
-  box.appendChild(el("h3", "", gate ? "继续之前，看一眼我们存什么" : "我们存什么"));
+  box.appendChild(el("h3", "", gate ? "继续之前，请阅读并确认用户隐私政策说明" : "用户隐私政策说明"));
   box.appendChild(el("div", "privacy-body", PRIVACY_HTML));
   const acts = el("div", "connect-actions");
   if (gate) {
@@ -1588,10 +1588,10 @@ function consentRow() {
   const row = el("label", "consent-row");
   const box = el("input");
   box.type = "checkbox";
-  const read = el("button", "linkish", "我们存什么");
+  const read = el("button", "linkish", "用户隐私政策说明");
   read.type = "button";
   read.onclick = (e) => { e.preventDefault(); openPrivacy(false); };
-  row.append(box, document.createTextNode("我读过"), read, document.createTextNode("，同意按这个方式保存我的记录"));
+  row.append(box, document.createTextNode("已阅读"), read, document.createTextNode("，同意按这个方式保存我的记录"));
   row.appendChild(el("span", "consent-brief", "勾上后会保存你在这里写的答案和聊天，下次能接着来；不存手机号；随时可在「我的」删号。"));
   return { row, ok: () => box.checked };
 }
@@ -1734,10 +1734,6 @@ function renderLogin() {
   if (RECOVERY_NOTE[recovery]) hero.appendChild(el("p", "login-note login-recovery", RECOVERY_NOTE[recovery]));
   hero.appendChild(el("p", "hero-kicker", binding ? "启研 · 绑定微信" : "启研 · 登录"));
   hero.appendChild(el("h2", "", binding ? "绑定微信" : "登录"));
-  hero.appendChild(el("p", "hero-lead", binding
-    ? "绑定后换设备、清了浏览器也能接着用，访客期间的记录都会带过去。"
-    : wxOn ? "换手机、清了浏览器也能接着用。微信不用密码、不要手机号；没有微信的设备用用户名和密码。"
-    : "启研是本科生读论文、答题、找方向的入门练习。用用户名和密码登录；没有账号点「注册」；只想先看看，点「以访客进入」。"));
   const consent = consentRow();
   const need = () => { if (consent.ok()) return true; toast("先勾选同意隐私说明"); return false; };
   const onEnter = (btn) => (e) => { if (e.key === "Enter" && !e.isComposing) btn.click(); };
@@ -1745,7 +1741,7 @@ function renderLogin() {
   // 微信：昵称（选填）+ 开一次登录，等学生在公众号里发数字
   const wxStep = el("div", "login-step");
   const nick = el("input", "login-nick");
-  nick.placeholder = "怎么称呼你（选填，新账号用）"; nick.maxLength = 24;
+  nick.placeholder = "账号名称"; nick.maxLength = 24;
   nick.setAttribute("aria-label", "昵称");
   const go = el("button", "btn", binding ? "绑定微信" : "用微信登录");
   go.type = "button";
@@ -1872,10 +1868,18 @@ function renderLogin() {
   const steps = { wechat: wxStep, signin: signinStep, register: registerStep };
   let mode = recovery === "lost" ? "register" : wxOn ? "wechat" : "signin";
   const tabs = el("div", "login-tabs");
+  /* 同意行不钉在页头：跟着当前标签走，永远贴在正要点的那颗按钮上方
+     （账号登录→登录、注册→注册并进入、微信→用微信登录），勾完就能点。 */
+  const parkConsent = () => {
+    const step = steps[mode];
+    const btn = Array.from(step.children).filter((n) => n.classList && n.classList.contains("btn"))[0];
+    if (btn) step.insertBefore(consent.row, btn);
+  };
   const paint = () => {
     tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
     Object.entries(steps).forEach(([k, node]) => { node.hidden = k !== mode; });
     if (mode !== "wechat") { stopWxPoll(); wxBox.hidden = true; }  // 离开微信这一栏就作废正在等的数字
+    parkConsent();
   };
   [["wechat", "微信"], ["signin", "账号登录"], ["register", "注册"]].forEach(([id, label]) => {
     if (id === "wechat" && !wxOn) return;
@@ -1896,9 +1900,14 @@ function renderLogin() {
 
   const links = el("div", "hero-links");
   if (!binding) {
-    const asGuest = el("button", "linkish", "以访客进入（不注册；换设备或清了浏览器就找不回）");
+    const asGuest = el("button", "linkish", "访客模式");
     asGuest.type = "button";
-    asGuest.onclick = () => { guestBox.hidden = false; asGuest.remove(); gname.focus(); };
+    asGuest.onclick = () => {
+      guestBox.hidden = false;
+      const first = guestBox.children[0];
+      if (first) guestBox.insertBefore(consent.row, first); else guestBox.appendChild(consent.row);
+      asGuest.remove(); gname.focus();
+    };
     links.appendChild(asGuest);
   }
   const link = el("button", "linkish", "服务器共用模型（管理员）");
@@ -1961,7 +1970,7 @@ function accountPanel() {
       setSession(parked, "me", parked.guest ? "已切回访客号" : "已切回那个账号");
     });
   }
-  add("我们存什么", "btn small ghost", () => openPrivacy(false));
+  add("用户隐私政策", "btn small ghost", () => openPrivacy(false));
   add("导出我的数据", "btn small secondary", async () => {
     const res = await apiFetch("/api/me/export");
     if (!res.ok) { toast("导出失败"); return; }
@@ -2329,7 +2338,6 @@ async function openUserMenu() {
   if (S.isAdmin) menu.appendChild(go("运营监测", () => setView("monitor")));
   if (!S.guest) menu.appendChild(go("我的 DeepSeek", () => openMineKey()));
   menu.appendChild(go("退出", () => { if (confirmLeave()) logout("home"); }));
-  menu.appendChild(go("换账号", () => { if (confirmLeave()) logout("login"); }));
   wrap.appendChild(menu);  // 画像切换不再放菜单里（11 号：在「我的」页）
 }
 
@@ -4728,7 +4736,7 @@ async function renderToday() {
 
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("今日", "打开就看这一件。"));
+  wrap.appendChild(workspaceHead("今日", "每日文献速递。"));
   const status = el("div", "status-chips");
   if (field) status.appendChild(el("span", "status-chip on", esc(dirTitle(saved.dir, field))));
   if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
@@ -5136,7 +5144,7 @@ function renderCardList(kit, byPaper) {
   cards.sort((a, b) => (order[a.arxiv_id] ?? 99) - (order[b.arxiv_id] ?? 99)).forEach((c) => {
     const row = el("button", "mine-row");
     row.type = "button";
-    const badge = c.status === "pass" ? '<span class="kp-state pass">过线</span>' : '<span class="kp-state revise">待改</span>';
+    const badge = c.status === "pass" ? '<span class="kp-state pass">合格</span>' : '<span class="kp-state revise">待改</span>';
     row.innerHTML = `<span class="mine-name">${esc(c.title)} ${badge}</span><span class="mine-meta">v${c.version}${c.status === "pass" ? "" : ` · ${esc(c.review.next_step || "")}`}</span>`;
     row.onclick = () => openCard(c.arxiv_id);
     rows.appendChild(row);
@@ -5151,7 +5159,7 @@ async function renderMatrix(seq, kit) {
   const panel = el("div", "panel");
   if (m.error) { panel.appendChild(el("div", "note-box", esc(m.error))); $app.appendChild(panel); return; }
   if (!m.ready) {
-    panel.appendChild(el("p", "panel-sub", "先交一张过线的阅读卡。格子只来自你自己的过线卡。卡越多，空格和冲突才有意义。"));
+    panel.appendChild(el("p", "panel-sub", "先交一张合格的阅读卡。"));
     if (kit && kit.papers && kit.papers[0]) {
       panel.appendChild(el("p", "panel-sub", esc(kit.papers[0].title)));
       const go = el("button", "btn", "写第一张阅读卡");
@@ -5168,7 +5176,7 @@ async function renderMatrix(seq, kit) {
   const conflict = new Set(m.rows.filter((r) => r.conflict).map((r) => r.arxiv_id));  // 完整成员；c.up / c.down 只是预览
   const titleOf = Object.fromEntries(m.rows.map((r) => [r.arxiv_id, clip(r.title, 28)]));
   const names = (ids, total) => ids.map((id) => `《${esc(titleOf[id] || id)}》`).join("") + (total > ids.length ? ` 等 ${total} 篇` : "");
-  panel.appendChild(el("p", "panel-sub", "格子只来自你自己的过线卡。卡越多，空格和冲突才有意义。"));
+  panel.appendChild(el("p", "panel-sub", "矩阵只来自你自己的合格卡"));
   const wrap = el("div", "matrix-wrap");
   const table = el("table", "matrix");
   table.innerHTML = `<thead><tr><th>论文</th>${m.dimensions.map((d) => `<th class="${emptyCols.has(d.key) ? "col-empty" : ""}" title="${esc(d.hint || "")}">${esc(d.label)}${emptyCols.has(d.key) ? " ·空列" : ""}</th>`).join("")}</tr></thead>`;
@@ -5593,7 +5601,7 @@ async function renderCard() {
     status.appendChild(el("span", "", `<a href="${esc(paper.url)}" target="_blank" rel="noopener">${esc(aid)} ↗</a>`));
   }
   status.appendChild(el("span", "", absNote));
-  if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "过线" : "待改"}`));
+  if (prev) status.appendChild(el("span", "", `上一版 v${prev.version} · ${prev.status === "pass" ? "合格" : "待改"}`));
   if (paper.source !== "html" && paper.source !== "pdf") {
     const retry = el("button", "linkish", "重新取正文");
     retry.type = "button";
@@ -5947,7 +5955,7 @@ async function renderCard() {
       submit.disabled = false; submit.textContent = "交新一版";
     };
     acts.appendChild(submit);
-    acts.appendChild(el("span", "hint", "草稿自动存在本机。没过线也会记一版，改了再交。"));
+    acts.appendChild(el("span", "hint", "草稿自动存在本机。没合格也会记一版，改了再交。"));
     form.appendChild(acts);
   }
 
@@ -5960,7 +5968,7 @@ async function renderCard() {
       sec.appendChild(el("p", `review-delta ${d > 0 ? "up" : d < 0 ? "down" : ""}`, d > 0 ? `比上一版多过 ${d} 条（${card.prev_passed} → ${r.passed}）` : d < 0 ? `比上一版少了 ${-d} 条` : `和上一版一样是 ${r.passed} 条`));
     }
     const head = el("div", "feedback-head");
-    head.appendChild(el("div", "", `<h3>${card.status === "pass" ? "过线" : "还差一点"} · v${card.version}</h3><p>${card.status === "pass" ? "这张卡记进了你的账本，会出现在矩阵里。" : esc(r.next_step)}</p>`));
+    head.appendChild(el("div", "", `<h3>${card.status === "pass" ? "合格" : "还差一点"} · v${card.version}</h3><p>${card.status === "pass" ? "这张卡记进了你的账本，会出现在矩阵里。" : esc(r.next_step)}</p>`));
     head.appendChild(el("div", "score-ring", `<span class="num">${r.passed}</span>/ ${r.total} 条`));
     sec.appendChild(head);
     const list = el("div", "rubric-list");
@@ -6034,16 +6042,16 @@ async function dailyBlock(seq) {
   try {
     d = await api("GET", `/api/daily?uid=${S.uid}`);
   } catch (e) {
-    box.appendChild(el("p", "panel-sub", `今日情报暂时取不到（如实说明）：${esc(e.message)}`));
+    box.appendChild(el("p", "panel-sub", `今日情报暂时取不到：${esc(e.message)}`));
     return box;
   }
   if (stale(seq)) return box;
   if (d.day) box.dataset.day = d.day;
   const dirName = d.direction && d.direction.name ? `按你的方向「${d.direction.name}」` : "按你的兴趣";
   const head = el("div", "daily-head");
-  head.innerHTML = `<div><p class="section-label">新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">挑几篇新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要原文，决定留还是过。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
+  head.innerHTML = `<div><p class="section-label">最近的新论文 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣最近的新论文</h3><p class="panel-sub">${esc(dirName)}的新论文。只看标题和摘要，决定留下还是跳过</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
   box.appendChild(head);
-  if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上（如实说明）：${esc(d.error)}`));
+  if (d.error) box.appendChild(el("div", "note-box", `arXiv 暂时连不上：${esc(d.error)}`));
   if (!d.items.length) {
     const reason = d.empty_reason;
     if (reason === "thin") {
@@ -6051,7 +6059,7 @@ async function dailyBlock(seq) {
       (d.channels || []).forEach((c) => {
         box.appendChild(el("p", "", `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)} ↗</a>`));
       });
-    } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "这个话题最近的都分拣完了。"));
+    } else if (reason === "exhausted") box.appendChild(el("p", "panel-sub", "本话题已分拣完毕。"));
     else if (reason === "upstream" || d.stale) box.appendChild(el("p", "panel-sub", `连不上来源，这是已缓存的候选。`));
     else if (reason === "no_topics") {
       const tip = el("p", "panel-sub", "先选一个方向，才知道给你推哪些论文。");
@@ -6088,7 +6096,7 @@ async function dailyBlock(seq) {
     row.appendChild(el("small", "", `${esc((it.authors || []).join(", "))} · ${esc(it.published || "")}`));
     const ctl = el("div", "triage-ctl");
     const why = el("input");
-    why.placeholder = "留下／跳过的理由（4–80 字）：碰到了什么 / 离你的问题多远";
+    why.placeholder = "留下／跳过的理由（4–80 字）：";
     why.maxLength = 80;
     let sending = false;
     const send = async (verdict) => {
@@ -6257,8 +6265,8 @@ async function paintEdges(seq, body) {
     ml.appendChild(li);
   });
   intro.appendChild(ml);
-  intro.appendChild(el("p", "section-label", `已证明 · ${proven.length}（来自账本，过线的作品自动进来，不能手改）`));
-  if (!proven.length) intro.appendChild(el("p", "form-note", "还没有。在「研读」交一张过线的阅读卡，这里就有第一条。"));
+  intro.appendChild(el("p", "section-label", `已证明 · ${proven.length}（来自账本，合格的作品自动进来，不能手改）`));
+  if (!proven.length) intro.appendChild(el("p", "form-note", "尚未在「研读」交过的合格阅读卡"));
   const pl = el("ul", "edge-list");
   proven.forEach((e) => pl.appendChild(el("li", "", `<span>${edgeChip(e)}</span>`)));
   intro.appendChild(pl);
