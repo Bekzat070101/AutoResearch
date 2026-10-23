@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONUNBUFFERED=1
+export PYTHONIOENCODING=utf-8   # 日志按 UTF-8 出去：日志服务按 UTF-8 读，中文不乱码
 export QIYAN_DB="${QIYAN_DB:-/tmp/qiyan.db}"
 python3 -V
 python3 - <<'PY'

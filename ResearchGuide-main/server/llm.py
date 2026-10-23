@@ -21,6 +21,7 @@ from pathlib import Path
 
 import budget
 import envfile
+import logs
 from limits import ReadLimitError, fetch, stream
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -198,7 +199,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
         return None
     metered = not cfg["own"]
     if metered and not budget.charge():
-        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
+        logs.emit({"llm": tag, "skipped": "budget"})
         return None
     key = cfg.get("key") or ""
     payload: dict = {
@@ -240,11 +241,11 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
             text = _clean_text((content or "").strip()) or None
     usage = data.get("usage") if isinstance(data, dict) else None
     usage = usage if isinstance(usage, dict) else {}  # usage 是列表时原来读 token 数就抛异常（Codex 复现）
-    print(json.dumps({
+    logs.emit({
         "llm": tag, "model": cfg["model"], "ok": bool(text), "ms": int((time.time() - t0) * 1000),
         "tokens": usage.get("total_tokens"), "error": err or None,
         "own": bool(cfg.get("own")),
-    }, ensure_ascii=False))
+    })
     return text
 
 
@@ -307,7 +308,7 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     if not _consent_ok(uid, override, cfg) or not cfg["enabled"]:
         return
     if not cfg["own"] and not budget.charge():  # 自己的 key 不扣团队预算
-        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
+        logs.emit({"llm": tag, "skipped": "budget"})
         return
     key = cfg.get("key") or ""
     payload: dict = {
@@ -369,8 +370,8 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
         err = f"network {type(exc).__name__}"
     if err and status is not None:
         status["finished"] = False  # 收到 stop 之后传输又出错：照样算没说完
-    print(json.dumps({
+    logs.emit({
         "llm": tag, "model": cfg["model"], "ok": pieces > 0,
         "ms": int((time.time() - t0) * 1000), "chunks": pieces, "error": err or None,
         "own": bool(cfg.get("own")),
-    }, ensure_ascii=False))
+    })

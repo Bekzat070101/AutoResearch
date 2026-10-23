@@ -6,6 +6,22 @@
 
 ---
 
+## [2026-10-23] [FIX] CI 上 pytest 的 /tmp/pytest-of-runner 不再被误判成 db_in_tmp
+
+- 变更内容：`store.db_blocked()` 只把 `/tmp/qiyan.db` 这类实例临时盘判成 `db_in_tmp`。GitHub Actions 的 `tmp_path` 在 `/tmp/pytest-of-runner/...`，里面用 `mnt/nas` 模拟挂盘，不能当临时盘，否则 `test_db_mount_gate` 两条全红（PR #29–#34 的检查都栽在这）。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/store.py
+- 决策来源：合入 PR #29–#34 时修检查失败
+- 登记人：邬程灿
+
+## [2026-10-23] [FIX] 日志统一走 server/logs.py：一行 JSON、写完就刷新、编码失败不再丢行
+
+- 变更内容：新增 `server/logs.py`：`line()` 给缺 ts 的行补北京时间，`emit()` 写一行 JSON 就 flush、任何异常都吞掉。server 里 30 处裸 `print(json.dumps(..., ensure_ascii=False))` 全换过去（main 6 / store 5 / admin 2 / arxiv 2 / llm 4 / account_store 10 / paper_collect 1），日志字段和内容一字不改，只换出口。修的三件事：① stdout 是 gbk 时编不出来的字符（例如「⚠️」）会抛 UnicodeEncodeError，那一条日志整条丢掉——它跑在请求中间件里，异常还会把这次请求变成 500；现在先按 stdout 自己的编码转成 `\uXXXX` 转义写法再写，行不丢、JSON 读回来还是原字符，也不会在同一个流里混进另一种编码。② 裸 `print` 走块缓冲，函数实例被冻结或回收时缓冲区里的日志根本不会出现；现在每行写完就 flush。③ 每条日志带 ts，SLS 里能排序、能对账。`tools/deploy/bootstrap` 加 `export PYTHONIOENCODING=utf-8`：现网日志固定按 UTF-8 出去。新增 `server/tests/test_logs.py`（gbk stdout 下不抛、行不丢、整行仍是同一种编码、坏 stdout 不外抛）。`server/admin.py` 顺手删掉换完之后不再用的 `import json`。合入时叠在 PR #29–#33 之上，CHANGELOG 各段都留。
+- 影响文档：docs/CHANGELOG.md
+- 影响模块：server/logs.py（新增）、server/main.py、server/store.py、server/admin.py、server/arxiv.py、server/llm.py、server/account_store.py、server/paper_collect.py、tools/deploy/bootstrap、server/tests/test_logs.py（新增）
+- 决策来源：陈旭（用户反馈「用户使用之后，日志不能正常显示」）
+- 登记人：陈旭
+
 ## [2026-10-22] [FEAT] 文献库接入 bioRxiv / medRxiv：元数据、今日、收集、打开、预热全链路
 
 - 变更内容：新增 `server/biorxiv.py`（照 `osf.py` 骨架）：官方 `api.biorxiv.org` details 接口取元数据与最新论文（分类过滤 + 本地关键词过滤，30 条/页翻页）；全文下载 JATS XML（`<sec><title>` 成行、`<table-wrap>` 抽表，契约同 `arxiv.parse_html`），取不到退摘要并按 `retry_after` 重试。内部 id 形如 `biorxiv:10.1101.2024.12.06.627082`（DOI 的 `/` 编码为 `.`，路径参数安全；bioRxiv 混用 10.1101 / 10.64898 前缀，都留在 id 里）。api 域名 1 秒串行锁、www 域名（Cloudflare 后面）3 秒单独锁，与 arXiv / OSF 分锁；多版本论文最新版 JATS 路径 404 时退回最早版路径。medRxiv 同一模块 `server` 参数即用（树上暂无临床节点，未挂话题）。`knowledge/arxiv_topics.json` 给 310 基础医学 9 个 thin 节点各追加一个 `bio-*` 话题（q-bio 仍是第一来源，biorxiv 补量；今日取每节点前 2 个话题所以两个来源都会打）。接线：`reading.topic_source`/`triage`、`main.py` 打开论文（库优先，缺则现场取并落库）与 `_paper_ref`、`paper_collect` 元数据与正文分支、`admin.papers_warm` 与 `paper_warm.py` 改走新的 `reading.warm_fetch` 按 id 前缀分派（顺带修掉 psyarxiv 论文在预热里永远失败的旧问题）、`interests.is_thin_topic`。收集加来源过滤：`collect(..., source=…)`、CLI `--source`、`POST /api/admin/papers/collect?source=…`（限 arxiv/osf/biorxiv/medrxiv），可强制只收某一来源的话题铺目录——q-bio 常常自己凑够 thin 定额，轮不到 biorxiv，服务器上铺 bioRxiv 目录靠这个开关（正文定额同样只数该来源）。前端 `app.js`：留文列表外链正则加 `biorxiv|medrxiv` 前缀（否则生成 arxiv 死链）、「在 arXiv 读」判断精确化（`/arxiv/i` 子串会把 biorxiv 误判）、卡片头与重试提示不再写死 arXiv 字样。测试 `server/tests/test_biorxiv.py` 16 例全离线。

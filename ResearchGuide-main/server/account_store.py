@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import logs
 import store
 from schemas import now_iso
 
@@ -213,7 +214,7 @@ def _set_aside_undecryptable(path: Path) -> None:
     if aside.exists():
         aside = path.with_name(f"{aside.name}-{os.getpid()}-{int(time.time())}")
     os.replace(path, aside)
-    print(json.dumps({"event": "account_store_set_aside", "to": aside.name}, ensure_ascii=False))
+    logs.emit({"event": "account_store_set_aside", "to": aside.name})
 
 
 def _dump_now() -> dict[str, Any]:
@@ -242,13 +243,12 @@ def _dump_now() -> dict[str, Any]:
                 _STATE["snapshot_users"] = len(payload["users"])
                 _STATE["snapshot_sessions"] = len(payload["sessions"])
                 _STATE["last_dump_at"] = time.time()
-            print(json.dumps({"event": "account_store_dump", "n": len(payload["users"]),
-                              "sessions": len(payload["sessions"]), "via": via}, ensure_ascii=False))
+            logs.emit({"event": "account_store_dump", "n": len(payload["users"]),
+                       "sessions": len(payload["sessions"]), "via": via})
             return {"ok": True, "n": len(payload["users"]), "via": via}
         except Exception as exc:
             note_error(type(exc).__name__)
-            print(json.dumps({"event": "account_store_dump_failed", "error": type(exc).__name__},
-                             ensure_ascii=False))
+            logs.emit({"event": "account_store_dump_failed", "error": type(exc).__name__})
             return {"ok": False, "reason": type(exc).__name__}
 
 
@@ -308,7 +308,7 @@ def hydrate_file() -> dict[str, Any]:
         payload = _decrypt(path.read_bytes())
     except Exception:
         note_error("invalid")
-        print(json.dumps({"event": "account_store_invalid", "via": "file"}, ensure_ascii=False))
+        logs.emit({"event": "account_store_invalid", "via": "file"})
         return {"skipped": "invalid"}
     with _STATE_LOCK:
         _STATE["file_saved_at"] = str(payload.get("saved_at") or "")
@@ -324,7 +324,7 @@ def fetch_oss_payload() -> dict[str, Any] | None:
         return _decrypt(blob)
     except Exception:
         note_error("invalid")
-        print(json.dumps({"event": "account_store_invalid", "via": "oss"}, ensure_ascii=False))
+        logs.emit({"event": "account_store_invalid", "via": "oss"})
         return None
 
 
@@ -335,8 +335,7 @@ def apply_oss_payload(payload: dict[str, Any]) -> dict[str, Any]:
             file_at = _STATE["file_saved_at"]
         if file_at and str(payload.get("saved_at") or "") <= file_at:
             # 本地文件副本更新（OSS 那次 put 失败过）：旧副本不往回灌，免得把已删的号复活
-            print(json.dumps({"event": "account_store_oss_stale", "oss": payload.get("saved_at"), "file": file_at},
-                             ensure_ascii=False))
+            logs.emit({"event": "account_store_oss_stale", "oss": payload.get("saved_at"), "file": file_at})
             return {"skipped": "older_than_file"}
         return _hydrate_logged(payload, "oss")
 
@@ -360,10 +359,9 @@ def _hydrate_logged(payload: dict[str, Any], via: str) -> dict[str, Any]:
         out = hydrate(payload)
     except Exception as exc:
         note_error(type(exc).__name__)
-        print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__},
-                         ensure_ascii=False))
+        logs.emit({"event": "account_store_hydrate_failed", "error": type(exc).__name__})
         return {"skipped": type(exc).__name__}
-    print(json.dumps({"event": "account_store_hydrated", "via": via, **out}, ensure_ascii=False))
+    logs.emit({"event": "account_store_hydrated", "via": via, **out})
     return {"ok": True, "via": via, **out}
 
 
@@ -403,7 +401,7 @@ def hydrate(payload: dict[str, Any]) -> dict[str, Any]:
     for uid, v in entered:
         store.set_prefs(uid, extra={"entered_at": v})
     for uid in collisions:
-        print(json.dumps({"event": "account_store_collision", "uid": uid}, ensure_ascii=False))
+        logs.emit({"event": "account_store_collision", "uid": uid})
     with _STATE_LOCK:
         _STATE["collisions"] = _STATE["collisions"] + collisions
         _STATE["snapshot_users"] = len(payload.get("users") or [])
@@ -515,6 +513,5 @@ def _get_oss() -> bytes | None:
     except Exception as exc:
         if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
             return None
-        print(json.dumps({"event": "account_store_oss_get_failed", "error": type(exc).__name__},
-                         ensure_ascii=False))
+        logs.emit({"event": "account_store_oss_get_failed", "error": type(exc).__name__})
         raise

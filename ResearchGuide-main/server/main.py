@@ -42,6 +42,7 @@ import catalog
 import curriculum
 import dialogue
 import llm
+import logs
 import mcp_curriculum
 import memory
 import onboarding
@@ -116,12 +117,12 @@ async def _hydrate_accounts_from_oss() -> None:
     done, _ = await asyncio.wait({job}, timeout=ACCOUNT_OSS_TIMEOUT)
     if not done:
         account_store.note_error("timeout")
-        print(json.dumps({"event": "account_store_oss_timeout", "seconds": ACCOUNT_OSS_TIMEOUT}, ensure_ascii=False))
+        logs.emit({"event": "account_store_oss_timeout", "seconds": ACCOUNT_OSS_TIMEOUT})
         return
     exc = job.exception()
     if exc is not None:
         account_store.note_error(type(exc).__name__)
-        print(json.dumps({"event": "account_store_hydrate_failed", "error": type(exc).__name__}, ensure_ascii=False))
+        logs.emit({"event": "account_store_hydrate_failed", "error": type(exc).__name__})
         return
     payload = job.result()
     if payload is not None:
@@ -144,7 +145,7 @@ async def _retry_init_db() -> None:
         try:
             await run_in_threadpool(store.init_db)
         except Exception as exc:
-            print(json.dumps({"event": "db_init_retry_failed", "error": type(exc).__name__}, ensure_ascii=False))
+            logs.emit({"event": "db_init_retry_failed", "error": type(exc).__name__})
     if account_store.enabled() and account_store.oss_enabled():
         await _hydrate_accounts_from_oss()
 
@@ -155,8 +156,7 @@ async def _lifespan(_app: FastAPI):
     _LIMITER = anyio.to_thread.current_default_thread_limiter()
     _LIMITER.total_tokens = THREADS
     if store.ephemeral():
-        print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
-                         ensure_ascii=False))
+        logs.emit({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"})
     if not store.DB_READY:
         task = asyncio.ensure_future(_retry_init_db())
         _BACKGROUND.add(task)
@@ -224,18 +224,17 @@ async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
     """删号那一刻还在跑的请求：写库被触发器拒绝 → 410，前端按「账号没了」处理。别的约束错误照旧是 500。"""
     if store.USER_DELETED in str(exc):
         return JSONResponse({"detail": "这个账号已经删除了"}, status_code=410)
-    print(json.dumps({"error": "integrity", "msg": str(exc)}, ensure_ascii=False))
+    logs.emit({"error": "integrity", "msg": str(exc)})
     return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
 def _log_request(request: Request, path: str, code: int, t0: float) -> None:
-    """逐请求一行 JSON，给函数计算 / SLS。pytest 多线程测登录时 print+flush 会和捕获器互相锁死，单测里不打。"""
+    """逐请求一行 JSON，给函数计算 / SLS。pytest 多线程测登录时写 stdout 会和捕获器互相锁死，单测里不打。"""
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
-    print(json.dumps({"event": "request", "path": path, "method": request.method, "code": code,
-                      "ms": int((time.time() - t0) * 1000),
-                      "uid": getattr(request.state, "uid", "") or ""},
-                     ensure_ascii=False), flush=True)
+    logs.emit({"event": "request", "path": path, "method": request.method, "code": code,
+               "ms": int((time.time() - t0) * 1000),
+               "uid": getattr(request.state, "uid", "") or ""})
 
 
 @app.middleware("http")

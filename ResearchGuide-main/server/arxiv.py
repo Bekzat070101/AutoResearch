@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import logs
 from limits import ReadLimitError, TTLCache, fetch
 from singleflight import SingleFlight
 
@@ -363,7 +364,7 @@ def _save_disk(aid: str, result: dict[str, Any]) -> None:
         tmp.write_text(body, encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
-        print(json.dumps({"warn": "paper_cache_write", "aid": aid}, ensure_ascii=False))
+        logs.emit({"warn": "paper_cache_write", "aid": aid})
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
@@ -461,7 +462,7 @@ def _fetch_fulltext(aid: str, hint: dict[str, Any] | None = None) -> dict[str, A
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
-        print(json.dumps({"warn": "paper_cache_write", "msg": "mkdir"}, ensure_ascii=False))
+        logs.emit({"warn": "paper_cache_write", "msg": "mkdir"})
     got = _cached(aid)
     if got is not None:
         return got

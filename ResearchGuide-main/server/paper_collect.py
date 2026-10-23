@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arxiv  # noqa: E402
 import biorxiv  # noqa: E402
 import interests  # noqa: E402
+import logs  # noqa: E402
 import osf  # noqa: E402
 import reading  # noqa: E402
 import store  # noqa: E402
@@ -27,7 +28,7 @@ class CollectError(Exception):
 
 
 def _log(payload: dict[str, Any]) -> None:
-    print(json.dumps({"event": "paper_collect", **payload}, ensure_ascii=False), flush=True)
+    logs.emit({"event": "paper_collect", **payload})
 
 
 def _pause() -> None:

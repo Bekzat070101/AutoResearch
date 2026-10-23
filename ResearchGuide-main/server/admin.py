@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gzip
 import hmac
-import json
 import os
 import sqlite3
 import time
@@ -17,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import auth
+import logs
 import store
 from schemas import now_iso
 
@@ -77,8 +77,7 @@ def make_backup() -> dict:
     dest_path = out_dir / name
     dest_path.write_bytes(blob)
     oss = _put_oss(name, blob)
-    print(json.dumps({"event": "backup", "ok": True, "bytes": len(blob), "object": name, "oss": oss},
-                     ensure_ascii=False))
+    logs.emit({"event": "backup", "ok": True, "bytes": len(blob), "object": name, "oss": oss})
     return {"ok": True, "bytes": len(blob), "object": name, "oss": oss, "integrity": "ok"}
 
 
@@ -118,7 +117,7 @@ def _put_oss(name: str, blob: bytes) -> str:
     except HTTPException:
         raise
     except Exception as exc:
-        print(json.dumps({"event": "backup", "ok": False, "error": type(exc).__name__}, ensure_ascii=False))
+        logs.emit({"event": "backup", "ok": False, "error": type(exc).__name__})
         raise HTTPException(502, f"OSS 上传失败：{type(exc).__name__}") from exc
 
 
