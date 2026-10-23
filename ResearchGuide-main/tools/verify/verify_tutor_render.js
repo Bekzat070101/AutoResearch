@@ -62,6 +62,8 @@ const el = (tag, cls, html) => {
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const toast = () => {};
 const S = { uid: "u1" };
+const store = {};
+const localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: (k) => { delete store[k]; } };
 let posted = null;
 let currentSess = null;
 function api(method, url, body) {
@@ -439,7 +441,87 @@ async function testShortDesktopPaperSpy() {
   }
 }
 
-testPaperScrollTargets().then(testPaperSpyRetryRace).then(testShortDesktopPaperSpy).then(() => {
+async function testTutorDraftPersistsAcrossRerender() {
+  const typed = "这一节想解决现有基准太窄的问题";
+  const key = "rg_tutor_u1_k1_2009.03300";
+  const quoteSlot = { qid: "q_claim_quote", type: "find_quote", status: "pass", last: "x" };
+  const baseSess = () => ({ status: "active", cur: 1, total: 8, slots: [{ ...quoteSlot }, { qid: "q_problem", type: "own", status: "open" }] });
+  const build = (aid) => tutorPanel({
+    aid, kitId: "k1",
+    scrollTo() {}, selection() { return ""; },
+    onPrefill() { return []; },
+    session: baseSess(),
+  });
+  const taOf = (b) => walk(b).find((c) => c.tagName === "TEXTAREA");
+  const sendOf = (b) => walk(b).find((c) => c.tagName === "BUTTON" && c.textContent === "作答" && typeof c.onclick === "function");
+  Object.keys(store).forEach((k) => { delete store[k]; });
+
+  const b1 = build("2009.03300");
+  const ta1 = taOf(b1);
+  ta1.value = typed;
+  ta1._on.input();
+  let saved = null;
+  try { saved = JSON.parse(store[key] || "null"); } catch (_) { saved = null; }
+  check(!!saved && saved.q_problem === typed && Object.keys(saved).length === 1, "作答草稿存进 rg_tutor_<uid>_k1_2009.03300", String(store[key]));
+  const dn = byClass(b1, "tutor-draft-note")[0];
+  check(!!dn && dn.hidden === false, "草稿提示可见");
+
+  const b2 = build("2009.03300");
+  check(taOf(b2) && taOf(b2).value === typed, "重建面板后作答框还原草稿", taOf(b2) && taOf(b2).value);
+  const b3 = build("2307.03172");
+  check(taOf(b3) && taOf(b3).value === "", "别的论文作答框是空的", taOf(b3) && taOf(b3).value);
+
+  const passSess = () => ({ ...baseSess(), cur: 2, slots: [{ ...quoteSlot }, { qid: "q_problem", status: "pass", last: typed }] });
+  store[key] = JSON.stringify({ q_problem: typed, q_other: "别的草稿" });
+  currentSess = passSess();
+  await sendOf(build("2009.03300")).onclick();
+  saved = JSON.parse(store[key] || "null");
+  check(!!saved && !("q_problem" in saved) && saved.q_other === "别的草稿", "交卷过线后删掉这题草稿、留别的", String(store[key]));
+
+  store[key] = JSON.stringify({ q_problem: typed });
+  currentSess = passSess();
+  await sendOf(build("2009.03300")).onclick();
+  check(!(key in store), "没有别的草稿时整个键删掉", String(store[key]));
+
+  store[key] = JSON.stringify({ q_problem: typed });
+  currentSess = { ...baseSess(), slots: [{ ...quoteSlot }, { qid: "q_problem", type: "own", status: "retry", last: typed }] };
+  await sendOf(build("2009.03300")).onclick();
+  saved = JSON.parse(store[key] || "null");
+  check(!!saved && saved.q_problem === typed, "判 retry 时草稿留着", String(store[key]));
+}
+
+async function testResumeTutorWithoutModel() {
+  const slots = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ qid: "q" + i, station: "method", type: "own", question: "q" + i, status: i < 4 ? "pass" : "open", last: "" }));
+  slots[4] = { qid: "q_evidence", station: "method", type: "number", question: "找数字句", status: "pending", last: "数字句", note: "模型暂时用不了：作答先存着，稍后可重判" };
+  const sess = { status: "active", rev: 1, voice: "rules", notice: "", cur: 4, total: 8, slots, stations: [] };
+  const run = async (reply) => {
+    const h = paperHarness({ tutor: () => Promise.resolve(reply) });
+    await h.renderCard();
+    const btn = walk(h.$app).find((c) => c.tagName === "BUTTON" && c.textContent === "带读答题");
+    const bench = walk(h.$app).find((c) => h.sel(c, ".bench"));
+    const panel = walk(h.$app).find((c) => h.sel(c, ".tutor-panel"));
+    return { btn, bench, panel };
+  };
+
+  let v = await run({ session: sess, can_grade: false, in_kit: true });
+  check(!!v.btn && v.btn.disabled === false, "有会话没模型：「带读答题」可点");
+  check(!!v.bench && v.bench.dataset.mode === "tutor", "有会话没模型：进带读", v.bench && v.bench.dataset.mode);
+  const prog = v.panel && walk(v.panel).find((c) => (c.className || "").split(/\s+/).includes("tutor-prog"));
+  check(!!prog && prog.textContent === "4/8", "有会话没模型：进度 4/8", prog && prog.textContent);
+  const notice = v.panel && walk(v.panel).find((c) => (c.className || "").split(/\s+/).includes("tutor-notice"));
+  check(!!notice && notice.textContent === "模型暂时用不了：可以看题、改答案、存草稿；现在作答会先存着，模型恢复后点「重判」。", "有会话没模型：显示模型不可用提示", notice && notice.textContent);
+  check(!!v.panel && walk(v.panel).some((c) => c.tagName === "BUTTON" && c.textContent === "重判"), "有会话没模型：有「重判」");
+
+  v = await run({ session: null, can_grade: false, in_kit: true });
+  check(!!v.btn && v.btn.disabled === true, "没会话没模型：「带读答题」禁用");
+  check(!!v.btn && v.btn.title === "现在用不了模型（没配 / 没同意隐私说明 / 今天额度用完），先写阅读卡", "没会话没模型：原提示", v.btn && v.btn.title);
+  check(!!v.bench && v.bench.dataset.mode === "card", "没会话没模型：进阅读卡", v.bench && v.bench.dataset.mode);
+
+  v = await run({ session: null, can_grade: true, in_kit: true });
+  check(!!v.btn && v.btn.disabled === false, "没会话有模型：「带读答题」可点");
+}
+
+testPaperScrollTargets().then(testPaperSpyRetryRace).then(testShortDesktopPaperSpy).then(testTutorDraftPersistsAcrossRerender).then(testResumeTutorWithoutModel).then(() => {
   if (fails) {
     console.log("失败 " + fails + " 项");
     process.exit(1);

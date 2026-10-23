@@ -5176,11 +5176,13 @@ function pickBenchMode({ saved, session, hasDraft, hasCard, passedCount, canGrad
   return "tutor";
 }
 
-function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
+function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session, canGrade }) {
   const box = el("section", "tutor-panel");
   box.hidden = false;
   let sess = session || null;
-  const draft = {};
+  const draftKey = `rg_tutor_${S.uid || "anon"}_${kitId}_${aid}`;
+  let draft = {}; try { draft = JSON.parse(localStorage.getItem(draftKey) || "{}") || {}; } catch (_) { draft = {}; }
+  const saveDraft = () => { try { const keep = Object.fromEntries(Object.entries(draft).filter(([, v]) => String(v || "").trim())); if (Object.keys(keep).length) localStorage.setItem(draftKey, JSON.stringify(keep)); else localStorage.removeItem(draftKey); } catch (_) { /* 存不了就只留在内存 */ } };
   let focusQid = null;
   const paint = () => {
     box.innerHTML = "";
@@ -5201,6 +5203,11 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
     prog.textContent = `${sess.cur || 0}/${sess.total || 0}`;
     head.appendChild(prog);
     box.appendChild(head);
+    if (canGrade === false) {
+      const off = el("p", "tutor-notice");
+      off.textContent = "模型暂时用不了：可以看题、改答案、存草稿；现在作答会先存着，模型恢复后点「重判」。";
+      box.appendChild(off);
+    }
     if (sess.notice) {
       const n = el("p", "tutor-notice");
       n.textContent = sess.notice;
@@ -5276,8 +5283,12 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
       ? "用你自己的话写 10–160 字，可以粘贴"
       : "从左边原文复制一句粘贴进来，或选中后点「填进作答框」";
     ta.value = draft[sl.qid] ?? sl.last ?? sl.answer ?? "";
-    ta.addEventListener("input", () => { draft[sl.qid] = ta.value; send.disabled = !ta.value.trim(); });
+    ta.addEventListener("input", () => { draft[sl.qid] = ta.value; saveDraft(); dn.hidden = !ta.value.trim(); send.disabled = !ta.value.trim(); });
     box.appendChild(ta);
+    const dn = el("p", "tutor-draft-note");
+    dn.hidden = !(draft[sl.qid] && draft[sl.qid] !== (sl.last || sl.answer || ""));
+    dn.textContent = "草稿已自动保存在这台设备，换页回来还在";
+    box.appendChild(dn);
     const acts = el("div", "tutor-acts");
     if (sl.type === "find_quote" || sl.type === "number" || sl.type === "limitation") {
       const useSel = el("button", "linkish", "填进作答框");
@@ -5311,7 +5322,7 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
       rg.onclick = () => turnTutor(sl.qid, sl.last || ta.value, false, true);
       acts.appendChild(rg);
     }
-    box.fillAnswer = (text) => { ta.value = text || ""; draft[sl.qid] = ta.value; send.disabled = !ta.value.trim(); };
+    box.fillAnswer = (text) => { ta.value = text || ""; draft[sl.qid] = ta.value; saveDraft(); send.disabled = !ta.value.trim(); };
     box.appendChild(acts);
     if (sl.note) {
       const note = el("p", "form-note");
@@ -5367,6 +5378,8 @@ function tutorPanel({ aid, kitId, scrollTo, selection, onPrefill, session }) {
         uid: S.uid, kit: kitId, qid, answer, skip: !!skip, rev: sess ? sess.rev : 0, regrade: !!regrade,
       });
       sess = out.session;
+      const done = (sess.slots || []).find((s) => s.qid === qid);
+      if (done && ["pass", "pending", "skipped"].includes(done.status)) { delete draft[qid]; saveDraft(); }
       if (focusQid) {
         const focused = (sess.slots || []).find((s) => s.qid === focusQid);
         if (!focused || !["open", "pending", "retry"].includes(focused.status)) focusQid = null;
@@ -5530,6 +5543,7 @@ async function renderCard() {
     if (!isCurrent()) return;
   }
   const canGrade = !!(tutorMeta && tutorMeta.can_grade);
+  const hasSession = !!(tutorMeta && tutorMeta.session && tutorMeta.session.status);
   const inKit = !tutorMeta || tutorMeta.in_kit !== false;
   const modeKey = `rg_mode_${S.uid || "anon"}_${kitId}_${aid}`;
   let savedMode = "";
@@ -5548,10 +5562,12 @@ async function renderCard() {
   const tabCard = el("button", "linkish", "或：写阅读卡");
   tabCard.type = "button";
   tabCard.dataset.mode = "card";
-  if (!canGrade) {
+  if (!canGrade && !hasSession) {
     tabTutor.disabled = true;
     tabTutor.title = "现在用不了模型（没配 / 没同意隐私说明 / 今天额度用完），先写阅读卡";
     if (mode === "tutor") mode = "card";
+  } else if (!canGrade) {
+    tabTutor.title = "模型暂时用不了：能看进度、改答案、存草稿；作答会先存着，模型恢复后点「重判」";
   }
   if (!showCard) {
     tabCard.disabled = true;
@@ -5731,6 +5747,7 @@ async function renderCard() {
       return alts;
     },
     session: tutorMeta && tutorMeta.session,
+    canGrade,
   });
   fillChip.onclick = () => {
     const got = readSelection();

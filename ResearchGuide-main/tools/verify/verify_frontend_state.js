@@ -1508,7 +1508,10 @@ async function r9ApiBodyTimeout() {
     const env = r9LoginEnv((url, opt) => { fetches.push(url); return Promise.resolve(r9HangRes(opt)); });
     env.renderLogin();
     const btn = env.btn("登录");
-    const [u, p] = btn.parent.children;
+    // 登录表单里多了邀请码框（#28），按 aria-label 找用户名/密码框，不按位置
+    const kids = [...btn.parent.children];
+    const u = kids.find((x) => (x.attrs || {})["aria-label"] === "用户名");
+    const p = kids.find((x) => (x.attrs || {})["aria-label"] === "密码");
     u.value = "xiaobei"; p.value = "pw123456";
     let done = false;
     btn.onclick().then(() => { done = true; });

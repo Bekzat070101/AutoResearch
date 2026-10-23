@@ -494,3 +494,11 @@ def test_read_list_zh_first_and_search_placeholder():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     assert "kp-en" in js
     assert "搜论文（arXiv 只认英文关键词）" in js
+
+
+def test_tutor_draft_key_and_resume_gate_present():
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert 'rg_tutor_${S.uid || "anon"}_${kitId}_${aid}' in js
+    assert "tutor-draft-note" in js
+    assert "if (!canGrade && !hasSession) {" in js
+    assert "  if (!canGrade) {\n    tabTutor.disabled = true;" not in js
